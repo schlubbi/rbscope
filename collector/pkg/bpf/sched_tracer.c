@@ -1,3 +1,5 @@
+//go:build ignore
+
 // rbscope BPF program: Off-CPU tracking via sched_switch tracepoint
 //
 // When a tracked thread goes off-CPU we record the timestamp. When it

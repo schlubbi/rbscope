@@ -199,11 +199,27 @@ func buildExporters(logger *slog.Logger) ([]collector.Exporter, error) {
 		switch strings.TrimSpace(name) {
 		case "pyroscope":
 			logger.Info("enabling pyroscope exporter", "url", flagPyroscopeURL)
-			// Pyroscope exporter is configured but not wired as an
-			// Exporter interface implementation yet—push is done at
-			// the flush boundary via PprofBuilder.
+			exporters = append(exporters, export.NewPyroscopePushExporter(export.PyroscopePushConfig{
+				ServerURL:  flagPyroscopeURL,
+				AppName:    "rbscope.cpu",
+				FlushEvery: 10 * time.Second,
+				Logger:     logger,
+			}))
 		case "datadog":
 			logger.Info("enabling datadog exporter", "url", flagDatadogURL)
+			apiKey := os.Getenv("DD_API_KEY")
+			if apiKey == "" {
+				return nil, fmt.Errorf("DD_API_KEY environment variable required for datadog exporter")
+			}
+			exporters = append(exporters, export.NewDatadogExporter(export.DatadogConfig{
+				IntakeURL:  flagDatadogURL,
+				APIKey:     apiKey,
+				Service:    os.Getenv("DD_SERVICE"),
+				Env:        os.Getenv("DD_ENV"),
+				Version:    os.Getenv("DD_VERSION"),
+				FlushEvery: 60 * time.Second,
+				Logger:     logger,
+			}))
 		case "otlp":
 			logger.Info("enabling otlp exporter", "endpoint", flagOTLPEndpoint)
 		case "file":

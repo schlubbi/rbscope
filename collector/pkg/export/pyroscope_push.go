@@ -2,6 +2,7 @@ package export
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -89,9 +90,20 @@ func (e *PyroscopePushExporter) Export(_ context.Context, event any) error {
 		return nil
 	}
 
+	// Propagate trace_id and span_id as pprof labels for trace↔profile linking.
+	// This enables Grafana/Pyroscope to show "view flame graph" on Jaeger traces.
+	labels := make(map[string][]string)
+	if traceID := formatHex(sample.TraceID[:]); traceID != "" {
+		labels["trace_id"] = []string{traceID}
+	}
+	if spanID := formatHex(sample.SpanID[:]); spanID != "" {
+		labels["span_id"] = []string{spanID}
+	}
+
 	e.builder.Sample = append(e.builder.Sample, &profile.Sample{
 		Location: locs,
 		Value:    []int64{1, 10000000}, // 1 sample, 10ms cpu
+		Label:    labels,
 	})
 	return nil
 }
@@ -213,4 +225,14 @@ func hashName(s string) uint64 {
 		h *= 1099511628211
 	}
 	return h
+}
+
+// formatHex returns the hex string of b, or empty string if all zeros.
+func formatHex(b []byte) string {
+	for _, v := range b {
+		if v != 0 {
+			return hex.EncodeToString(b)
+		}
+	}
+	return ""
 }

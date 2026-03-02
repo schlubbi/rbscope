@@ -1,3 +1,5 @@
+//go:build ignore
+
 // rbscope BPF program: Kernel I/O correlation via syscall tracepoints
 //
 // Traces read/write/sendto/recvfrom/connect syscalls and correlates

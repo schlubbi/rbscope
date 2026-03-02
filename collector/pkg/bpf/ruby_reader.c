@@ -1,3 +1,5 @@
+//go:build ignore
+
 // rbscope BPF program: Ruby USDT probe reader
 //
 // Attaches as uprobe to rbscope's USDT probe sites in the target Ruby
