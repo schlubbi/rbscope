@@ -45,7 +45,7 @@ func main() {
 		Short: "eBPF-based Ruby profiling collector",
 	}
 
-	root.AddCommand(runCmd(), captureCmd(), versionCmd())
+	root.AddCommand(runCmd(), captureCmd(), demoCmd(), versionCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -214,6 +214,80 @@ func buildExporters(logger *slog.Logger) ([]collector.Exporter, error) {
 	}
 
 	return exporters, nil
+}
+
+// demo flags
+var (
+	flagDemoPyroscopeURL string
+	flagDemoAppName      string
+	flagDemoFreq         int
+	flagDemoHealthPort   int
+)
+
+func demoCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "demo",
+		Short: "Run with simulated Ruby profiling data (no BPF needed)",
+		Long: `Generates realistic Ruby/Rails stack samples and pushes them to Pyroscope.
+Use this to test the full pipeline on any OS — no Linux, no CAP_BPF, no real Ruby process required.`,
+		RunE: runDemo,
+	}
+
+	f := cmd.Flags()
+	f.StringVar(&flagDemoPyroscopeURL, "pyroscope-url", "http://localhost:4040", "Pyroscope server URL")
+	f.StringVar(&flagDemoAppName, "app-name", "rbscope-demo{service=rails,env=development}", "Application name in Pyroscope")
+	f.IntVar(&flagDemoFreq, "frequency", 99, "Simulated sampling frequency in Hz")
+	f.IntVar(&flagDemoHealthPort, "health-port", 8080, "Health/metrics HTTP port")
+
+	return cmd
+}
+
+func runDemo(_ *cobra.Command, _ []string) error {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	logger.Info("starting demo mode",
+		"frequency_hz", flagDemoFreq,
+		"pyroscope_url", flagDemoPyroscopeURL,
+		"app_name", flagDemoAppName,
+	)
+
+	simBPF := collector.NewSimBPF(flagDemoFreq)
+
+	pyroExporter := export.NewPyroscopePushExporter(export.PyroscopePushConfig{
+		ServerURL:  flagDemoPyroscopeURL,
+		AppName:    flagDemoAppName,
+		SymbolMap:  collector.SimStackNames,
+		FlushEvery: 10 * time.Second,
+		Logger:     logger,
+	})
+
+	cfg := collector.Config{
+		FrequencyHz: flagDemoFreq,
+		Exporters:   []collector.Exporter{pyroExporter},
+		Logger:      logger,
+	}
+
+	c := collector.New(cfg, simBPF)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go serveHealth(ctx, logger)
+
+	if err := c.Start(ctx); err != nil {
+		return fmt.Errorf("start collector: %w", err)
+	}
+	defer func() { _ = c.Stop() }()
+
+	// Attach a fake PID to start generating events.
+	if err := c.AttachPID(1); err != nil {
+		return err
+	}
+
+	logger.Info("demo running — simulated Ruby profiles streaming to Pyroscope (Ctrl+C to stop)")
+	<-ctx.Done()
+	logger.Info("shutting down demo")
+	return nil
 }
 
 func serveHealth(ctx context.Context, logger *slog.Logger) {

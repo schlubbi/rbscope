@@ -10,6 +10,3 @@ gem "rack-test", group: :test
 gem "opentelemetry-sdk"
 gem "opentelemetry-exporter-otlp"
 gem "opentelemetry-instrumentation-rack"
-
-# Pyroscope for continuous flame graphs (Path B)
-gem "pyroscope"

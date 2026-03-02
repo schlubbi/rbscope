@@ -38,7 +38,47 @@ rbscope modernizes this vision for Ruby 4.0, CO-RE eBPF, OTLP profiling, and Kub
 
 ## Status
 
-🚧 Planning phase — see docs/ for the full implementation plan.
+🚧 Early development — the core components work end-to-end:
+
+- ✅ Rust gem builds and passes all tests (32 Ruby + 4 Rust)
+- ✅ Go collector builds and passes all tests (12 tests, race-clean)
+- ✅ Standalone capture → speedscope flame graph
+- ✅ OTel traces → Jaeger with rich child spans
+- ✅ Demo mode: simulated profiles → Pyroscope (no BPF needed)
+
+## Quick Start
+
+**Prerequisites:** Docker and Docker Compose.
+
+```bash
+# Start the full demo stack
+make demo-up
+
+# Run smoke tests (waits for services, then verifies all paths)
+make smoke-test
+
+# Open the UIs:
+#   Test app:   http://localhost:3000/slow
+#   Jaeger UI:  http://localhost:16686
+#   Pyroscope:  http://localhost:4040
+
+# Tear down
+make demo-down
+```
+
+No Codespace, no special Linux capabilities, no Ruby or Go install needed — everything runs in containers.
+
+### Unit Tests (no Docker)
+
+```bash
+make test-gem        # needs Ruby + Rust
+make test-collector  # needs Go
+make test-all        # both
+```
+
+### Codespace / Dev Container
+
+Open this repo in any [GitHub Codespace](https://github.com/features/codespaces) or VS Code dev container — the `.devcontainer/devcontainer.json` installs Ruby, Rust, Go, and Docker automatically.
 
 ## License
 

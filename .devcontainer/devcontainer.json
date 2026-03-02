@@ -1,0 +1,27 @@
+{
+  "name": "rbscope",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/devcontainers/features/go:1": { "version": "1.24" },
+    "ghcr.io/devcontainers/features/rust:1": { "version": "latest" },
+    "ghcr.io/devcontainers/features/ruby:1": { "version": "3.3" }
+  },
+  "postCreateCommand": "cd gem && bundle install && cd ../collector && go mod download",
+  "forwardPorts": [3000, 4040, 8080, 16686],
+  "portsAttributes": {
+    "3000": { "label": "Test App" },
+    "4040": { "label": "Pyroscope" },
+    "8080": { "label": "Collector Health" },
+    "16686": { "label": "Jaeger UI" }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "golang.go",
+        "rebornix.ruby"
+      ]
+    }
+  }
+}
