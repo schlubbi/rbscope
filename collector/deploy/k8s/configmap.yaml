@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rbscope-collector
+  namespace: rbscope
+  labels:
+    app: rbscope-collector
+data:
+  RBSCOPE_FREQUENCY: "19"
+  RBSCOPE_EXPORT: "pyroscope"
+  RBSCOPE_PYROSCOPE_URL: "http://pyroscope:4040"
+  RBSCOPE_DISCOVERY_INTERVAL: "5s"
+  RBSCOPE_DEEP_CAPTURE_ENABLED: "false"

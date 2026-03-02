@@ -1,0 +1,80 @@
+syntax = "proto3";
+package rbscope;
+option go_package = "github.com/schlubbi/rbscope/collector/pkg/export/rbscopepb";
+
+// Top-level capture file
+message Capture {
+  CaptureHeader header = 1;
+  repeated StackFrame frames = 2;        // frame string table
+  repeated Sample samples = 3;           // stack samples
+  repeated SpanEvent spans = 4;          // OTel span events
+  repeated IOEvent io_events = 5;        // kernel I/O events
+  repeated AllocationSample allocations = 6;
+  repeated SchedEvent sched_events = 7;  // off-CPU events
+}
+
+message CaptureHeader {
+  uint32 version = 1;
+  string service_name = 2;
+  string hostname = 3;
+  uint32 pid = 4;
+  uint64 start_time_ns = 5;
+  uint64 end_time_ns = 6;
+  uint32 sample_frequency_hz = 7;
+}
+
+message StackFrame {
+  uint32 id = 1;
+  string function_name = 2;
+  string file_name = 3;
+  uint32 line_number = 4;
+}
+
+message Sample {
+  uint64 timestamp_ns = 1;
+  uint32 thread_id = 2;
+  repeated uint32 frame_ids = 3;  // stack frames, leaf first
+  OTelContext otel_context = 4;    // optional trace correlation
+}
+
+message SpanEvent {
+  uint64 timestamp_ns = 1;
+  uint64 duration_ns = 2;
+  string operation = 3;
+  string component = 4;
+  OTelContext otel_context = 5;
+  repeated uint32 frame_ids = 6;
+}
+
+message IOEvent {
+  uint64 timestamp_ns = 1;
+  uint32 thread_id = 2;
+  string syscall = 3;             // "read", "write", "sendto", etc.
+  int32 fd = 4;
+  uint64 bytes = 5;
+  uint64 latency_ns = 6;
+  uint32 associated_stack_id = 7;  // links to most recent Sample
+  string fd_info = 8;             // resolved: "tcp:10.0.0.1:3306" or "file:/tmp/x"
+}
+
+message AllocationSample {
+  uint64 timestamp_ns = 1;
+  uint32 thread_id = 2;
+  string object_type = 3;
+  uint64 size_bytes = 4;
+  repeated uint32 frame_ids = 5;
+}
+
+message SchedEvent {
+  uint64 timestamp_ns = 1;
+  uint32 thread_id = 2;
+  uint64 off_cpu_ns = 3;
+  uint32 associated_stack_id = 4;
+}
+
+message OTelContext {
+  bytes trace_id = 1;   // 16 bytes
+  bytes span_id = 2;    // 8 bytes
+  string service = 3;
+  string operation = 4;
+}

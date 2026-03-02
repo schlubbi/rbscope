@@ -1,0 +1,41 @@
+# frozen_string_literal: true
+
+require "bundler/gem_tasks"
+require "rake/testtask"
+require "rb_sys/extensiontask"
+
+GEMSPEC = Gem::Specification.load("rbscope.gemspec")
+
+RbSys::ExtensionTask.new("rbscope", GEMSPEC) do |ext|
+  ext.lib_dir = "lib/rbscope"
+end
+
+Rake::TestTask.new(:test) do |t|
+  t.libs << "test"
+  t.libs << "lib"
+  t.test_files = FileList["test/**/test_*.rb"]
+  t.deps << :compile
+end
+
+desc "Run clippy lints on Rust code"
+task :clippy do
+  Dir.chdir("ext/rbscope") do
+    sh "cargo clippy -- -D warnings"
+  end
+end
+
+desc "Run cargo audit on Rust dependencies"
+task :audit do
+  Dir.chdir("ext/rbscope") do
+    sh "cargo audit"
+  end
+end
+
+desc "Run Rust unit tests"
+task :cargo_test do
+  Dir.chdir("ext/rbscope") do
+    sh "cargo test"
+  end
+end
+
+task default: %i[clobber compile test]

@@ -1,0 +1,18 @@
+[package]
+name = "rbscope"
+version = "0.1.0"
+edition = "2021"
+authors = ["Stefan Jöst"]
+license = "MIT"
+description = "Native Rust extension for rbscope Ruby profiler"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+magnus = { version = "0.7", features = ["rb-sys"] }
+rb-sys = { version = "0.9", features = ["stable-api-compiled-fallback"] }
+
+[dev-dependencies]
+proptest = "1"

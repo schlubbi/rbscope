@@ -1,0 +1,29 @@
+# Rust build artifacts
+gem/target/
+gem/ext/rbscope/target/
+
+# Ruby build artifacts
+gem/tmp/
+gem/lib/rbscope/rbscope.bundle
+gem/lib/rbscope/rbscope.so
+gem/lib/rbscope/*.bundle
+gem/lib/rbscope/*.so
+gem/pkg/
+*.gem
+
+# Cargo lock in library crate (convention: not committed for libs)
+# But we commit it for reproducible builds of the extension
+# gem/Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Bundle
+gem/.bundle/

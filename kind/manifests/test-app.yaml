@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-rails-app
+  namespace: rbscope
+  labels:
+    app: test-rails-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: test-rails-app
+  template:
+    metadata:
+      labels:
+        app: test-rails-app
+    spec:
+      containers:
+        - name: test-rails-app
+          image: test-rails-app:latest
+          ports:
+            - containerPort: 3000
+              protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-rails-app
+  namespace: rbscope
+  labels:
+    app: test-rails-app
+spec:
+  type: ClusterIP
+  selector:
+    app: test-rails-app
+  ports:
+    - port: 3000
+      targetPort: 3000
+      protocol: TCP

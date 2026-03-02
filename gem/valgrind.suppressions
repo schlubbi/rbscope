@@ -1,0 +1,39 @@
+# Ruby VM known false positives for Valgrind.
+# These are well-documented benign behaviors in the Ruby interpreter
+# that trigger Valgrind warnings but are not actual bugs.
+#
+# Use with: valgrind --suppressions=valgrind.suppressions ruby ...
+
+{
+   ruby_gc_mark_locations
+   Memcheck:Cond
+   ...
+   fun:gc_mark_locations
+   ...
+}
+
+{
+   ruby_gc_mark_children
+   Memcheck:Value8
+   ...
+   fun:gc_mark_children
+   ...
+}
+
+{
+   ruby_thread_start
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:ruby_init
+   ...
+}
+
+{
+   ruby_objspace_malloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:objspace_xmalloc0
+   ...
+}

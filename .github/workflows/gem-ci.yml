@@ -1,0 +1,85 @@
+name: Gem CI
+
+on:
+  push:
+    paths: ['gem/**']
+  pull_request:
+    paths: ['gem/**']
+
+defaults:
+  run:
+    working-directory: gem
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ['3.3', '3.4', 'head']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+          cargo-cache: true
+      - name: Build and test
+        run: bundle exec rake clobber compile test
+      - name: Rust unit tests
+        run: cd ext/rbscope && cargo test
+      - name: Clippy
+        run: cd ext/rbscope && cargo clippy -- -D warnings
+
+  valgrind:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          cargo-cache: true
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: Build (debug)
+        run: RBSCOPE_PROFILE=dev bundle exec rake compile
+      - name: Test under valgrind
+        run: |
+          valgrind --tool=memcheck --leak-check=full --track-origins=yes \
+            --suppressions=valgrind.suppressions \
+            --error-exitcode=1 \
+            ruby -Ilib -Iext -e 'require "rbscope"; Rbscope.start(frequency: 99); sleep 1; Rbscope.stop'
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, thread]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          cargo-cache: true
+          rustup-toolchain: nightly
+      - name: Test with ${{ matrix.sanitizer }} sanitizer
+        run: |
+          RBSCOPE_RUSTFLAGS="-Zsanitizer=${{ matrix.sanitizer }}" \
+          RBSCOPE_PROFILE=dev \
+          bundle exec rake clobber compile test
+        env:
+          RUSTFLAGS: "-Zsanitizer=${{ matrix.sanitizer }}"
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: miri
+      - name: Run Miri
+        run: cd ext/rbscope && cargo +nightly miri test

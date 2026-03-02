@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: rbscope-collector
+  namespace: rbscope
+  labels:
+    app: rbscope-collector
+spec:
+  selector:
+    matchLabels:
+      app: rbscope-collector
+  template:
+    metadata:
+      labels:
+        app: rbscope-collector
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: rbscope-collector
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: rbscope-collector
+          image: rbscope-collector:latest
+          securityContext:
+            privileged: false
+            capabilities:
+              add:
+                - BPF
+                - PERFMON
+                - SYS_PTRACE
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: debugfs
+              mountPath: /sys/kernel/debug
+              readOnly: true
+            - name: proc
+              mountPath: /proc
+              readOnly: true
+          envFrom:
+            - configMapRef:
+                name: rbscope-collector
+      volumes:
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+            type: Directory
+        - name: proc
+          hostPath:
+            path: /proc
+            type: Directory

@@ -1,0 +1,27 @@
+name: Fuzz Nightly
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # 4am UTC daily
+  workflow_dispatch: {}
+
+jobs:
+  fuzz-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      - name: Fuzz stack serialization
+        run: |
+          cd gem/ext/rbscope
+          cargo +nightly fuzz run stack_round_trip -- -max_total_time=300
+        continue-on-error: true
+      - name: Upload corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus
+          path: gem/ext/rbscope/fuzz/corpus/
+          retention-days: 30
