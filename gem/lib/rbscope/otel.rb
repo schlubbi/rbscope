@@ -84,17 +84,12 @@ module Rbscope
     private
 
     def export_span(span_data)
-      # Extract span metadata.
-      # In Phase 1 stubs, the USDT probe is a no-op.
-      # When real probes are wired (Phase 1.2), this data flows
-      # through to the eBPF collector via uprobe.
-      _trace_id = span_data.hex_trace_id
-      _span_id = span_data.hex_span_id
-      _operation = span_data.name
-      _duration_ns = ((span_data.end_timestamp - span_data.start_timestamp) * 1_000_000_000).to_i
+      trace_id = span_data.hex_trace_id
+      span_id = span_data.hex_span_id
+      operation = span_data.name
+      duration_ns = ((span_data.end_timestamp - span_data.start_timestamp) * 1_000_000_000).to_i
 
-      # The Native.fire_ruby_span would be called here once wired.
-      # For now, just count it.
+      Rbscope::Native.fire_span(trace_id, span_id, operation, duration_ns)
     end
   end
 end
