@@ -262,9 +262,51 @@ func (e *DatadogExporter) resetProfile() {
 }
 
 func (e *DatadogExporter) resolveStack(sample *collector.RubySampleEvent) []*profile.Location {
-	names, ok := e.cfg.SymbolMap[sample.StackID]
+	// Parse inline format v2 stack data from the BPF event
+	frames := collector.ParseInlineStack(sample.StackData)
+	if len(frames) == 0 {
+		// Fall back to demo-mode symbolMap if no inline data
+		if e.cfg.SymbolMap != nil {
+			return e.resolveFromSymbolMap(sample)
+		}
+		return nil
+	}
+
+	locs := make([]*profile.Location, 0, len(frames))
+	for _, frame := range frames {
+		name := frame.Label
+		if name == "" {
+			name = "<unknown>"
+		}
+		filename := frame.Path
+		line := int64(frame.Line)
+
+		addr := hashName(name + filename)
+		loc, exists := e.locMap[addr]
+		if !exists {
+			fn := e.getOrCreateFunc(name)
+			fn.Filename = filename
+			e.locID++
+			loc = &profile.Location{
+				ID:      e.locID,
+				Address: addr,
+				Line: []profile.Line{
+					{Function: fn, Line: line},
+				},
+			}
+			e.locMap[addr] = loc
+			e.builder.Location = append(e.builder.Location, loc)
+		}
+		locs = append(locs, loc)
+	}
+	return locs
+}
+
+// resolveFromSymbolMap resolves stacks using pre-loaded symbol names (demo mode).
+func (e *DatadogExporter) resolveFromSymbolMap(sample *collector.RubySampleEvent) []*profile.Location {
+	names, ok := e.cfg.SymbolMap[sample.StackDataLen] // reuse StackDataLen as stack ID for demo
 	if !ok {
-		names = []string{fmt.Sprintf("ruby_frame_0x%x", sample.StackID)}
+		return nil
 	}
 
 	locs := make([]*profile.Location, 0, len(names))

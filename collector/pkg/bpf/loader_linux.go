@@ -3,8 +3,10 @@
 package bpf
 
 import (
+	"bufio"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -69,10 +71,11 @@ func (r *RealBPF) Load() error {
 }
 
 // AttachPID attaches a uprobe to the rbscope shared library mapped into the
-// target process.
+// target process. It scans /proc/{pid}/maps to locate the library rather
+// than assuming a fixed install path.
 func (r *RealBPF) AttachPID(pid uint32) error {
-	binPath := fmt.Sprintf("/proc/%d/root/usr/lib/librbscope.so", pid)
-	if _, err := os.Stat(binPath); err != nil {
+	binPath, err := findRbscopeLibrary(pid)
+	if err != nil {
 		return fmt.Errorf("locate rbscope library for pid %d: %w", pid, err)
 	}
 
@@ -81,12 +84,52 @@ func (r *RealBPF) AttachPID(pid uint32) error {
 		return fmt.Errorf("open executable %s: %w", binPath, err)
 	}
 
-	l, err := ex.Uprobe("rbscope_sample", r.objs.OnEntry, &link.UprobeOptions{PID: int(pid)})
+	// Attach uprobe to __rbscope_probe_ruby_sample — the USDT probe site
+	// fired by the gem's postponed job callback with serialized stack data.
+	l, err := ex.Uprobe("__rbscope_probe_ruby_sample", r.objs.OnEntry, &link.UprobeOptions{PID: int(pid)})
 	if err != nil {
 		return fmt.Errorf("attach uprobe pid %d: %w", pid, err)
 	}
 	r.links = append(r.links, l)
 	return nil
+}
+
+// findRbscopeLibrary scans /proc/{pid}/maps for a memory-mapped shared object
+// containing "rbscope" in its path. This handles both gem-installed paths
+// (e.g. .../lib/rbscope/rbscope.bundle) and system paths (/usr/lib/librbscope.so).
+func findRbscopeLibrary(pid uint32) (string, error) {
+	mapsPath := fmt.Sprintf("/proc/%d/maps", pid)
+	f, err := os.Open(mapsPath)
+	if err != nil {
+		return "", fmt.Errorf("open %s: %w", mapsPath, err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		// /proc/pid/maps format: addr perms offset dev inode pathname
+		// We look for executable mappings (r-xp) containing "rbscope"
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+		perms := fields[1]
+		pathname := fields[len(fields)-1]
+
+		if !strings.Contains(perms, "x") {
+			continue
+		}
+		if strings.Contains(pathname, "rbscope") &&
+			(strings.HasSuffix(pathname, ".so") || strings.HasSuffix(pathname, ".bundle")) {
+			// Return the path as seen from the host via /proc/{pid}/root
+			return fmt.Sprintf("/proc/%d/root%s", pid, pathname), nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("scan %s: %w", mapsPath, err)
+	}
+	return "", fmt.Errorf("rbscope library not found in %s", mapsPath)
 }
 
 // DetachPID detaches all uprobes for the given PID.

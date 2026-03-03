@@ -11,8 +11,9 @@ use magnus::{function, prelude::*, Error, Ruby};
 
 /// Initialize the rbscope Ruby extension.
 ///
-/// Defines the Rbscope module and its methods, wires up configuration,
-/// and prepares the sampling infrastructure (but does not start it).
+/// Defines the Rbscope module and its methods, registers the postponed
+/// job for safe stack capture, and prepares the sampling infrastructure
+/// (but does not start it).
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
     let module = ruby.define_module("Rbscope")?;
@@ -22,6 +23,11 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     native.define_singleton_method("stop_sampling", function!(sampler::stop_sampling, 0))?;
     native.define_singleton_method("enabled?", function!(probes::probes_enabled, 0))?;
     native.define_singleton_method("sample_count", function!(sampler::sample_count, 0))?;
+
+    // Register the postponed job with the Ruby VM. This must happen on
+    // the main thread during init — the handle is used later by the
+    // sampler thread to trigger safe-point stack capture.
+    sampler::register_postponed_job();
 
     Ok(())
 }

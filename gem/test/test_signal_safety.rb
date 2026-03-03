@@ -9,12 +9,12 @@ class TestSignalSafety < Minitest::Test
     skip "signals not reliable in CI" if ENV["CI"]
 
     Rbscope.start(frequency: 99)
-    sleep 0.05
+    busy_wait(0.05)
 
     # Send SIGINT to ourselves — profiler should handle it gracefully
     old_handler = trap("INT") { } # no-op handler
     Process.kill("INT", Process.pid)
-    sleep 0.05
+    busy_wait(0.05)
 
     count = Rbscope.stop
     assert count > 0, "profiler should survive SIGINT"
@@ -32,8 +32,10 @@ class TestSignalSafety < Minitest::Test
       end
     end
 
-    # Give sampler time to capture some samples
-    sleep 0.1
+    # Give sampler time to capture some samples. The 10 worker threads
+    # compete for GVL time so we need enough wall-clock time for the
+    # main thread to reach safe points where postponed jobs fire.
+    busy_wait(0.5)
 
     # Stop while threads are still working
     count = Rbscope.stop

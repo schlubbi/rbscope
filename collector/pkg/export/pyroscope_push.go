@@ -2,7 +2,6 @@ package export
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -90,20 +89,9 @@ func (e *PyroscopePushExporter) Export(_ context.Context, event any) error {
 		return nil
 	}
 
-	// Propagate trace_id and span_id as pprof labels for trace↔profile linking.
-	// This enables Grafana/Pyroscope to show "view flame graph" on Jaeger traces.
-	labels := make(map[string][]string)
-	if traceID := formatHex(sample.TraceID[:]); traceID != "" {
-		labels["trace_id"] = []string{traceID}
-	}
-	if spanID := formatHex(sample.SpanID[:]); spanID != "" {
-		labels["span_id"] = []string{spanID}
-	}
-
 	e.builder.Sample = append(e.builder.Sample, &profile.Sample{
 		Location: locs,
 		Value:    []int64{1, 10000000}, // 1 sample, 10ms cpu
-		Label:    labels,
 	})
 	return nil
 }
@@ -175,10 +163,51 @@ func (e *PyroscopePushExporter) resetProfile() {
 }
 
 func (e *PyroscopePushExporter) resolveStack(sample *collector.RubySampleEvent) []*profile.Location {
-	names, ok := e.symbolMap[sample.StackID]
+	// Parse inline format v2 stack data from the BPF event
+	frames := collector.ParseInlineStack(sample.StackData)
+	if len(frames) == 0 {
+		// Fall back to demo-mode symbolMap if no inline data
+		if e.symbolMap != nil {
+			return e.resolveFromSymbolMap(sample)
+		}
+		return nil
+	}
+
+	locs := make([]*profile.Location, 0, len(frames))
+	for _, frame := range frames {
+		name := frame.Label
+		if name == "" {
+			name = "<unknown>"
+		}
+		filename := frame.Path
+		line := int64(frame.Line)
+
+		addr := hashName(name + filename)
+		loc, exists := e.locMap[addr]
+		if !exists {
+			fn := e.getOrCreateFunc(name)
+			fn.Filename = filename
+			e.locID++
+			loc = &profile.Location{
+				ID:      e.locID,
+				Address: addr,
+				Line: []profile.Line{
+					{Function: fn, Line: line},
+				},
+			}
+			e.locMap[addr] = loc
+			e.builder.Location = append(e.builder.Location, loc)
+		}
+		locs = append(locs, loc)
+	}
+	return locs
+}
+
+// resolveFromSymbolMap resolves stacks using pre-loaded symbol names (demo mode).
+func (e *PyroscopePushExporter) resolveFromSymbolMap(sample *collector.RubySampleEvent) []*profile.Location {
+	names, ok := e.symbolMap[sample.StackDataLen] // reuse StackDataLen as stack ID for demo
 	if !ok {
-		// Fall back to generic frame
-		names = []string{fmt.Sprintf("ruby_frame_0x%x", sample.StackID)}
+		return nil
 	}
 
 	locs := make([]*profile.Location, 0, len(names))
@@ -225,14 +254,4 @@ func hashName(s string) uint64 {
 		h *= 1099511628211
 	}
 	return h
-}
-
-// formatHex returns the hex string of b, or empty string if all zeros.
-func formatHex(b []byte) string {
-	for _, v := range b {
-		if v != 0 {
-			return hex.EncodeToString(b)
-		}
-	}
-	return ""
 }

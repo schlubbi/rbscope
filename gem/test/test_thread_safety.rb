@@ -29,7 +29,7 @@ class TestThreadSafety < Minitest::Test
         5.times do
           begin
             Rbscope.start(frequency: 99)
-            sleep 0.01
+            busy_wait(0.01)
             Rbscope.stop
           rescue => e
             errors << e
@@ -52,8 +52,8 @@ class TestThreadSafety < Minitest::Test
 
     # Continuously spawn and kill threads while sampling
     20.times do
-      t = Thread.new { sleep 0.01 }
-      sleep 0.005
+      t = Thread.new { busy_wait(0.01) }
+      busy_wait(0.005)
       t.join
     end
 

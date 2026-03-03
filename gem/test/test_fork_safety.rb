@@ -9,17 +9,16 @@ class TestForkSafety < Minitest::Test
     skip "fork not available" unless Process.respond_to?(:fork)
 
     Rbscope.start(frequency: 99)
-    sleep 0.05
+    busy_wait(0.05)
 
     pid = fork do
       # In child: profiler should not be running (quiesced on fork)
-      # Starting fresh should work
-      sleep 0.05
+      busy_wait(0.05)
       exit!(0)
     end
 
     # Parent: continue sampling
-    sleep 0.1
+    busy_wait(0.1)
     _status = Process.wait2(pid)
     count = Rbscope.stop
 
@@ -30,7 +29,7 @@ class TestForkSafety < Minitest::Test
     skip "fork not available" unless Process.respond_to?(:fork)
 
     Rbscope.start(frequency: 99)
-    sleep 0.02
+    busy_wait(0.02)
 
     rd, wr = IO.pipe
 
@@ -38,7 +37,7 @@ class TestForkSafety < Minitest::Test
       rd.close
       # Child: start a fresh profiler
       Rbscope.start(frequency: 99)
-      sleep 0.1
+      busy_wait(0.1)
       count = Rbscope.stop
       wr.write(count.to_s)
       wr.close

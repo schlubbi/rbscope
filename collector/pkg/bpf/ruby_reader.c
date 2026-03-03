@@ -31,93 +31,37 @@ struct {
     __uint(max_entries, 1 << 24); // 16MB ring buffer
 } events SEC(".maps");
 
-// Per-CPU scratch space for stack data (avoid stack allocation limits)
+// Per-CPU scratch space for building events with inline stack data
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __uint(max_entries, 1);
     __type(key, u32);
-    __type(value, u8[MAX_STACK_SIZE]);
+    __type(value, u8[sizeof(struct ruby_sample_event) + MAX_STACK_SIZE]);
 } scratch SEC(".maps");
 
-// Stack deduplication map: hash(stack_data) → stack_id
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 65536);
-    __type(key, u64);   // FNV-1a hash of stack data
-    __type(value, u32); // stack ID (monotonically increasing)
-} stack_dedup SEC(".maps");
-
-// Counter for stack IDs
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, u32);
-    __type(value, u32);
-} stack_id_counter SEC(".maps");
-
-// Event sent to userspace via ring buffer
+// Event sent to userspace via ring buffer.
+// Stack data is appended inline after this header.
 struct ruby_sample_event {
-    u8  event_type;
-    u8  _pad[3];
+    u32 event_type;
     u32 pid;
     u32 tid;
+    u32 _pad0;
     u64 timestamp_ns;
-    u32 stack_id;
-    u32 stack_len;    // bytes of stack data following this header
-    // stack data follows inline (variable length)
+    u64 thread_id;
+    u32 stack_data_len;  // bytes of inline stack data following this header
+    u32 _pad1;
+    // stack data follows inline (variable length, up to MAX_STACK_SIZE)
 };
 
-// Span event (from ruby_span USDT probe)
-struct ruby_span_event {
-    u8  event_type;
-    u8  _pad[3];
-    u32 pid;
-    u32 tid;
-    u64 timestamp_ns;
-    u64 duration_ns;
-    u8  trace_id[16];
-    u8  span_id[8];
-    u32 stack_id;
-    u32 operation_len;
-    // operation string follows inline
-};
-
-// FNV-1a hash for stack deduplication
-static __always_inline u64 fnv1a_hash(const u8 *data, u32 len) {
-    u64 hash = 14695981039346656037ULL;
-    for (u32 i = 0; i < len && i < MAX_STACK_SIZE; i++) {
-        hash ^= data[i];
-        hash *= 1099511628211ULL;
-    }
-    return hash;
-}
-
-// Get or create a stack ID for the given stack data
-static __always_inline u32 get_stack_id(const u8 *stack_data, u32 stack_len) {
-    u64 hash = fnv1a_hash(stack_data, stack_len);
-
-    u32 *existing = bpf_map_lookup_elem(&stack_dedup, &hash);
-    if (existing) {
-        return *existing;
-    }
-
-    // Allocate new stack ID
-    u32 zero = 0;
-    u32 *counter = bpf_map_lookup_elem(&stack_id_counter, &zero);
-    if (!counter) return 0;
-
-    u32 new_id = __sync_fetch_and_add(counter, 1);
-    bpf_map_update_elem(&stack_dedup, &hash, &new_id, BPF_ANY);
-    return new_id;
-}
-
-// USDT probe handler: ruby_sample
+// USDT probe handler: __rbscope_probe_ruby_sample
 //
-// Fired by rbscope gem's sampling thread at configurable frequency.
-// Arguments (from USDT probe):
-//   arg0: pointer to stack data (binary format)
-//   arg1: stack data length
-//   arg2: thread ID
+// Fired by rbscope gem's postponed job callback with real stack data
+// serialized in format v2 (inline strings).
+//
+// Arguments (from function parameters, read via registers):
+//   arg0: pointer to stack data (format v2 inline strings)
+//   arg1: stack data length (bytes)
+//   arg2: thread ID (Ruby VALUE)
 //   arg3: timestamp (nanoseconds)
 SEC("uprobe/ruby_sample")
 int handle_ruby_sample(struct pt_regs *ctx) {
@@ -126,33 +70,33 @@ int handle_ruby_sample(struct pt_regs *ctx) {
     u64 thread_id = PT_REGS_PARM3(ctx);
     u64 timestamp = PT_REGS_PARM4(ctx);
 
-    if (stack_len > MAX_STACK_SIZE)
-        stack_len = MAX_STACK_SIZE;
+    if (stack_len == 0 || stack_len > MAX_STACK_SIZE)
+        return 0;
 
-    // Read stack data from userspace into per-CPU scratch buffer
+    // Use per-CPU scratch to build the complete event (header + stack data)
     u32 zero = 0;
     u8 *scratch_buf = bpf_map_lookup_elem(&scratch, &zero);
     if (!scratch_buf) return 0;
 
-    if (bpf_probe_read_user(scratch_buf, stack_len & (MAX_STACK_SIZE - 1), (void *)stack_ptr) < 0)
-        return 0;
-
-    // Deduplicate stack
-    u32 stack_id = get_stack_id(scratch_buf, stack_len);
-
-    // Reserve ring buffer space for event
-    u32 event_size = sizeof(struct ruby_sample_event);
-    struct ruby_sample_event *event = bpf_ringbuf_reserve(&events, event_size, 0);
-    if (!event) return 0;
-
+    // Build the header in scratch
+    struct ruby_sample_event *event = (struct ruby_sample_event *)scratch_buf;
     event->event_type = EVENT_RUBY_SAMPLE;
     event->pid = bpf_get_current_pid_tgid() >> 32;
     event->tid = (u32)bpf_get_current_pid_tgid();
     event->timestamp_ns = timestamp ? timestamp : bpf_ktime_get_ns();
-    event->stack_id = stack_id;
-    event->stack_len = stack_len;
+    event->thread_id = thread_id;
+    event->stack_data_len = stack_len;
 
-    bpf_ringbuf_submit(event, 0);
+    // Copy stack data from userspace right after the header
+    u32 hdr_size = sizeof(struct ruby_sample_event);
+    // Bound the read to satisfy the BPF verifier
+    u32 bounded_len = stack_len & (MAX_STACK_SIZE - 1);
+    if (bpf_probe_read_user(scratch_buf + hdr_size, bounded_len, (void *)stack_ptr) < 0)
+        return 0;
+
+    // Submit the complete event (header + inline stack data) to ring buffer
+    u32 total_size = hdr_size + bounded_len;
+    bpf_ringbuf_output(&events, scratch_buf, total_size, 0);
     return 0;
 }
 

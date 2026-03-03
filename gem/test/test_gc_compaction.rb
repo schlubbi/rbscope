@@ -16,13 +16,13 @@ class TestGcCompaction < Minitest::Test
     arrays.clear
     GC.start
 
-    sleep 0.1
+    busy_wait(0.1)
     count = Rbscope.stop
     assert count > 0, "profiler should survive GC compaction"
   end
 
   def test_profiling_with_gc_stress
-    Rbscope.start(frequency: 99)
+    Rbscope.start(frequency: 1) # Low freq: callback allocates strings, each triggers GC
 
     # Run with GC stress to maximize chance of catching stale pointers
     old_stress = GC.stress
