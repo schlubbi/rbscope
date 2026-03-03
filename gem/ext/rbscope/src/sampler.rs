@@ -60,8 +60,9 @@ fn reset_after_fork() {
 /// * `frequency` - Sampling rate in Hz (19 = always-on, 99 = standard, 999 = deep)
 pub fn start_sampling(frequency: u32) -> Result<bool, magnus::Error> {
     if frequency == 0 || frequency > 10_000 {
+        let ruby = unsafe { magnus::Ruby::get_unchecked() };
         return Err(magnus::Error::new(
-            magnus::exception::arg_error(),
+            ruby.exception_arg_error(),
             format!("frequency must be 1-10000, got {}", frequency),
         ));
     }
@@ -92,8 +93,9 @@ pub fn start_sampling(frequency: u32) -> Result<bool, magnus::Error> {
         })
         .map_err(|e| {
             RUNNING.store(false, Ordering::SeqCst);
+            let ruby = unsafe { magnus::Ruby::get_unchecked() };
             magnus::Error::new(
-                magnus::exception::runtime_error(),
+                ruby.exception_runtime_error(),
                 format!("failed to spawn sampler thread: {}", e),
             )
         })?;
