@@ -65,7 +65,7 @@ struct {
 
 // ---- event ---------------------------------------------------------------
 
-struct io_event {
+struct rbscope_io_event {
     u8  event_type;
     u8  _pad[3];
     u32 pid;
@@ -105,7 +105,7 @@ static __always_inline void record_exit(long ret) {
     u64 now = bpf_ktime_get_ns();
     u64 latency = now - entry->timestamp_ns;
 
-    struct io_event *ev = bpf_ringbuf_reserve(&io_events, sizeof(*ev), 0);
+    struct rbscope_io_event *ev = bpf_ringbuf_reserve(&io_events, sizeof(*ev), 0);
     if (!ev) {
         bpf_map_delete_elem(&inflight, &tid);
         return;
