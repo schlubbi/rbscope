@@ -25,20 +25,6 @@
 #define EVENT_RUBY_SPAN   2
 #define EVENT_RUBY_ALLOC  3
 
-// Ring buffer for sending events to userspace
-struct {
-    __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 1 << 24); // 16MB ring buffer
-} events SEC(".maps");
-
-// Per-CPU scratch space for building events with inline stack data
-struct {
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, u32);
-    __type(value, u8[sizeof(struct ruby_sample_event) + MAX_STACK_SIZE]);
-} scratch SEC(".maps");
-
 // Event sent to userspace via ring buffer.
 // Stack data is appended inline after this header.
 struct ruby_sample_event {
@@ -52,6 +38,20 @@ struct ruby_sample_event {
     u32 _pad1;
     // stack data follows inline (variable length, up to MAX_STACK_SIZE)
 };
+
+// Ring buffer for sending events to userspace
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 1 << 24); // 16MB ring buffer
+} events SEC(".maps");
+
+// Per-CPU scratch space for building events with inline stack data
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u8[sizeof(struct ruby_sample_event) + MAX_STACK_SIZE]);
+} scratch SEC(".maps");
 
 // USDT probe handler: __rbscope_probe_ruby_sample
 //
