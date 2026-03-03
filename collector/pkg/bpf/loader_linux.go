@@ -16,47 +16,49 @@ import (
 )
 
 // bpfObjects mirrors the struct that bpf2go generates from ruby_reader.c.
-// When go generate runs on Linux it will produce the real type; this
-// placeholder lets the package compile before code-generation has run.
+// Field tags must match the ELF symbol/section names produced by clang:
+//   - "events"              → BPF map name from SEC(".maps")
+//   - "handle_ruby_sample"  → C function name in SEC("uprobe/ruby_sample")
 type bpfObjects struct {
-	Events   *ebpf.Map     `ebpf:"events"`
-	OnEntry  *ebpf.Program `ebpf:"on_entry"`
-	OnReturn *ebpf.Program `ebpf:"on_return"`
+	Events           *ebpf.Map     `ebpf:"events"`
+	HandleRubySample *ebpf.Program `ebpf:"handle_ruby_sample"`
 }
 
 func (o *bpfObjects) Close() error {
 	if o.Events != nil {
 		o.Events.Close()
 	}
-	if o.OnEntry != nil {
-		o.OnEntry.Close()
-	}
-	if o.OnReturn != nil {
-		o.OnReturn.Close()
+	if o.HandleRubySample != nil {
+		o.HandleRubySample.Close()
 	}
 	return nil
 }
 
 // RealBPF is the Linux eBPF-backed implementation of collector.BPFProgram.
 type RealBPF struct {
-	objs   bpfObjects
-	reader *ringbuf.Reader
-	links  []link.Link
+	objPath string
+	objs    bpfObjects
+	reader  *ringbuf.Reader
+	links   []link.Link
 }
 
 // Compile-time interface check.
 var _ collector.BPFProgram = (*RealBPF)(nil)
 
 // NewRealBPF returns a new RealBPF ready to be loaded.
-func NewRealBPF() (*RealBPF, error) {
-	return &RealBPF{}, nil
+// objPath is the path to the compiled BPF ELF object (e.g. ruby_reader.o).
+func NewRealBPF(objPath string) (*RealBPF, error) {
+	if objPath == "" {
+		return nil, fmt.Errorf("BPF object path is required")
+	}
+	return &RealBPF{objPath: objPath}, nil
 }
 
 // Load opens the compiled BPF ELF and creates a ring-buffer reader.
 func (r *RealBPF) Load() error {
-	spec, err := ebpf.LoadCollectionSpecFromReader(nil)
+	spec, err := ebpf.LoadCollectionSpec(r.objPath)
 	if err != nil {
-		return fmt.Errorf("load bpf spec: %w", err)
+		return fmt.Errorf("load bpf spec from %s: %w", r.objPath, err)
 	}
 	if err := spec.LoadAndAssign(&r.objs, nil); err != nil {
 		return fmt.Errorf("load bpf objects: %w", err)
@@ -86,7 +88,7 @@ func (r *RealBPF) AttachPID(pid uint32) error {
 
 	// Attach uprobe to __rbscope_probe_ruby_sample — the USDT probe site
 	// fired by the gem's postponed job callback with serialized stack data.
-	l, err := ex.Uprobe("__rbscope_probe_ruby_sample", r.objs.OnEntry, &link.UprobeOptions{PID: int(pid)})
+	l, err := ex.Uprobe("__rbscope_probe_ruby_sample", r.objs.HandleRubySample, &link.UprobeOptions{PID: int(pid)})
 	if err != nil {
 		return fmt.Errorf("attach uprobe pid %d: %w", pid, err)
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/schlubbi/rbscope/collector/internal"
+	"github.com/schlubbi/rbscope/collector/pkg/bpf"
 	"github.com/schlubbi/rbscope/collector/pkg/collector"
 	"github.com/schlubbi/rbscope/collector/pkg/discovery"
 	"github.com/schlubbi/rbscope/collector/pkg/export"
@@ -30,6 +31,7 @@ var (
 	flagOTLPEndpoint string
 	flagOutputDir    string
 	flagHealthPort   int
+	flagBPFObj       string
 )
 
 // capture flags
@@ -37,6 +39,7 @@ var (
 	flagCapturePID      uint32
 	flagCaptureDuration time.Duration
 	flagCaptureOutput   string
+	flagCaptureBPFObj   string
 )
 
 func main() {
@@ -68,6 +71,7 @@ func runCmd() *cobra.Command {
 	f.StringVar(&flagOTLPEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint")
 	f.StringVar(&flagOutputDir, "output-dir", "./profiles", "Output directory for file exporter")
 	f.IntVar(&flagHealthPort, "health-port", 8080, "Health/metrics HTTP port")
+	f.StringVar(&flagBPFObj, "bpf-obj", "", "Path to compiled BPF ELF object (e.g. ruby_reader.o)")
 
 	return cmd
 }
@@ -83,6 +87,7 @@ func captureCmd() *cobra.Command {
 	f.Uint32Var(&flagCapturePID, "pid", 0, "Target PID (required)")
 	f.DurationVar(&flagCaptureDuration, "duration", 10*time.Second, "Capture duration")
 	f.StringVar(&flagCaptureOutput, "output", "capture.pb", "Output file path")
+	f.StringVar(&flagCaptureBPFObj, "bpf-obj", "", "Path to compiled BPF ELF object")
 	_ = cmd.MarkFlagRequired("pid")
 
 	return cmd
@@ -113,7 +118,17 @@ func runCollector(_ *cobra.Command, _ []string) error {
 		Logger:      logger,
 	}
 
-	c := collector.New(cfg, nil) // nil BPF → stub on non-Linux
+	// Load real BPF program if --bpf-obj is specified, otherwise stub.
+	var bpfProg collector.BPFProgram
+	if flagBPFObj != "" {
+		realBPF, err := bpf.NewRealBPF(flagBPFObj)
+		if err != nil {
+			return fmt.Errorf("create BPF program: %w", err)
+		}
+		bpfProg = realBPF
+	}
+
+	c := collector.New(cfg, bpfProg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -172,7 +187,16 @@ func runCapture(_ *cobra.Command, _ []string) error {
 		Logger:      logger,
 	}
 
-	c := collector.New(cfg, nil)
+	var bpfProg collector.BPFProgram
+	if flagCaptureBPFObj != "" {
+		realBPF, err := bpf.NewRealBPF(flagCaptureBPFObj)
+		if err != nil {
+			return fmt.Errorf("create BPF program: %w", err)
+		}
+		bpfProg = realBPF
+	}
+
+	c := collector.New(cfg, bpfProg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), flagCaptureDuration)
 	defer cancel()
@@ -222,6 +246,12 @@ func buildExporters(logger *slog.Logger) ([]collector.Exporter, error) {
 			}))
 		case "otlp":
 			logger.Info("enabling otlp exporter", "endpoint", flagOTLPEndpoint)
+			exporters = append(exporters, export.NewOTLPExporter(export.OTLPConfig{
+				Endpoint:    flagOTLPEndpoint,
+				ServiceName: "rbscope",
+				FlushEvery:  10 * time.Second,
+				Logger:      logger,
+			}))
 		case "file":
 			logger.Info("enabling file exporter", "dir", flagOutputDir)
 		default:

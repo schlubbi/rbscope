@@ -15,7 +15,7 @@ type RealBPF struct{}
 var _ collector.BPFProgram = (*RealBPF)(nil)
 
 // NewRealBPF returns an error on non-Linux platforms.
-func NewRealBPF() (*RealBPF, error) {
+func NewRealBPF(_ string) (*RealBPF, error) {
 	return nil, fmt.Errorf("BPF not supported on this platform (%s/%s)", runtime.GOOS, runtime.GOARCH)
 }
 
