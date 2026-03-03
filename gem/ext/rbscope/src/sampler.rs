@@ -52,6 +52,10 @@ extern "C" {
 
     fn rb_profile_frame_full_label(frame: rb_sys::VALUE) -> rb_sys::VALUE;
     fn rb_profile_frame_path(frame: rb_sys::VALUE) -> rb_sys::VALUE;
+
+    // Use Ruby's own string accessor — bypasses rb-sys struct layout
+    // which is broken on Ruby 4.0 (reads len field as embedded string data).
+    fn rb_string_value_ptr(val_ptr: *mut rb_sys::VALUE) -> *const std::os::raw::c_char;
 }
 
 /// Maximum number of Ruby frames to capture per sample.
@@ -93,6 +97,17 @@ static IN_CALLBACK: AtomicBool = AtomicBool::new(false);
 /// rb_postponed_job_trigger(). It is safe to call Ruby C API functions
 /// including rb_profile_thread_frames and rb_profile_frame_* here.
 unsafe extern "C" fn postponed_job_callback(_data: *mut std::ffi::c_void) {
+    // Catch any panics to prevent aborting the host Ruby process.
+    // IMPORTANT: reset IN_CALLBACK after catch_unwind — if the inner
+    // function panics, the cleanup at the end of callback_inner won't
+    // run, permanently locking out all future callbacks.
+    let _ = std::panic::catch_unwind(|| {
+        postponed_job_callback_inner();
+    });
+    IN_CALLBACK.store(false, Ordering::Release);
+}
+
+unsafe fn postponed_job_callback_inner() {
     if !RUNNING.load(Ordering::Relaxed) {
         return;
     }
@@ -158,16 +173,40 @@ unsafe extern "C" fn postponed_job_callback(_data: *mut std::ffi::c_void) {
 /// Caller must ensure `value` is a valid Ruby VALUE and that this is
 /// called from a Ruby thread (not the sampler thread).
 unsafe fn ruby_value_to_string(value: rb_sys::VALUE) -> String {
-    if value == rb_sys::Qnil as rb_sys::VALUE {
+    // Filter nil, false, zero
+    if value == rb_sys::Qnil as rb_sys::VALUE
+        || value == rb_sys::Qfalse as rb_sys::VALUE
+        || value == 0
+    {
         return "(unknown)".to_string();
     }
 
-    // rb_profile_frame_* functions return Ruby String objects.
-    // RSTRING_PTR/RSTRING_LEN are the standard way to read them.
-    let ptr = rb_sys::RSTRING_PTR(value);
+    // Filter special constants (fixnum, symbol, flonum) — these are
+    // immediate values encoded in the pointer, not heap objects.
+    // On 64-bit Ruby: any of the low 3 bits set means immediate.
+    if value & 0x07 != 0 {
+        return "(unknown)".to_string();
+    }
+
+    // For heap objects, check the type tag in the RBasic flags field
+    // (offset 0). rb_profile_frame_* can return T_IMEMO objects;
+    // calling RSTRING_PTR on those triggers an assertion panic in rb-sys.
+    // T_STRING = 0x05 in bits 0-4 of the flags word.
+    let flags = *(value as *const usize);
+    if flags & 0x1f != 0x05 {
+        return "(unknown)".to_string();
+    }
+
+    // Use Ruby's own rb_string_value_ptr instead of rb-sys's RSTRING_PTR.
+    // rb-sys uses the Ruby 2.7 struct layout where embedded string data
+    // is at offset 16, but Ruby 4.0 moved `len` there and data to offset 24.
+    // rb_string_value_ptr calls the Ruby binary's own RSTRING_PTR which
+    // uses the correct layout for the running Ruby version.
+    let mut val = value;
+    let ptr = rb_string_value_ptr(&mut val as *mut rb_sys::VALUE);
     let len = rb_sys::RSTRING_LEN(value);
 
-    if ptr.is_null() || len < 0 {
+    if ptr.is_null() || len < 0 || len > 10_000 {
         return "(unknown)".to_string();
     }
 
