@@ -74,14 +74,16 @@ module Rbscope
 
   # Return current sampling statistics.
   #
-  # @return [Hash] with keys :frequency_hz, :avg_sample_ns, :sample_count, :max_frequency_hz
+  # @return [Hash] with keys :frequency_hz, :avg_sample_ns, :sample_count,
+  #   :max_frequency_hz, :cache_hit_count
   def self.sampling_stats
-    freq, avg_ns, count, max_freq = Native.sampling_stats
+    freq, avg_ns, count, max_freq, cache_hits = Native.sampling_stats
     {
       frequency_hz: freq,
       avg_sample_ns: avg_ns,
       sample_count: count,
-      max_frequency_hz: max_freq
+      max_frequency_hz: max_freq,
+      cache_hit_count: cache_hits
     }
   end
 end

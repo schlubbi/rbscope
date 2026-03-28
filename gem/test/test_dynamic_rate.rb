@@ -16,6 +16,7 @@ class TestDynamicRate < Minitest::Test
     assert_includes stats, :avg_sample_ns
     assert_includes stats, :sample_count
     assert_includes stats, :max_frequency_hz
+    assert_includes stats, :cache_hit_count
     assert_equal 99, stats[:max_frequency_hz]
   end
 

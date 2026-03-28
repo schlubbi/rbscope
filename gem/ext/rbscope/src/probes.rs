@@ -33,14 +33,9 @@ pub extern "C" fn __rbscope_probe_ruby_sample(
     stack_len: u32,
     thread_id: u64,
     timestamp_ns: u64,
+    weight: u32,
 ) {
-    // The function body is intentionally a no-op read of the arguments.
-    // This prevents the compiler from optimizing away the call while
-    // keeping overhead at a single CALL + RET when not traced.
-    //
-    // When the eBPF collector attaches, it places a uprobe on this
-    // function's entry point and reads the arguments from registers.
-    std::hint::black_box((stack_ptr, stack_len, thread_id, timestamp_ns));
+    std::hint::black_box((stack_ptr, stack_len, thread_id, timestamp_ns, weight));
 }
 
 #[inline(never)]
@@ -84,7 +79,7 @@ pub extern "C" fn __rbscope_probe_ruby_alloc(
 }
 
 /// Fire the ruby_sample probe with a serialized stack.
-pub fn fire_ruby_sample(stack_data: &[u8], thread_id: u64, timestamp_ns: u64) {
+pub fn fire_ruby_sample(stack_data: &[u8], thread_id: u64, timestamp_ns: u64, weight: u32) {
     if !PROBES_ENABLED.load(Ordering::Relaxed) {
         return;
     }
@@ -93,6 +88,7 @@ pub fn fire_ruby_sample(stack_data: &[u8], thread_id: u64, timestamp_ns: u64) {
         stack_data.len() as u32,
         thread_id,
         timestamp_ns,
+        weight,
     );
 }
 
