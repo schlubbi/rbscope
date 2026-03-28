@@ -92,6 +92,16 @@ message IOEvent {
   // Cross-references (populated by timeline.Builder)
   uint32 nearest_sample_idx = 7;        // closest Sample by timestamp
   uint32 caused_sched_event_idx = 8;    // SchedEvent this I/O triggered
+
+  // TCP performance stats (only populated for TCP sockets)
+  TcpStats tcp_stats = 9;
+
+  // FD type classification
+  FdType fd_type = 10;
+
+  // Socket addresses (host byte order for ports)
+  uint32 local_port = 11;
+  uint32 remote_port = 12;
 }
 
 // SchedEvent is an off-CPU period observed by BPF sched_tracer.
@@ -167,6 +177,30 @@ enum ThreadState {
 }
 
 // ---- Shared types ----
+
+// FdType classifies what a file descriptor backs.
+enum FdType {
+  FD_UNKNOWN = 0;
+  FD_FILE = 1;
+  FD_TCP = 2;
+  FD_UDP = 3;
+  FD_UNIX = 4;
+  FD_PIPE = 5;
+}
+
+// TcpStats captures TCP performance metrics at the time of an I/O event.
+// Read from struct tcp_sock via BPF CO-RE.
+message TcpStats {
+  uint32 srtt_us = 1;          // smoothed RTT (microseconds)
+  uint32 snd_cwnd = 2;         // congestion window (packets)
+  uint32 total_retrans = 3;    // total retransmits for this connection
+  uint32 packets_out = 4;      // packets in flight
+  uint32 retrans_out = 5;      // retransmitted packets outstanding
+  uint32 lost_out = 6;         // lost packets
+  uint32 rcv_wnd = 7;          // receive window
+  uint64 bytes_sent = 8;       // total bytes sent
+  uint64 bytes_received = 9;   // total bytes received
+}
 
 // StackFrame is a single frame in a call stack.
 message StackFrame {

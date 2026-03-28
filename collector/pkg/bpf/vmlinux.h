@@ -134,6 +134,96 @@ struct trace_event_raw_sched_switch {
 struct task_struct {
     int pid;
     int tgid;
+    struct files_struct *files;
+} __attribute__((preserve_access_index));
+
+// ---- File descriptor resolution (CO-RE stubs) ----
+// Order matters: types must be defined before they are used inline.
+
+struct qstr {
+    const unsigned char *name;
+} __attribute__((preserve_access_index));
+
+struct inode {
+    unsigned short i_mode;
+    unsigned long i_ino;
+} __attribute__((preserve_access_index));
+
+struct dentry {
+    struct qstr d_name;
+    struct inode *d_inode;
+} __attribute__((preserve_access_index));
+
+struct path {
+    struct dentry *dentry;
+} __attribute__((preserve_access_index));
+
+struct file {
+    struct path f_path;
+    void *private_data;
+} __attribute__((preserve_access_index));
+
+struct fdtable {
+    unsigned int max_fds;
+    struct file **fd;
+} __attribute__((preserve_access_index));
+
+struct files_struct {
+    struct fdtable *fdt;
+} __attribute__((preserve_access_index));
+
+// ---- Socket types (CO-RE stubs) ----
+
+// Constants
+#define AF_UNIX   1
+#define AF_INET   2
+#define AF_INET6  10
+#define IPPROTO_TCP 6
+#define IPPROTO_UDP 17
+#define S_IFMT    0170000
+#define S_IFSOCK  0140000
+#define TCP_LISTEN 10
+
+struct socket {
+    short type;
+    struct sock *sk;
+} __attribute__((preserve_access_index));
+
+struct sock_common {
+    unsigned short skc_family;
+    unsigned char skc_state;
+    __be16 skc_dport;
+    __be32 skc_rcv_saddr;
+    __be32 skc_daddr;
+} __attribute__((preserve_access_index));
+
+struct sock {
+    struct sock_common __sk_common;
+    unsigned char sk_protocol;
+} __attribute__((preserve_access_index));
+
+struct inet_sock {
+    struct sock sk;
+    __be16 inet_sport;
+} __attribute__((preserve_access_index));
+
+struct tcp_sock {
+    struct inet_sock inet_conn;
+    u32 snd_cwnd;
+    u32 snd_ssthresh;
+    u32 rcv_wnd;
+    u32 snd_wnd;
+    u32 srtt_us;
+    u32 mdev_us;
+    u32 packets_out;
+    u32 retrans_out;
+    u32 total_retrans;
+    u32 lost_out;
+    u32 sacked_out;
+    u32 reordering;
+    u32 delivered;
+    u64 bytes_sent;
+    u64 bytes_received;
 } __attribute__((preserve_access_index));
 
 #endif /* __VMLINUX_H__ */

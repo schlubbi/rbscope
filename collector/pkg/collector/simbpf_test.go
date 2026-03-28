@@ -185,3 +185,99 @@ func TestSimBPF_AttachDetach(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 }
+
+func TestSimBPF_GeneratesIOEvents(t *testing.T) {
+	sim := NewSimBPF(100)
+	if err := sim.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := sim.AttachPID(42); err != nil {
+		t.Fatalf("AttachPID: %v", err)
+	}
+
+	buf := make([]byte, 64*1024)
+	var ioCount, sampleCount int
+
+	// Collect events for ~200ms
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		n, err := sim.ReadRingBuffer(buf)
+		if err != nil || n == 0 {
+			continue
+		}
+		evt, err := ParseEvent(buf[:n])
+		if err != nil {
+			continue
+		}
+		switch evt.(type) {
+		case *RubySampleEvent:
+			sampleCount++
+		case *IOEvent:
+			ioCount++
+		}
+	}
+
+	if err := sim.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if sampleCount == 0 {
+		t.Error("expected stack samples from SimBPF")
+	}
+	if ioCount == 0 {
+		t.Error("expected IO events from SimBPF")
+	}
+}
+
+func TestSimBPF_IOEventParsesCorrectly(t *testing.T) {
+	sim := NewSimBPF(500) // higher freq for faster test
+	if err := sim.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := sim.AttachPID(42); err != nil {
+		t.Fatalf("AttachPID: %v", err)
+	}
+
+	buf := make([]byte, 64*1024)
+	var foundTCP bool
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		n, err := sim.ReadRingBuffer(buf)
+		if err != nil || n == 0 {
+			continue
+		}
+		evt, err := ParseEvent(buf[:n])
+		if err != nil {
+			continue
+		}
+		io, ok := evt.(*IOEvent)
+		if !ok {
+			continue
+		}
+		if io.FdType == 2 { // TCP
+			foundTCP = true
+			if io.RemotePort == 0 {
+				t.Error("TCP IO event has RemotePort=0")
+			}
+			if io.TCPStats == nil {
+				t.Error("TCP IO event has nil TCPStats")
+			} else if io.TCPStats.SrttUs == 0 {
+				t.Error("TCP IO event has SrttUs=0")
+			}
+			info := io.FormatFdInfo()
+			if info == "" {
+				t.Error("TCP IO event has empty FormatFdInfo")
+			}
+			break
+		}
+	}
+
+	if err := sim.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if !foundTCP {
+		t.Error("expected at least one TCP IO event")
+	}
+}

@@ -3,9 +3,8 @@
 // rbscope BPF program: Kernel I/O correlation via syscall tracepoints
 //
 // Traces read/write/sendto/recvfrom/connect syscalls and correlates
-// them with Ruby stack IDs from ruby_reader.c. On syscall entry we
-// stash fd + timestamp keyed by TID; on exit we compute latency and
-// byte count, then emit an io_event to the ring buffer.
+// them with Ruby stack IDs from ruby_reader.c. On syscall exit we
+// resolve the FD to a socket and capture TCP stats.
 //
 // Build: generated via bpf2go (see collector Makefile)
 
@@ -13,8 +12,17 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+#include "fd_helpers.h"
 
-#define EVENT_IO 10
+// Event type matches Go EventIO = 4
+#define EVENT_IO 4
+
+// I/O operation types (matches Go IoOp* constants)
+#define IO_OP_READ    1
+#define IO_OP_WRITE   2
+#define IO_OP_SENDTO  3
+#define IO_OP_RECVFROM 4
+#define IO_OP_CONNECT 5
 
 // Syscall numbers (x86_64)
 #define SYS_READ     0
@@ -25,13 +33,11 @@
 
 // ---- maps ----------------------------------------------------------------
 
-// Ring buffer shared with userspace consumer
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 1 << 24); // 16 MB
 } io_events SEC(".maps");
 
-// In-flight syscall state, keyed by TID
 struct syscall_enter {
     u64 timestamp_ns;
     u32 syscall_nr;
@@ -41,42 +47,52 @@ struct syscall_enter {
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 65536);
-    __type(key, u32);                  // TID
+    __type(key, u32);
     __type(value, struct syscall_enter);
 } inflight SEC(".maps");
 
-// TID → most recent Ruby stack_id.
-// Populated by ruby_reader.c's handler (shared via PIN or bpf2go map
-// reuse). Userspace loader wires this to the same map object.
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 65536);
-    __type(key, u32);   // TID
-    __type(value, u32); // stack_id
-} tid_to_ruby_stack SEC(".maps");
-
-// Target PIDs populated from userspace — only trace these processes
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1024);
     __type(key, u32);   // PID
-    __type(value, u8);  // 1 = tracked
+    __type(value, u8);
 } target_pids SEC(".maps");
 
 // ---- event ---------------------------------------------------------------
 
+// rbscope_io_event is the enriched I/O event emitted to userspace.
+// Layout must match Go IOEvent parsing in events.go.
 struct rbscope_io_event {
-    u8  event_type;
-    u8  _pad[3];
+    // Standard header (24 bytes)
+    u32 event_type;       // EVENT_IO = 4
     u32 pid;
     u32 tid;
-    u32 syscall_nr;
-    u32 fd;
-    s64 bytes;
-    u64 latency_ns;
+    u32 _pad0;            // alignment for u64
     u64 timestamp_ns;
-    u32 ruby_stack_id;
+    // I/O fields (24 bytes)
+    u32 op;               // IO_OP_* enum
+    s32 fd;
+    s64 bytes;            // return value (bytes or error)
+    u64 latency_ns;
+    // Socket enrichment (16 bytes)
+    u8  fd_type;          // FD_TYPE_* from fd_helpers.h
+    u8  sock_state;       // TCP state
+    u16 local_port;       // host byte order
+    u16 remote_port;      // host byte order
+    u16 _pad1;
+    u32 local_addr;       // IPv4, network byte order
+    u32 remote_addr;      // IPv4, network byte order
+    // TCP stats (40 bytes, only meaningful when fd_type == FD_TYPE_TCP)
+    u32 srtt_us;
+    u32 snd_cwnd;
+    u32 total_retrans;
+    u32 packets_out;
+    u32 retrans_out;
+    u32 lost_out;
+    u32 rcv_wnd;
     u32 _pad2;
+    u64 bytes_sent;
+    u64 bytes_received;
 };
 
 // ---- helpers --------------------------------------------------------------
@@ -84,6 +100,17 @@ struct rbscope_io_event {
 static __always_inline int pid_allowed(void) {
     u32 pid = bpf_get_current_pid_tgid() >> 32;
     return bpf_map_lookup_elem(&target_pids, &pid) != NULL;
+}
+
+static __always_inline u32 syscall_to_op(u32 nr) {
+    switch (nr) {
+    case SYS_READ:     return IO_OP_READ;
+    case SYS_WRITE:    return IO_OP_WRITE;
+    case SYS_SENDTO:   return IO_OP_SENDTO;
+    case SYS_RECVFROM: return IO_OP_RECVFROM;
+    case SYS_CONNECT:  return IO_OP_CONNECT;
+    default:           return 0;
+    }
 }
 
 static __always_inline void record_enter(u32 syscall_nr, u32 fd) {
@@ -111,18 +138,47 @@ static __always_inline void record_exit(long ret) {
         return;
     }
 
+    // Zero the entire event first (important for optional fields)
+    __builtin_memset(ev, 0, sizeof(*ev));
+
+    // Header
     ev->event_type   = EVENT_IO;
     ev->pid          = bpf_get_current_pid_tgid() >> 32;
     ev->tid          = tid;
-    ev->syscall_nr   = entry->syscall_nr;
-    ev->fd           = entry->fd;
-    ev->bytes        = ret;
-    ev->latency_ns   = latency;
     ev->timestamp_ns = now;
 
-    // Attach Ruby stack context if available
-    u32 *stack_id = bpf_map_lookup_elem(&tid_to_ruby_stack, &tid);
-    ev->ruby_stack_id = stack_id ? *stack_id : 0;
+    // I/O fields
+    ev->op           = syscall_to_op(entry->syscall_nr);
+    ev->fd           = (s32)entry->fd;
+    ev->bytes        = ret;
+    ev->latency_ns   = latency;
+
+    // FD resolution: resolve to socket info + TCP stats
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task_btf();
+    struct rbscope_socket_info si;
+    struct rbscope_tcp_stats tcp;
+    __builtin_memset(&si, 0, sizeof(si));
+    __builtin_memset(&tcp, 0, sizeof(tcp));
+
+    if (resolve_fd_info(task, (int)entry->fd, &si, &tcp)) {
+        ev->fd_type     = si.fd_type;
+        ev->sock_state  = si.sock_state;
+        ev->local_port  = si.local_port;
+        ev->remote_port = si.remote_port;
+        ev->local_addr  = si.local_addr;
+        ev->remote_addr = si.remote_addr;
+
+        // TCP stats (only meaningful for TCP sockets)
+        ev->srtt_us        = tcp.srtt_us;
+        ev->snd_cwnd       = tcp.snd_cwnd;
+        ev->total_retrans  = tcp.total_retrans;
+        ev->packets_out    = tcp.packets_out;
+        ev->retrans_out    = tcp.retrans_out;
+        ev->lost_out       = tcp.lost_out;
+        ev->rcv_wnd        = tcp.rcv_wnd;
+        ev->bytes_sent     = tcp.bytes_sent;
+        ev->bytes_received = tcp.bytes_received;
+    }
 
     bpf_ringbuf_submit(ev, 0);
     bpf_map_delete_elem(&inflight, &tid);

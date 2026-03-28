@@ -64,10 +64,41 @@ type RubySpanEvent struct {
 type IOEvent struct {
 	EventHeader
 	FD        int32
-	Op        uint32 // 1=read, 2=write, 3=sendmsg, 4=recvmsg
-	Bytes     uint64
+	Op        uint32 // 1=read, 2=write, 3=sendto, 4=recvfrom, 5=connect
+	Bytes     int64
 	LatencyNs uint64
+	// Socket enrichment (from BPF FD resolution)
+	FdType     uint8  // 0=unknown, 1=file, 2=tcp, 3=udp, 4=unix, 5=pipe
+	SockState  uint8  // TCP state
+	LocalPort  uint16 // host byte order
+	RemotePort uint16 // host byte order
+	LocalAddr  uint32 // IPv4, network byte order
+	RemoteAddr uint32 // IPv4, network byte order
+	// TCP performance stats
+	TCPStats *IOTCPStats // nil if not a TCP socket
 }
+
+// IOTCPStats holds TCP performance metrics captured from struct tcp_sock.
+type IOTCPStats struct {
+	SrttUs        uint32
+	SndCwnd       uint32
+	TotalRetrans  uint32
+	PacketsOut    uint32
+	RetransOut    uint32
+	LostOut       uint32
+	RcvWnd        uint32
+	BytesSent     uint64
+	BytesReceived uint64
+}
+
+// IoOp constants matching the BPF-side IO_OP_* enum.
+const (
+	IoOpRead     = 1
+	IoOpWrite    = 2
+	IoOpSendto   = 3
+	IoOpRecvfrom = 4
+	IoOpConnect  = 5
+)
 
 // SchedEvent captures a context-switch or scheduling event.
 type SchedEvent struct {
@@ -216,7 +247,17 @@ func parseRubySpan(hdr EventHeader, data []byte) (*RubySpanEvent, error) {
 	return ev, nil
 }
 
+// ioEventEnrichedSize is the total size of the enriched rbscope_io_event
+// from io_tracer.c: header(24) + io(24) + socket(16) + tcp(48) = 112 bytes
+const ioEventEnrichedSize = 112
+
 func parseIOEvent(hdr EventHeader, data []byte) (*IOEvent, error) {
+	// Enriched format from io_tracer.c: 104 bytes total
+	if len(data) >= ioEventEnrichedSize {
+		return parseIOEventEnriched(data)
+	}
+
+	// Legacy/minimal format: just the header + basic IO fields
 	const minSize = eventHeaderSize + 4 + 4 + 8 + 8
 	if len(data) < minSize {
 		return nil, fmt.Errorf("io event too short: %d bytes", len(data))
@@ -227,9 +268,63 @@ func parseIOEvent(hdr EventHeader, data []byte) (*IOEvent, error) {
 	off += 4
 	ev.Op = binary.LittleEndian.Uint32(data[off:])
 	off += 4
-	ev.Bytes = binary.LittleEndian.Uint64(data[off:])
+	ev.Bytes = int64(binary.LittleEndian.Uint64(data[off:])) // #nosec G115 -- wire format
 	off += 8
 	ev.LatencyNs = binary.LittleEndian.Uint64(data[off:])
+	return ev, nil
+}
+
+// parseIOEventEnriched parses the full enriched IO event from io_tracer.c.
+// Layout: header(24) + op(4) + fd(4) + bytes(8) + latency(8) +
+// fd_type(1) + sock_state(1) + local_port(2) + remote_port(2) + pad(2) +
+// local_addr(4) + remote_addr(4) +
+// srtt(4) + cwnd(4) + retrans(4) + pkts_out(4) + retrans_out(4) + lost(4) + rcv_wnd(4) + pad(4) +
+// bytes_sent(8) + bytes_received(8) = 104
+func parseIOEventEnriched(data []byte) (*IOEvent, error) {
+	ev := &IOEvent{}
+
+	// Header: type(4) + pid(4) + tid(4) + pad(4) + timestamp(8) = 24
+	ev.Type = EventType(binary.LittleEndian.Uint32(data[0:4]))
+	ev.PID = binary.LittleEndian.Uint32(data[4:8])
+	ev.TID = binary.LittleEndian.Uint32(data[8:12])
+	// skip pad at 12:16
+	ev.Timestamp = binary.LittleEndian.Uint64(data[16:24])
+
+	// IO fields
+	ev.Op = binary.LittleEndian.Uint32(data[24:28])
+	ev.FD = int32(binary.LittleEndian.Uint32(data[28:32]))    // #nosec G115 -- wire format
+	ev.Bytes = int64(binary.LittleEndian.Uint64(data[32:40])) // #nosec G115 -- wire format
+	ev.LatencyNs = binary.LittleEndian.Uint64(data[40:48])
+
+	// Socket enrichment
+	ev.FdType = data[48]
+	ev.SockState = data[49]
+	ev.LocalPort = binary.LittleEndian.Uint16(data[50:52])
+	ev.RemotePort = binary.LittleEndian.Uint16(data[52:54])
+	// skip pad at 54:56
+	ev.LocalAddr = binary.LittleEndian.Uint32(data[56:60])
+	ev.RemoteAddr = binary.LittleEndian.Uint32(data[60:64])
+
+	// TCP stats (only populate if it's a TCP socket)
+	if ev.FdType == 2 { // FD_TYPE_TCP
+		tcp := &IOTCPStats{
+			SrttUs:       binary.LittleEndian.Uint32(data[64:68]),
+			SndCwnd:      binary.LittleEndian.Uint32(data[68:72]),
+			TotalRetrans: binary.LittleEndian.Uint32(data[72:76]),
+			PacketsOut:   binary.LittleEndian.Uint32(data[76:80]),
+			RetransOut:   binary.LittleEndian.Uint32(data[80:84]),
+			LostOut:      binary.LittleEndian.Uint32(data[84:88]),
+			RcvWnd:       binary.LittleEndian.Uint32(data[88:92]),
+			// skip pad at 92:96
+			BytesSent:     binary.LittleEndian.Uint64(data[96:104]),
+			BytesReceived: binary.LittleEndian.Uint64(data[104:112]),
+		}
+		// Only set if there's actual data (srtt_us > 0 indicates real stats)
+		if tcp.SrttUs > 0 || tcp.TotalRetrans > 0 || tcp.PacketsOut > 0 {
+			ev.TCPStats = tcp
+		}
+	}
+
 	return ev, nil
 }
 
@@ -248,4 +343,51 @@ func parseSchedEvent(hdr EventHeader, data []byte) (*SchedEvent, error) {
 	off += 8
 	ev.RunqLatNs = binary.LittleEndian.Uint64(data[off:])
 	return ev, nil
+}
+
+// FormatFdInfo returns a human-readable connection string for an IOEvent.
+// Examples: "tcp:10.0.0.1:3306→192.168.1.1:54321", "udp:0.0.0.0:53", "file", "unix"
+func (ev *IOEvent) FormatFdInfo() string {
+	switch ev.FdType {
+	case 1: // FD_TYPE_FILE
+		return "file"
+	case 2: // FD_TYPE_TCP
+		return fmt.Sprintf("tcp:%s:%d→%s:%d",
+			formatIPv4(ev.LocalAddr), ev.LocalPort,
+			formatIPv4(ev.RemoteAddr), ev.RemotePort)
+	case 3: // FD_TYPE_UDP
+		return fmt.Sprintf("udp:%s:%d→%s:%d",
+			formatIPv4(ev.LocalAddr), ev.LocalPort,
+			formatIPv4(ev.RemoteAddr), ev.RemotePort)
+	case 4: // FD_TYPE_UNIX
+		return "unix"
+	case 5: // FD_TYPE_PIPE
+		return "pipe"
+	default:
+		return ""
+	}
+}
+
+// IoOpName returns the syscall name for an IO operation type.
+func IoOpName(op uint32) string {
+	switch op {
+	case IoOpRead:
+		return "read"
+	case IoOpWrite:
+		return "write"
+	case IoOpSendto:
+		return "sendto"
+	case IoOpRecvfrom:
+		return "recvfrom"
+	case IoOpConnect:
+		return "connect"
+	default:
+		return fmt.Sprintf("syscall_%d", op)
+	}
+}
+
+// formatIPv4 converts a uint32 IPv4 address (network byte order) to a.b.c.d string.
+func formatIPv4(addr uint32) string {
+	return fmt.Sprintf("%d.%d.%d.%d",
+		addr&0xff, (addr>>8)&0xff, (addr>>16)&0xff, (addr>>24)&0xff)
 }

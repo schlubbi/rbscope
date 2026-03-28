@@ -61,13 +61,37 @@ func (b *Builder) Ingest(event any) {
 
 	case *collector.IOEvent:
 		tb := b.thread(ev.TID)
-		syscallName := ioOpName(ev.Op)
+		syscallName := collector.IoOpName(ev.Op)
 		ioEvent := &pb.IOEvent{
 			TimestampNs: ev.Timestamp,
 			SyscallIdx:  b.strings.Intern(syscallName),
 			Fd:          ev.FD,
-			Bytes:       ev.Bytes,
+			Bytes:       uint64(ev.Bytes), // #nosec G115 -- wire format
 			LatencyNs:   ev.LatencyNs,
+		}
+		// Populate FD type and connection info from BPF enrichment
+		if ev.FdType > 0 {
+			ioEvent.FdType = pb.FdType(ev.FdType)
+			fdInfo := ev.FormatFdInfo()
+			if fdInfo != "" {
+				ioEvent.FdInfoIdx = b.strings.Intern(fdInfo)
+			}
+			ioEvent.LocalPort = uint32(ev.LocalPort)
+			ioEvent.RemotePort = uint32(ev.RemotePort)
+		}
+		// Populate TCP stats
+		if ev.TCPStats != nil {
+			ioEvent.TcpStats = &pb.TcpStats{
+				SrttUs:        ev.TCPStats.SrttUs,
+				SndCwnd:       ev.TCPStats.SndCwnd,
+				TotalRetrans:  ev.TCPStats.TotalRetrans,
+				PacketsOut:    ev.TCPStats.PacketsOut,
+				RetransOut:    ev.TCPStats.RetransOut,
+				LostOut:       ev.TCPStats.LostOut,
+				RcvWnd:        ev.TCPStats.RcvWnd,
+				BytesSent:     ev.TCPStats.BytesSent,
+				BytesReceived: ev.TCPStats.BytesReceived,
+			}
 		}
 		tb.ioEvents = append(tb.ioEvents, ioEvent)
 
@@ -181,20 +205,5 @@ func defaultCategories() []*pb.Category {
 		{Id: 3, Name: "GVL", Color: "red"},
 		{Id: 4, Name: "GC", Color: "purple"},
 		{Id: 5, Name: "Idle", Color: "transparent"},
-	}
-}
-
-func ioOpName(op uint32) string {
-	switch op {
-	case 1:
-		return "read"
-	case 2:
-		return "write"
-	case 3:
-		return "sendmsg"
-	case 4:
-		return "recvmsg"
-	default:
-		return "unknown"
 	}
 }
