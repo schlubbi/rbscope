@@ -21,7 +21,8 @@ generate:
 
 # Generate protobuf Go code
 proto:
-	protoc --go_out=. --go_opt=paths=source_relative proto/rbscope.proto
+	protoc --go_out=pkg/proto/rbscopepb --go_opt=paths=source_relative \
+		-I ../proto ../proto/rbscope.proto
 
 # Run all tests
 test:
