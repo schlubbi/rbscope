@@ -102,9 +102,13 @@ func TestCrossRefIOToSchedMultipleIOs(t *testing.T) {
 
 func TestCrossRefEmpty(t *testing.T) {
 	tb := &threadBuilder{}
-	// Should not panic on empty
+	// Should not panic on empty, and no state changes
 	crossRefIOToSamples(tb)
 	crossRefIOToSched(tb)
+	states := deriveThreadStates(tb)
+	if len(states) != 0 {
+		t.Errorf("states = %d, want 0", len(states))
+	}
 }
 
 func TestDeriveThreadStatesEmpty(t *testing.T) {
