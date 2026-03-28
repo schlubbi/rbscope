@@ -34,7 +34,7 @@ class TestSampling < Minitest::Test
   end
 
   def test_samples_accumulate
-    Rbscope.start(frequency: 999)
+    Rbscope.start(frequency: 999, dynamic_rate: false)
     busy_wait(0.1)
     count1 = Rbscope.sample_count
     busy_wait(0.1)
@@ -61,7 +61,7 @@ class TestSampling < Minitest::Test
   end
 
   def test_profile_block
-    count = Rbscope.profile(frequency: 999) do
+    count = Rbscope.profile(frequency: 999, dynamic_rate: false) do
       busy_wait(0.5)
     end
 
@@ -96,7 +96,7 @@ class TestSampling < Minitest::Test
   def test_captures_real_frames
     # Define a deeply nested call to ensure frames exist
     result = nil
-    Rbscope.start(frequency: 999)
+    Rbscope.start(frequency: 999, dynamic_rate: false)
 
     # Do work that creates recognizable stack frames
     100.times do

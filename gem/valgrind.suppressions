@@ -151,6 +151,14 @@
    ...
 }
 
+{
+   ruby_jit_stats_alloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   obj:*/libruby*
+}
+
 # --- Conditional jumps on uninitialised memory in VM internals ---
 
 {
