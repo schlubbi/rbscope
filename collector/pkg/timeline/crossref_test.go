@@ -47,7 +47,7 @@ func TestCrossRefIOToSchedNoOverlap(t *testing.T) {
 			{TimestampNs: 300, OffCpuNs: 50}, // off-CPU [250, 300] — no overlap
 		},
 	}
-	crossRefIOToSched(tb)
+	crossRefIOToSched(tb, NewIdleClassifier())
 
 	if tb.schedEvents[0].Reason != pb.OffCPUReason_OFF_CPU_UNKNOWN {
 		t.Errorf("reason = %v, want OFF_CPU_UNKNOWN", tb.schedEvents[0].Reason)
@@ -63,7 +63,7 @@ func TestCrossRefIOToSchedOverlap(t *testing.T) {
 			{TimestampNs: 250, OffCpuNs: 100}, // off-CPU [150, 250] — overlaps
 		},
 	}
-	crossRefIOToSched(tb)
+	crossRefIOToSched(tb, NewIdleClassifier())
 
 	if tb.ioEvents[0].CausedSchedEventIdx != 0 {
 		t.Errorf("IO.CausedSchedEventIdx = %d, want 0", tb.ioEvents[0].CausedSchedEventIdx)
@@ -86,7 +86,7 @@ func TestCrossRefIOToSchedMultipleIOs(t *testing.T) {
 			{TimestampNs: 350, OffCpuNs: 100}, // off-CPU [250, 350]
 		},
 	}
-	crossRefIOToSched(tb)
+	crossRefIOToSched(tb, NewIdleClassifier())
 
 	// Only the second IO should match
 	if tb.ioEvents[0].CausedSchedEventIdx != 0 {
@@ -104,8 +104,8 @@ func TestCrossRefEmpty(t *testing.T) {
 	tb := &threadBuilder{}
 	// Should not panic on empty, and no state changes
 	crossRefIOToSamples(tb)
-	crossRefIOToSched(tb)
-	states := deriveThreadStates(tb)
+	crossRefIOToSched(tb, NewIdleClassifier())
+	states := deriveThreadStates(tb, NewIdleClassifier())
 	if len(states) != 0 {
 		t.Errorf("states = %d, want 0", len(states))
 	}
@@ -113,7 +113,7 @@ func TestCrossRefEmpty(t *testing.T) {
 
 func TestDeriveThreadStatesEmpty(t *testing.T) {
 	tb := &threadBuilder{}
-	states := deriveThreadStates(tb)
+	states := deriveThreadStates(tb, NewIdleClassifier())
 	if len(states) != 0 {
 		t.Errorf("states = %d, want 0", len(states))
 	}
@@ -125,7 +125,7 @@ func TestDeriveThreadStatesSingleOffCPU(t *testing.T) {
 			{TimestampNs: 1000, OffCpuNs: 200}, // off-CPU [800, 1000]
 		},
 	}
-	states := deriveThreadStates(tb)
+	states := deriveThreadStates(tb, NewIdleClassifier())
 
 	// Single off-CPU interval, no preceding RUNNING gap
 	if len(states) != 1 {
@@ -146,7 +146,7 @@ func TestDeriveThreadStatesRunningGap(t *testing.T) {
 			{TimestampNs: 3000, OffCpuNs: 500}, // off [2500, 3000]
 		},
 	}
-	states := deriveThreadStates(tb)
+	states := deriveThreadStates(tb, NewIdleClassifier())
 
 	// off [900,1000] → running [1000,2500] → off [2500,3000]
 	if len(states) != 3 {
@@ -176,7 +176,7 @@ func TestDeriveThreadStatesWithIOClassification(t *testing.T) {
 			},
 		},
 	}
-	states := deriveThreadStates(tb)
+	states := deriveThreadStates(tb, NewIdleClassifier())
 
 	if len(states) != 1 {
 		t.Fatalf("states = %d, want 1", len(states))
@@ -194,7 +194,7 @@ func TestDeriveThreadStatesBackToBack(t *testing.T) {
 			{TimestampNs: 1500, OffCpuNs: 500}, // off [1000, 1500]
 		},
 	}
-	states := deriveThreadStates(tb)
+	states := deriveThreadStates(tb, NewIdleClassifier())
 
 	// Should be just 2 off-CPU intervals, no RUNNING gap
 	if len(states) != 2 {
