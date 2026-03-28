@@ -73,7 +73,7 @@ type Thread struct {
 	UnregisterTime any            `json:"unregisterTime"` // null
 	TID            int            `json:"tid"`
 	PID            int            `json:"pid"`
-	Markers        GeckoMarkers   `json:"markers"`
+	Markers        MarkersTable   `json:"markers"`
 	Samples        SamplesTable   `json:"samples"`
 	FrameTable     FrameTableData `json:"frameTable"`
 	StackTable     StackTableData `json:"stackTable"`
@@ -94,14 +94,14 @@ type SampleTupleSchema struct {
 	ThreadCPUDelta int `json:"threadCPUDelta,omitempty"`
 }
 
-// GeckoMarkers uses schema + tuple data format.
-type GeckoMarkers struct {
-	Schema GeckoMarkerSchema `json:"schema"`
+// MarkersTable uses schema + tuple data format.
+type MarkersTable struct {
+	Schema MarkerTupleSchema `json:"schema"`
 	Data   [][]any           `json:"data"`
 }
 
-// GeckoMarkerSchema defines tuple positions.
-type GeckoMarkerSchema struct {
+// MarkerTupleSchema defines tuple positions.
+type MarkerTupleSchema struct {
 	Name      int `json:"name"`
 	StartTime int `json:"startTime"`
 	EndTime   int `json:"endTime"`
@@ -184,7 +184,6 @@ type CounterSchema struct {
 }
 
 // MarkerPhase constants define timing semantics for markers.
-
 const (
 	MarkerPhaseInstant  = 0
 	MarkerPhaseInterval = 1
@@ -447,7 +446,7 @@ func buildSamples(tb *threadBuilder, tl *pb.ThreadTimeline) SamplesTable {
 	}
 }
 
-func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) GeckoMarkers {
+func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) MarkersTable {
 	data := make([][]any, 0)
 
 	// I/O event markers
@@ -536,8 +535,8 @@ func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) GeckoMarkers {
 		})
 	}
 
-	return GeckoMarkers{
-		Schema: GeckoMarkerSchema{
+	return MarkersTable{
+		Schema: MarkerTupleSchema{
 			Name: 0, StartTime: 1, EndTime: 2, Phase: 3, Category: 4, Data: 5,
 		},
 		Data: data,
