@@ -216,5 +216,5 @@ jobs:
         working-directory: collector
         run: |
           echo "Testing BPF programs on kernel: ${{ matrix.kernel }}"
-          vimto -kernel ghcr.io/cilium/ci-kernels:${{ matrix.kernel }} -- \
+          vimto -kernel ghcr.io/cilium/ci-kernels:${{ matrix.kernel }} -sudo -- \
             go test -v -count=1 ./test/bpf/...

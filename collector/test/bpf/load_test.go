@@ -6,7 +6,7 @@
 //
 // Run locally:  sudo go test -v -count=1 ./test/bpf/...
 // Run via VM:   make vm-test-bpf
-// Run via vimto: vimto -kernel :stable -- go test -v ./test/bpf/...
+// Run via vimto: vimto -kernel :stable -sudo -- go test -v ./test/bpf/...
 package bpf_test
 
 import (
@@ -17,27 +17,13 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
-	"golang.org/x/sys/unix"
 )
 
 func TestMain(m *testing.M) {
-	// Remove memlock rlimit for BPF map creation.
-	//
-	// In vimto QEMU VMs, cgroup2 is not mounted so the kernel falls back
-	// to rlimit-based memlock accounting. cilium/ebpf's RemoveMemlock()
-	// probe can give a false positive (small test map fits within default
-	// rlimit, so it thinks memcg accounting works) causing it to skip the
-	// rlimit raise. Our 16MB ring buffer maps then fail with EPERM.
-	//
-	// Force RLIMIT_MEMLOCK to infinity unconditionally.
+	// Remove memlock rlimit for BPF operations (required on kernels < 5.11).
 	if err := rlimit.RemoveMemlock(); err != nil {
-		fmt.Fprintf(os.Stderr, "RemoveMemlock: %v, trying direct prlimit\n", err)
+		fmt.Fprintf(os.Stderr, "WARNING: RemoveMemlock failed: %v\n", err)
 	}
-	newLimit := unix.Rlimit{Cur: unix.RLIM_INFINITY, Max: unix.RLIM_INFINITY}
-	if err := unix.Prlimit(0, unix.RLIMIT_MEMLOCK, &newLimit, nil); err != nil {
-		fmt.Fprintf(os.Stderr, "WARNING: failed to raise memlock rlimit: %v\n", err)
-	}
-
 	os.Exit(m.Run())
 }
 
