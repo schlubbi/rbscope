@@ -9,8 +9,9 @@ timeout 30
 
 listen "0.0.0.0:3000"
 
-# Refork workers periodically to benefit from CoW after warmup
-refork_after [50, 100, 1000]
+# Disable reforking in dev — it churns workers too frequently for the
+# collector to maintain stable uprobe attachments.
+# In production you'd enable: refork_after [1000, 5000]
 
 after_worker_fork do |_server, worker|
   # Each worker reconnects to MySQL
