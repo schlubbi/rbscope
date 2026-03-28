@@ -271,7 +271,7 @@ func TestOTLPExporter_FlushSpans(t *testing.T) {
 }
 
 func TestOTLPExporter_FlushHTTPError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -293,7 +293,7 @@ func TestOTLPExporter_FlushHTTPError(t *testing.T) {
 func TestOTLPExporter_CloseFlushesRemaining(t *testing.T) {
 	pushed := false
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		pushed = true
 		w.WriteHeader(http.StatusOK)
 	}))
