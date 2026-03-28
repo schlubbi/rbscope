@@ -45,7 +45,9 @@ jobs:
       # ── Build the gem ──────────────────────────────────────────────
       - name: Build rbscope gem
         working-directory: gem
-        run: bundle exec rake compile
+        run: |
+          bundle install
+          bundle exec rake compile
 
       # ── Generate BPF bytecode from C sources ───────────────────────
       - name: Generate BPF objects (bpf2go)
@@ -213,5 +215,5 @@ jobs:
         working-directory: collector
         run: |
           echo "Testing BPF programs on kernel: ${{ matrix.kernel }}"
-          vimto -kernel :${{ matrix.kernel }} -- \
+          vimto -kernel ghcr.io/cilium/ci-kernels:${{ matrix.kernel }} -- \
             go test -v -count=1 ./test/bpf/...
