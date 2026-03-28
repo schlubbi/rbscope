@@ -179,8 +179,3 @@ func (r *RealBPF) Close() error {
 	_ = r.objs.Close()
 	return nil
 }
-Close()
-	}
-	r.objs.Close()
-	return nil
-}
