@@ -76,7 +76,7 @@ jobs:
         run: bundle exec rake clobber compile test
         env:
           RBSCOPE_PROFILE: dev
-          RUSTFLAGS: "-Zsanitizer=${{ matrix.sanitizer }}"
+          RUSTFLAGS: "-Zsanitizer=${{ matrix.sanitizer }} -Cunsafe-allow-abi-mismatch=sanitizer"
 
   miri:
     runs-on: ubuntu-latest
