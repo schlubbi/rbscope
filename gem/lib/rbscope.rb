@@ -22,12 +22,16 @@ module Rbscope
 
   # Start profiling at the given frequency.
   #
-  # @param frequency [Integer] Sampling rate in Hz
+  # @param frequency [Integer] Sampling rate in Hz (max frequency when dynamic rate is on)
   #   - 19:  always-on (minimal overhead)
   #   - 99:  standard profiling
   #   - 999: deep capture
+  # @param overhead_target [Float] Max CPU overhead (0.0-0.5, default 0.02 = 2%)
+  # @param dynamic_rate [Boolean] Enable adaptive frequency (default true)
   # @return [Boolean] true if started, false if already running
-  def self.start(frequency: 99)
+  def self.start(frequency: 99, overhead_target: 0.02, dynamic_rate: true)
+    Native.set_overhead_target(overhead_target)
+    Native.set_dynamic_rate(dynamic_rate)
     Native.start_sampling(frequency)
   end
 
@@ -55,14 +59,29 @@ module Rbscope
   # Profile a block of code.
   #
   # @param frequency [Integer] Sampling rate in Hz
+  # @param overhead_target [Float] Max CPU overhead
+  # @param dynamic_rate [Boolean] Enable adaptive frequency
   # @yield The block to profile
   # @return [Integer] number of samples captured
-  def self.profile(frequency: 99)
-    start(frequency: frequency)
+  def self.profile(frequency: 99, overhead_target: 0.02, dynamic_rate: true)
+    start(frequency: frequency, overhead_target: overhead_target, dynamic_rate: dynamic_rate)
     yield
     stop
   rescue => e
     stop
     raise e
+  end
+
+  # Return current sampling statistics.
+  #
+  # @return [Hash] with keys :frequency_hz, :avg_sample_ns, :sample_count, :max_frequency_hz
+  def self.sampling_stats
+    freq, avg_ns, count, max_freq = Native.sampling_stats
+    {
+      frequency_hz: freq,
+      avg_sample_ns: avg_ns,
+      sample_count: count,
+      max_frequency_hz: max_freq
+    }
   end
 end

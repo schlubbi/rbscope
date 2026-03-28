@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 [dependencies]
 magnus = { version = "0.8", features = ["rb-sys"] }
 rb-sys = { version = "0.9", features = ["stable-api-compiled-fallback"] }
+libc = "0.2"
 
 [dev-dependencies]
 proptest = "1"
