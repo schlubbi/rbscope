@@ -101,6 +101,14 @@ static CURRENT_INTERVAL_NS: AtomicU64 = AtomicU64::new(0);
 /// Maximum frequency configured at start (Hz).
 static MAX_FREQUENCY_HZ: AtomicU32 = AtomicU32::new(99);
 
+// Stack caching state (single-threaded access from postponed job callback)
+/// Hash of the last captured stack (frame VALUEs + line numbers).
+static LAST_STACK_HASH: AtomicU64 = AtomicU64::new(0);
+/// Accumulated weight of consecutive identical samples.
+static CACHED_WEIGHT: AtomicU32 = AtomicU32::new(0);
+/// Number of samples skipped via cache hits (observable).
+static CACHE_HIT_COUNT: AtomicU64 = AtomicU64::new(0);
+
 struct SamplerState {
     thread_handle: Option<thread::JoinHandle<()>>,
 }
@@ -167,9 +175,31 @@ unsafe fn postponed_job_callback_inner() {
         return;
     }
 
+    let nf = num_frames as usize;
+
+    // Hash the raw frame pointers + line numbers (cheap — no string alloc)
+    let stack_hash = hash_frame_buf(&frame_buf, &line_buf, nf);
+    let prev_hash = LAST_STACK_HASH.load(Ordering::Relaxed);
+
+    if stack_hash == prev_hash && prev_hash != 0 {
+        // Cache hit — same stack as last sample. Accumulate weight,
+        // skip expensive string extraction + serialization + USDT probe.
+        CACHED_WEIGHT.fetch_add(1, Ordering::Relaxed);
+        CACHE_HIT_COUNT.fetch_add(1, Ordering::Relaxed);
+        SAMPLE_COUNT.fetch_add(1, Ordering::Relaxed);
+        update_sample_duration_ewma(start_ns);
+        IN_CALLBACK.store(false, Ordering::Release);
+        return;
+    }
+
+    // Cache miss — stack changed. Extract strings, serialize, fire probe.
+    // Include accumulated weight from previous consecutive hits.
+    let weight = CACHED_WEIGHT.swap(0, Ordering::Relaxed) + 1;
+    LAST_STACK_HASH.store(stack_hash, Ordering::Relaxed);
+
     // Build an InlineStack from the captured frames
     let mut stack = InlineStack::new();
-    for i in 0..num_frames as usize {
+    for i in 0..nf {
         let label = ruby_value_to_string(rb_profile_frame_full_label(frame_buf[i]));
         let path = ruby_value_to_string(rb_profile_frame_path(frame_buf[i]));
         let line = if line_buf[i] > 0 { line_buf[i] as u32 } else { 0 };
@@ -186,7 +216,7 @@ unsafe fn postponed_job_callback_inner() {
             .unwrap_or_default()
             .as_nanos() as u64;
 
-        probes::fire_ruby_sample(&buf, thread_id, timestamp_ns);
+        probes::fire_ruby_sample(&buf, thread_id, timestamp_ns, weight);
     }
 
     SAMPLE_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -241,6 +271,47 @@ unsafe fn ruby_value_to_string(value: rb_sys::VALUE) -> String {
 
     let bytes = std::slice::from_raw_parts(ptr as *const u8, len as usize);
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+// ---------------------------------------------------------------------------
+// Stack hash (FNV-1a)
+// ---------------------------------------------------------------------------
+
+/// FNV-1a hash of frame VALUE pointers + line numbers.
+/// This is much cheaper than extracting string labels — just hashes
+/// the raw pointer values which are stable for the same Ruby method.
+fn hash_frame_buf(
+    frames: &[rb_sys::VALUE],
+    lines: &[std::os::raw::c_int],
+    num_frames: usize,
+) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET;
+
+    // Hash num_frames first to distinguish different-length stacks
+    // that happen to share a prefix
+    for byte in (num_frames as u64).to_le_bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+
+    for i in 0..num_frames {
+        // Hash the frame VALUE (pointer to ISeq/Cfunc — stable for same method)
+        #[allow(clippy::unnecessary_cast)]
+        for byte in (frames[i] as u64).to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        // Hash the line number
+        for byte in (lines[i] as u32).to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+
+    hash
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +438,9 @@ fn reset_after_fork() {
     SAMPLE_COUNT.store(0, Ordering::Relaxed);
     OWNER_PID.store(0, Ordering::Relaxed);
     IN_CALLBACK.store(false, Ordering::Relaxed);
+    LAST_STACK_HASH.store(0, Ordering::Relaxed);
+    CACHED_WEIGHT.store(0, Ordering::Relaxed);
+    CACHE_HIT_COUNT.store(0, Ordering::Relaxed);
     probes::set_probes_enabled(false);
 
     let mut sampler = SAMPLER.lock().unwrap();
@@ -416,6 +490,9 @@ pub fn start_sampling(frequency: u32) -> Result<bool, magnus::Error> {
     SAMPLE_DURATION_EWMA_NS.store(0, Ordering::Relaxed);
     MAX_FREQUENCY_HZ.store(frequency, Ordering::Relaxed);
     CURRENT_INTERVAL_NS.store(interval_ns, Ordering::Relaxed);
+    LAST_STACK_HASH.store(0, Ordering::Relaxed);
+    CACHED_WEIGHT.store(0, Ordering::Relaxed);
+    CACHE_HIT_COUNT.store(0, Ordering::Relaxed);
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_clone = stop_flag.clone();
@@ -458,6 +535,11 @@ pub fn stop_sampling() -> Result<u64, magnus::Error> {
 
     RUNNING.store(false, Ordering::SeqCst);
     probes::set_probes_enabled(false);
+
+    // Flush any pending cached weight — the accumulated repeats
+    // haven't been emitted yet since no stack change triggered it.
+    CACHED_WEIGHT.store(0, Ordering::Relaxed);
+    LAST_STACK_HASH.store(0, Ordering::Relaxed);
 
     let count = SAMPLE_COUNT.load(Ordering::Relaxed);
 
@@ -530,9 +612,9 @@ pub fn set_dynamic_rate(enabled: bool) -> bool {
     enabled
 }
 
-/// Return current sampling stats as a hash.
+/// Return current sampling stats as a tuple.
 /// Called from Ruby: Rbscope::Native.sampling_stats
-pub fn sampling_stats() -> (u64, u64, u64, u32) {
+pub fn sampling_stats() -> (u64, u64, u64, u32, u64) {
     let interval_ns = CURRENT_INTERVAL_NS.load(Ordering::Relaxed);
     let frequency_hz = if interval_ns > 0 {
         1_000_000_000 / interval_ns
@@ -542,8 +624,9 @@ pub fn sampling_stats() -> (u64, u64, u64, u32) {
     let avg_sample_ns = SAMPLE_DURATION_EWMA_NS.load(Ordering::Relaxed);
     let sample_count = SAMPLE_COUNT.load(Ordering::Relaxed);
     let max_freq = MAX_FREQUENCY_HZ.load(Ordering::Relaxed);
+    let cache_hits = CACHE_HIT_COUNT.load(Ordering::Relaxed);
 
-    (frequency_hz, avg_sample_ns, sample_count, max_freq)
+    (frequency_hz, avg_sample_ns, sample_count, max_freq, cache_hits)
 }
 
 // ---------------------------------------------------------------------------
@@ -687,5 +770,59 @@ mod tests {
         let duration = 20_000u64;
         let new_ewma = (prev * 7 + duration) / 8;
         assert_eq!(new_ewma, 90_000, "EWMA α=1/8: 100k*7/8 + 20k*1/8 = 90k");
+    }
+
+    // --- Stack hash tests ---
+
+    #[test]
+    fn test_hash_frame_buf_deterministic() {
+        let frames: [rb_sys::VALUE; 3] = [0x1000, 0x2000, 0x3000];
+        let lines: [std::os::raw::c_int; 3] = [10, 20, 30];
+
+        let h1 = hash_frame_buf(&frames, &lines, 3);
+        let h2 = hash_frame_buf(&frames, &lines, 3);
+        assert_eq!(h1, h2, "same input should produce same hash");
+        assert_ne!(h1, 0, "hash should not be zero");
+    }
+
+    #[test]
+    fn test_hash_frame_buf_different_frames() {
+        let frames_a: [rb_sys::VALUE; 2] = [0x1000, 0x2000];
+        let frames_b: [rb_sys::VALUE; 2] = [0x1000, 0x3000];
+        let lines: [std::os::raw::c_int; 2] = [10, 20];
+
+        let ha = hash_frame_buf(&frames_a, &lines, 2);
+        let hb = hash_frame_buf(&frames_b, &lines, 2);
+        assert_ne!(ha, hb, "different frames should produce different hashes");
+    }
+
+    #[test]
+    fn test_hash_frame_buf_different_lines() {
+        let frames: [rb_sys::VALUE; 2] = [0x1000, 0x2000];
+        let lines_a: [std::os::raw::c_int; 2] = [10, 20];
+        let lines_b: [std::os::raw::c_int; 2] = [10, 21];
+
+        let ha = hash_frame_buf(&frames, &lines_a, 2);
+        let hb = hash_frame_buf(&frames, &lines_b, 2);
+        assert_ne!(ha, hb, "different line numbers should produce different hashes");
+    }
+
+    #[test]
+    fn test_hash_frame_buf_different_lengths() {
+        let frames: [rb_sys::VALUE; 3] = [0x1000, 0x2000, 0x3000];
+        let lines: [std::os::raw::c_int; 3] = [10, 20, 30];
+
+        let h2 = hash_frame_buf(&frames, &lines, 2);
+        let h3 = hash_frame_buf(&frames, &lines, 3);
+        assert_ne!(h2, h3, "different frame counts should produce different hashes");
+    }
+
+    #[test]
+    fn test_hash_frame_buf_empty() {
+        let frames: [rb_sys::VALUE; 0] = [];
+        let lines: [std::os::raw::c_int; 0] = [];
+
+        let h = hash_frame_buf(&frames, &lines, 0);
+        assert_ne!(h, 0, "empty stack should still produce a non-zero hash");
     }
 }

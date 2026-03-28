@@ -31,7 +31,7 @@ struct ruby_sample_event {
     u32 event_type;
     u32 pid;
     u32 tid;
-    u32 _pad0;
+    u32 weight;        // number of sample ticks this event represents
     u64 timestamp_ns;
     u64 thread_id;
     u32 stack_data_len;  // bytes of inline stack data following this header
@@ -63,12 +63,14 @@ struct {
 //   arg1: stack data length (bytes)
 //   arg2: thread ID (Ruby VALUE)
 //   arg3: timestamp (nanoseconds)
+//   arg4: weight (number of sample ticks this event represents)
 SEC("uprobe/ruby_sample")
 int handle_ruby_sample(struct pt_regs *ctx) {
     u64 stack_ptr = PT_REGS_PARM1(ctx);
     u32 stack_len = (u32)PT_REGS_PARM2(ctx);
     u64 thread_id = PT_REGS_PARM3(ctx);
     u64 timestamp = PT_REGS_PARM4(ctx);
+    u32 weight = (u32)PT_REGS_PARM5(ctx);
 
     if (stack_len == 0 || stack_len > MAX_STACK_SIZE)
         return 0;
@@ -83,6 +85,7 @@ int handle_ruby_sample(struct pt_regs *ctx) {
     event->event_type = EVENT_RUBY_SAMPLE;
     event->pid = bpf_get_current_pid_tgid() >> 32;
     event->tid = (u32)bpf_get_current_pid_tgid();
+    event->weight = weight > 0 ? weight : 1;
     event->timestamp_ns = timestamp ? timestamp : bpf_ktime_get_ns();
     event->thread_id = thread_id;
     event->stack_data_len = stack_len;

@@ -6,7 +6,7 @@ import (
 )
 
 func TestParseEvent_RubySample(t *testing.T) {
-	// New BPF layout: type(4) + pid(4) + tid(4) + _pad0(4) + timestamp_ns(8) +
+	// BPF layout: type(4) + pid(4) + tid(4) + weight(4) + timestamp_ns(8) +
 	// thread_id(8) + stack_data_len(4) + _pad1(4) = 40 bytes header
 	// Plus inline stack data follows
 	stackData := buildTestStackData("Object#foo", "/app/test.rb", 42)
@@ -16,6 +16,7 @@ func TestParseEvent_RubySample(t *testing.T) {
 	binary.LittleEndian.PutUint32(data[0:4], uint32(EventRubySample))
 	binary.LittleEndian.PutUint32(data[4:8], 1234)
 	binary.LittleEndian.PutUint32(data[8:12], 5678)
+	binary.LittleEndian.PutUint32(data[12:16], 5) // weight = 5
 	binary.LittleEndian.PutUint64(data[16:24], 1000000000)
 	binary.LittleEndian.PutUint64(data[24:32], 99) // thread_id
 	binary.LittleEndian.PutUint32(data[32:36], uint32(len(stackData)))
@@ -36,6 +37,9 @@ func TestParseEvent_RubySample(t *testing.T) {
 	}
 	if sample.TID != 5678 {
 		t.Errorf("TID: got %d, want 5678", sample.TID)
+	}
+	if sample.Weight != 5 {
+		t.Errorf("Weight: got %d, want 5", sample.Weight)
 	}
 	if sample.ThreadID != 99 {
 		t.Errorf("ThreadID: got %d, want 99", sample.ThreadID)
@@ -192,4 +196,31 @@ func buildTestStackData(label, path string, line uint32) []byte {
 	buf = append(buf, path...)
 	buf = binary.LittleEndian.AppendUint32(buf, line)
 	return buf
+}
+
+func TestParseEvent_RubySampleWeightZeroDefaultsToOne(t *testing.T) {
+	// Pre-weight events have 0 in the weight field (was _pad0).
+	// Parser should default to weight=1.
+	stackData := buildTestStackData("Object#bar", "/app/bar.rb", 10)
+	totalSize := rubySampleHeaderSize + len(stackData)
+	data := make([]byte, totalSize)
+
+	binary.LittleEndian.PutUint32(data[0:4], uint32(EventRubySample))
+	binary.LittleEndian.PutUint32(data[4:8], 100)
+	binary.LittleEndian.PutUint32(data[8:12], 200)
+	// weight at 12:16 left as 0
+	binary.LittleEndian.PutUint64(data[16:24], 999)
+	binary.LittleEndian.PutUint64(data[24:32], 42)
+	binary.LittleEndian.PutUint32(data[32:36], uint32(len(stackData)))
+	copy(data[rubySampleHeaderSize:], stackData)
+
+	evt, err := ParseEvent(data)
+	if err != nil {
+		t.Fatalf("ParseEvent failed: %v", err)
+	}
+
+	sample := evt.(*RubySampleEvent)
+	if sample.Weight != 1 {
+		t.Errorf("Weight: got %d, want 1 (default for zero)", sample.Weight)
+	}
 }

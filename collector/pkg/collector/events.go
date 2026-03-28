@@ -37,6 +37,7 @@ const rubySampleHeaderSize = 40
 // The stack data is serialized in format v2 (inline strings) by the gem.
 type RubySampleEvent struct {
 	EventHeader
+	Weight       uint32 // number of sample ticks this event represents
 	ThreadID     uint64
 	StackDataLen uint32
 	StackData    []byte // inline format v2 stack data
@@ -115,7 +116,7 @@ func parseHeader(data []byte) EventHeader {
 }
 
 // parseRubySampleFromRaw parses the complete ruby_sample_event from raw BPF bytes.
-// Layout: event_type(4) + pid(4) + tid(4) + _pad0(4) + timestamp_ns(8) + thread_id(8) + stack_data_len(4) + _pad1(4) = 40 bytes header
+// Layout: event_type(4) + pid(4) + tid(4) + weight(4) + timestamp_ns(8) + thread_id(8) + stack_data_len(4) + _pad1(4) = 40 bytes header
 // Followed by stack_data_len bytes of inline format v2 stack data.
 func parseRubySampleFromRaw(data []byte) (*RubySampleEvent, error) {
 	if len(data) < rubySampleHeaderSize {
@@ -125,7 +126,10 @@ func parseRubySampleFromRaw(data []byte) (*RubySampleEvent, error) {
 	ev.Type = EventType(binary.LittleEndian.Uint32(data[0:4]))
 	ev.PID = binary.LittleEndian.Uint32(data[4:8])
 	ev.TID = binary.LittleEndian.Uint32(data[8:12])
-	// skip _pad0 at 12:16
+	ev.Weight = binary.LittleEndian.Uint32(data[12:16])
+	if ev.Weight == 0 {
+		ev.Weight = 1 // pre-weight events default to 1
+	}
 	ev.Timestamp = binary.LittleEndian.Uint64(data[16:24])
 	ev.ThreadID = binary.LittleEndian.Uint64(data[24:32])
 	ev.StackDataLen = binary.LittleEndian.Uint32(data[32:36])
