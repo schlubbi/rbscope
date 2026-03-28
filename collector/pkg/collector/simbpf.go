@@ -187,18 +187,29 @@ func (s *SimBPF) generateLoop() {
 	defer ticker.Stop()
 
 	rng := rand.New(rand.NewSource(time.Now().UnixNano())) // #nosec G404 -- simulation only
+	ioCounter := 0
 
 	for {
 		select {
 		case <-s.stopCh:
 			return
 		case <-ticker.C:
+			// Generate a stack sample every tick
 			stack := pickStack(rng)
 			event := s.buildSampleEvent(stack, rng)
 			select {
 			case s.eventBuf <- event:
 			default:
-				// drop if buffer full
+			}
+
+			// Generate an IO event every ~5th tick
+			ioCounter++
+			if ioCounter%5 == 0 {
+				ioEvent := s.buildIOEvent(rng)
+				select {
+				case s.eventBuf <- ioEvent:
+				default:
+				}
 			}
 		}
 	}
@@ -250,5 +261,101 @@ func (s *SimBPF) buildSampleEvent(stack simStack, rng *rand.Rand) []byte {
 	// pad at 36:40
 
 	copy(buf[rubySampleHeaderSize:], stackData)
+	return buf
+}
+
+// simIOTarget represents a simulated connection target for IO events.
+type simIOTarget struct {
+	weight     uint32
+	op         uint32 // IO_OP_*
+	fdType     uint8  // FD_TYPE_*
+	localPort  uint16
+	remotePort uint16
+	remoteAddr uint32 // IPv4, network byte order
+	srttUs     uint32 // simulated RTT
+	latencyNs  uint64 // simulated I/O latency
+}
+
+// Simulated IO targets representing a Rails app talking to MySQL, Redis, etc.
+var simIOTargets = []simIOTarget{
+	{weight: 40, op: IoOpRead, fdType: 2, localPort: 54321, remotePort: 3306,
+		remoteAddr: 0x0100000A, srttUs: 500, latencyNs: 2_000_000},   // MySQL read, RTT=0.5ms
+	{weight: 20, op: IoOpWrite, fdType: 2, localPort: 54321, remotePort: 3306,
+		remoteAddr: 0x0100000A, srttUs: 500, latencyNs: 500_000},      // MySQL write
+	{weight: 15, op: IoOpRead, fdType: 2, localPort: 54322, remotePort: 6379,
+		remoteAddr: 0x0200000A, srttUs: 100, latencyNs: 200_000},      // Redis read, RTT=0.1ms
+	{weight: 10, op: IoOpRead, fdType: 1, localPort: 0, remotePort: 0,
+		remoteAddr: 0, srttUs: 0, latencyNs: 50_000},                  // file read
+	{weight: 10, op: IoOpWrite, fdType: 5, localPort: 0, remotePort: 0,
+		remoteAddr: 0, srttUs: 0, latencyNs: 10_000},                  // pipe write (log)
+	{weight: 5, op: IoOpConnect, fdType: 2, localPort: 54323, remotePort: 443,
+		remoteAddr: 0x01010101, srttUs: 15000, latencyNs: 30_000_000}, // HTTPS connect, RTT=15ms
+}
+
+var totalIOWeight uint32
+
+func init() {
+	for _, t := range simIOTargets {
+		totalIOWeight += t.weight
+	}
+}
+
+func pickIOTarget(rng *rand.Rand) simIOTarget {
+	r := rng.Uint32() % totalIOWeight
+	var cumulative uint32
+	for _, t := range simIOTargets {
+		cumulative += t.weight
+		if r < cumulative {
+			return t
+		}
+	}
+	return simIOTargets[0]
+}
+
+func (s *SimBPF) buildIOEvent(rng *rand.Rand) []byte {
+	target := pickIOTarget(rng)
+
+	// Build enriched IO event (112 bytes, matching ioEventEnrichedSize)
+	buf := make([]byte, ioEventEnrichedSize)
+
+	tid := s.pid + uint32(rng.Intn(8)) // #nosec G115
+
+	// Header (24 bytes)
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(EventIO))
+	binary.LittleEndian.PutUint32(buf[4:8], s.pid)
+	binary.LittleEndian.PutUint32(buf[8:12], tid)
+	// pad at 12:16
+	binary.LittleEndian.PutUint64(buf[16:24], uint64(time.Since(s.startTime).Nanoseconds())) // #nosec G115
+
+	// IO fields (24 bytes)
+	binary.LittleEndian.PutUint32(buf[24:28], target.op)
+	binary.LittleEndian.PutUint32(buf[28:32], uint32(rng.Intn(100)+3)) // #nosec G115 -- fd number
+	// bytes (s64) at 32:40 — add jitter to latency
+	jitter := int64(float64(target.latencyNs) * (0.5 + rng.Float64()))
+	binary.LittleEndian.PutUint64(buf[32:40], uint64(1024+rng.Intn(8192))) // #nosec G115 -- bytes transferred
+	binary.LittleEndian.PutUint64(buf[40:48], uint64(jitter))              // #nosec G115 -- latency
+
+	// Socket enrichment (16 bytes)
+	buf[48] = target.fdType
+	buf[49] = 1 // TCP_ESTABLISHED
+	binary.LittleEndian.PutUint16(buf[50:52], target.localPort)
+	binary.LittleEndian.PutUint16(buf[52:54], target.remotePort)
+	// pad at 54:56
+	binary.LittleEndian.PutUint32(buf[56:60], 0x6400A8C0) // 192.168.0.100 (local)
+	binary.LittleEndian.PutUint32(buf[60:64], target.remoteAddr)
+
+	// TCP stats (48 bytes, only for TCP sockets)
+	if target.fdType == 2 { // FD_TYPE_TCP
+		binary.LittleEndian.PutUint32(buf[64:68], target.srttUs)
+		binary.LittleEndian.PutUint32(buf[68:72], 10+uint32(rng.Intn(20)))  // snd_cwnd
+		binary.LittleEndian.PutUint32(buf[72:76], uint32(rng.Intn(5)))      // total_retrans
+		binary.LittleEndian.PutUint32(buf[76:80], uint32(rng.Intn(8)))      // packets_out
+		binary.LittleEndian.PutUint32(buf[80:84], uint32(rng.Intn(2)))      // retrans_out
+		binary.LittleEndian.PutUint32(buf[84:88], 0)                        // lost_out
+		binary.LittleEndian.PutUint32(buf[88:92], 65535)                     // rcv_wnd
+		binary.LittleEndian.PutUint64(buf[96:104], uint64(rng.Intn(100000))) // bytes_sent
+		binary.LittleEndian.PutUint64(buf[104:112], uint64(rng.Intn(500000))) // bytes_received
+	}
+
 	return buf
 }

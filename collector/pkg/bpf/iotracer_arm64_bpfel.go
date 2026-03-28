@@ -78,10 +78,9 @@ type iotracerProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type iotracerMapSpecs struct {
-	Inflight       *ebpf.MapSpec `ebpf:"inflight"`
-	IoEvents       *ebpf.MapSpec `ebpf:"io_events"`
-	TargetPids     *ebpf.MapSpec `ebpf:"target_pids"`
-	TidToRubyStack *ebpf.MapSpec `ebpf:"tid_to_ruby_stack"`
+	Inflight   *ebpf.MapSpec `ebpf:"inflight"`
+	IoEvents   *ebpf.MapSpec `ebpf:"io_events"`
+	TargetPids *ebpf.MapSpec `ebpf:"target_pids"`
 }
 
 // iotracerVariableSpecs contains global variables before they are loaded into the kernel.
@@ -110,10 +109,9 @@ func (o *iotracerObjects) Close() error {
 //
 // It can be passed to loadIotracerObjects or ebpf.CollectionSpec.LoadAndAssign.
 type iotracerMaps struct {
-	Inflight       *ebpf.Map `ebpf:"inflight"`
-	IoEvents       *ebpf.Map `ebpf:"io_events"`
-	TargetPids     *ebpf.Map `ebpf:"target_pids"`
-	TidToRubyStack *ebpf.Map `ebpf:"tid_to_ruby_stack"`
+	Inflight   *ebpf.Map `ebpf:"inflight"`
+	IoEvents   *ebpf.Map `ebpf:"io_events"`
+	TargetPids *ebpf.Map `ebpf:"target_pids"`
 }
 
 func (m *iotracerMaps) Close() error {
@@ -121,7 +119,6 @@ func (m *iotracerMaps) Close() error {
 		m.Inflight,
 		m.IoEvents,
 		m.TargetPids,
-		m.TidToRubyStack,
 	)
 }
 

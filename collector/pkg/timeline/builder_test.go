@@ -412,3 +412,87 @@ func TestEmptyCapture(t *testing.T) {
 		t.Error("expected default categories")
 	}
 }
+
+func TestBuilderIOEventFdInfo(t *testing.T) {
+	b := NewBuilder("test", "host", 1000, 99)
+
+	// Ingest a TCP IO event
+	b.Ingest(&collector.IOEvent{
+		EventHeader: collector.EventHeader{
+			Type: collector.EventIO, PID: 1000, TID: 100, Timestamp: 1000,
+		},
+		FD: 7, Op: collector.IoOpRead, Bytes: 4096, LatencyNs: 2_000_000,
+		FdType: 2, SockState: 1,
+		LocalPort: 54321, RemotePort: 3306,
+		LocalAddr: 0x0100A8C0, RemoteAddr: 0x0100000A,
+		TcpStats: &collector.IOTcpStats{
+			SrttUs: 500, SndCwnd: 10, TotalRetrans: 3,
+			PacketsOut: 5, RcvWnd: 65535,
+		},
+	})
+
+	capture := b.Build()
+
+	if len(capture.Threads) != 1 {
+		t.Fatalf("expected 1 thread, got %d", len(capture.Threads))
+	}
+	thread := capture.Threads[0]
+	if len(thread.IoEvents) != 1 {
+		t.Fatalf("expected 1 IO event, got %d", len(thread.IoEvents))
+	}
+
+	ioev := thread.IoEvents[0]
+
+	// Check fd_info_idx is populated and points to a connection string
+	if ioev.FdInfoIdx == 0 {
+		t.Error("FdInfoIdx should be > 0 (interned connection string)")
+	}
+	fdInfo := capture.StringTable[ioev.FdInfoIdx]
+	if fdInfo != "tcp:192.168.0.1:54321→10.0.0.1:3306" {
+		t.Errorf("fd_info string: got %q", fdInfo)
+	}
+
+	// Check TCP stats
+	if ioev.TcpStats == nil {
+		t.Fatal("TcpStats is nil")
+	}
+	if ioev.TcpStats.SrttUs != 500 {
+		t.Errorf("SrttUs: got %d, want 500", ioev.TcpStats.SrttUs)
+	}
+	if ioev.TcpStats.SndCwnd != 10 {
+		t.Errorf("SndCwnd: got %d, want 10", ioev.TcpStats.SndCwnd)
+	}
+
+	// Check ports
+	if ioev.LocalPort != 54321 {
+		t.Errorf("LocalPort: got %d, want 54321", ioev.LocalPort)
+	}
+	if ioev.RemotePort != 3306 {
+		t.Errorf("RemotePort: got %d, want 3306", ioev.RemotePort)
+	}
+}
+
+func TestBuilderIOEventFileType(t *testing.T) {
+	b := NewBuilder("test", "host", 1000, 99)
+
+	// Ingest a file IO event (no socket info)
+	b.Ingest(&collector.IOEvent{
+		EventHeader: collector.EventHeader{
+			Type: collector.EventIO, PID: 1000, TID: 100, Timestamp: 2000,
+		},
+		FD: 3, Op: collector.IoOpRead, Bytes: 512, LatencyNs: 50_000,
+		FdType: 1, // FILE
+	})
+
+	capture := b.Build()
+	thread := capture.Threads[0]
+	ioev := thread.IoEvents[0]
+
+	fdInfo := capture.StringTable[ioev.FdInfoIdx]
+	if fdInfo != "file" {
+		t.Errorf("fd_info for file: got %q, want %q", fdInfo, "file")
+	}
+	if ioev.TcpStats != nil {
+		t.Errorf("TcpStats should be nil for file, got %+v", ioev.TcpStats)
+	}
+}

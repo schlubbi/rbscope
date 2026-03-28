@@ -149,6 +149,65 @@ func (ThreadState) EnumDescriptor() ([]byte, []int) {
 	return file_rbscope_proto_rawDescGZIP(), []int{1}
 }
 
+// FdType classifies what a file descriptor backs.
+type FdType int32
+
+const (
+	FdType_FD_UNKNOWN FdType = 0
+	FdType_FD_FILE    FdType = 1
+	FdType_FD_TCP     FdType = 2
+	FdType_FD_UDP     FdType = 3
+	FdType_FD_UNIX    FdType = 4
+	FdType_FD_PIPE    FdType = 5
+)
+
+// Enum value maps for FdType.
+var (
+	FdType_name = map[int32]string{
+		0: "FD_UNKNOWN",
+		1: "FD_FILE",
+		2: "FD_TCP",
+		3: "FD_UDP",
+		4: "FD_UNIX",
+		5: "FD_PIPE",
+	}
+	FdType_value = map[string]int32{
+		"FD_UNKNOWN": 0,
+		"FD_FILE":    1,
+		"FD_TCP":     2,
+		"FD_UDP":     3,
+		"FD_UNIX":    4,
+		"FD_PIPE":    5,
+	}
+)
+
+func (x FdType) Enum() *FdType {
+	p := new(FdType)
+	*p = x
+	return p
+}
+
+func (x FdType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FdType) Descriptor() protoreflect.EnumDescriptor {
+	return file_rbscope_proto_enumTypes[2].Descriptor()
+}
+
+func (FdType) Type() protoreflect.EnumType {
+	return &file_rbscope_proto_enumTypes[2]
+}
+
+func (x FdType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FdType.Descriptor instead.
+func (FdType) EnumDescriptor() ([]byte, []int) {
+	return file_rbscope_proto_rawDescGZIP(), []int{2}
+}
+
 // Capture is rbscope's canonical internal data model. A single capture
 // represents one flush window (typically 10s) of profiling data for one
 // process, organized as per-thread timelines with cross-referenced events.
@@ -607,8 +666,15 @@ type IOEvent struct {
 	// Cross-references (populated by timeline.Builder)
 	NearestSampleIdx    uint32 `protobuf:"varint,7,opt,name=nearest_sample_idx,json=nearestSampleIdx,proto3" json:"nearest_sample_idx,omitempty"`            // closest Sample by timestamp
 	CausedSchedEventIdx uint32 `protobuf:"varint,8,opt,name=caused_sched_event_idx,json=causedSchedEventIdx,proto3" json:"caused_sched_event_idx,omitempty"` // SchedEvent this I/O triggered
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// TCP performance stats (only populated for TCP sockets)
+	TcpStats *TcpStats `protobuf:"bytes,9,opt,name=tcp_stats,json=tcpStats,proto3" json:"tcp_stats,omitempty"`
+	// FD type classification
+	FdType FdType `protobuf:"varint,10,opt,name=fd_type,json=fdType,proto3,enum=rbscope.FdType" json:"fd_type,omitempty"`
+	// Socket addresses (host byte order for ports)
+	LocalPort     uint32 `protobuf:"varint,11,opt,name=local_port,json=localPort,proto3" json:"local_port,omitempty"`
+	RemotePort    uint32 `protobuf:"varint,12,opt,name=remote_port,json=remotePort,proto3" json:"remote_port,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *IOEvent) Reset() {
@@ -693,6 +759,34 @@ func (x *IOEvent) GetNearestSampleIdx() uint32 {
 func (x *IOEvent) GetCausedSchedEventIdx() uint32 {
 	if x != nil {
 		return x.CausedSchedEventIdx
+	}
+	return 0
+}
+
+func (x *IOEvent) GetTcpStats() *TcpStats {
+	if x != nil {
+		return x.TcpStats
+	}
+	return nil
+}
+
+func (x *IOEvent) GetFdType() FdType {
+	if x != nil {
+		return x.FdType
+	}
+	return FdType_FD_UNKNOWN
+}
+
+func (x *IOEvent) GetLocalPort() uint32 {
+	if x != nil {
+		return x.LocalPort
+	}
+	return 0
+}
+
+func (x *IOEvent) GetRemotePort() uint32 {
+	if x != nil {
+		return x.RemotePort
 	}
 	return 0
 }
@@ -1069,6 +1163,116 @@ func (x *ThreadStateInterval) GetCauseEventIdx() uint32 {
 	return 0
 }
 
+// TcpStats captures TCP performance metrics at the time of an I/O event.
+// Read from struct tcp_sock via BPF CO-RE.
+type TcpStats struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SrttUs        uint32                 `protobuf:"varint,1,opt,name=srtt_us,json=srttUs,proto3" json:"srtt_us,omitempty"`                      // smoothed RTT (microseconds)
+	SndCwnd       uint32                 `protobuf:"varint,2,opt,name=snd_cwnd,json=sndCwnd,proto3" json:"snd_cwnd,omitempty"`                   // congestion window (packets)
+	TotalRetrans  uint32                 `protobuf:"varint,3,opt,name=total_retrans,json=totalRetrans,proto3" json:"total_retrans,omitempty"`    // total retransmits for this connection
+	PacketsOut    uint32                 `protobuf:"varint,4,opt,name=packets_out,json=packetsOut,proto3" json:"packets_out,omitempty"`          // packets in flight
+	RetransOut    uint32                 `protobuf:"varint,5,opt,name=retrans_out,json=retransOut,proto3" json:"retrans_out,omitempty"`          // retransmitted packets outstanding
+	LostOut       uint32                 `protobuf:"varint,6,opt,name=lost_out,json=lostOut,proto3" json:"lost_out,omitempty"`                   // lost packets
+	RcvWnd        uint32                 `protobuf:"varint,7,opt,name=rcv_wnd,json=rcvWnd,proto3" json:"rcv_wnd,omitempty"`                      // receive window
+	BytesSent     uint64                 `protobuf:"varint,8,opt,name=bytes_sent,json=bytesSent,proto3" json:"bytes_sent,omitempty"`             // total bytes sent
+	BytesReceived uint64                 `protobuf:"varint,9,opt,name=bytes_received,json=bytesReceived,proto3" json:"bytes_received,omitempty"` // total bytes received
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TcpStats) Reset() {
+	*x = TcpStats{}
+	mi := &file_rbscope_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TcpStats) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TcpStats) ProtoMessage() {}
+
+func (x *TcpStats) ProtoReflect() protoreflect.Message {
+	mi := &file_rbscope_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TcpStats.ProtoReflect.Descriptor instead.
+func (*TcpStats) Descriptor() ([]byte, []int) {
+	return file_rbscope_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *TcpStats) GetSrttUs() uint32 {
+	if x != nil {
+		return x.SrttUs
+	}
+	return 0
+}
+
+func (x *TcpStats) GetSndCwnd() uint32 {
+	if x != nil {
+		return x.SndCwnd
+	}
+	return 0
+}
+
+func (x *TcpStats) GetTotalRetrans() uint32 {
+	if x != nil {
+		return x.TotalRetrans
+	}
+	return 0
+}
+
+func (x *TcpStats) GetPacketsOut() uint32 {
+	if x != nil {
+		return x.PacketsOut
+	}
+	return 0
+}
+
+func (x *TcpStats) GetRetransOut() uint32 {
+	if x != nil {
+		return x.RetransOut
+	}
+	return 0
+}
+
+func (x *TcpStats) GetLostOut() uint32 {
+	if x != nil {
+		return x.LostOut
+	}
+	return 0
+}
+
+func (x *TcpStats) GetRcvWnd() uint32 {
+	if x != nil {
+		return x.RcvWnd
+	}
+	return 0
+}
+
+func (x *TcpStats) GetBytesSent() uint64 {
+	if x != nil {
+		return x.BytesSent
+	}
+	return 0
+}
+
+func (x *TcpStats) GetBytesReceived() uint64 {
+	if x != nil {
+		return x.BytesReceived
+	}
+	return 0
+}
+
 // StackFrame is a single frame in a call stack.
 type StackFrame struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
@@ -1081,7 +1285,7 @@ type StackFrame struct {
 
 func (x *StackFrame) Reset() {
 	*x = StackFrame{}
-	mi := &file_rbscope_proto_msgTypes[11]
+	mi := &file_rbscope_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1093,7 +1297,7 @@ func (x *StackFrame) String() string {
 func (*StackFrame) ProtoMessage() {}
 
 func (x *StackFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_rbscope_proto_msgTypes[11]
+	mi := &file_rbscope_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1106,7 +1310,7 @@ func (x *StackFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StackFrame.ProtoReflect.Descriptor instead.
 func (*StackFrame) Descriptor() ([]byte, []int) {
-	return file_rbscope_proto_rawDescGZIP(), []int{11}
+	return file_rbscope_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *StackFrame) GetFunctionNameIdx() uint32 {
@@ -1143,7 +1347,7 @@ type OTelContext struct {
 
 func (x *OTelContext) Reset() {
 	*x = OTelContext{}
-	mi := &file_rbscope_proto_msgTypes[12]
+	mi := &file_rbscope_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1155,7 +1359,7 @@ func (x *OTelContext) String() string {
 func (*OTelContext) ProtoMessage() {}
 
 func (x *OTelContext) ProtoReflect() protoreflect.Message {
-	mi := &file_rbscope_proto_msgTypes[12]
+	mi := &file_rbscope_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1168,7 +1372,7 @@ func (x *OTelContext) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OTelContext.ProtoReflect.Descriptor instead.
 func (*OTelContext) Descriptor() ([]byte, []int) {
-	return file_rbscope_proto_rawDescGZIP(), []int{12}
+	return file_rbscope_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *OTelContext) GetTraceId() []byte {
@@ -1245,7 +1449,7 @@ const file_rbscope_proto_rawDesc = "" +
 	"\ftimestamp_ns\x18\x01 \x01(\x04R\vtimestampNs\x12\x1b\n" +
 	"\tframe_ids\x18\x02 \x03(\rR\bframeIds\x127\n" +
 	"\fotel_context\x18\x03 \x01(\v2\x14.rbscope.OTelContextR\votelContext\x12\x16\n" +
-	"\x06weight\x18\x04 \x01(\rR\x06weight\"\x95\x02\n" +
+	"\x06weight\x18\x04 \x01(\rR\x06weight\"\xaf\x03\n" +
 	"\aIOEvent\x12!\n" +
 	"\ftimestamp_ns\x18\x01 \x01(\x04R\vtimestampNs\x12\x1f\n" +
 	"\vsyscall_idx\x18\x02 \x01(\rR\n" +
@@ -1256,7 +1460,14 @@ const file_rbscope_proto_rawDesc = "" +
 	"latency_ns\x18\x05 \x01(\x04R\tlatencyNs\x12\x1e\n" +
 	"\vfd_info_idx\x18\x06 \x01(\rR\tfdInfoIdx\x12,\n" +
 	"\x12nearest_sample_idx\x18\a \x01(\rR\x10nearestSampleIdx\x123\n" +
-	"\x16caused_sched_event_idx\x18\b \x01(\rR\x13causedSchedEventIdx\"\xd0\x01\n" +
+	"\x16caused_sched_event_idx\x18\b \x01(\rR\x13causedSchedEventIdx\x12.\n" +
+	"\ttcp_stats\x18\t \x01(\v2\x11.rbscope.TcpStatsR\btcpStats\x12(\n" +
+	"\afd_type\x18\n" +
+	" \x01(\x0e2\x0f.rbscope.FdTypeR\x06fdType\x12\x1d\n" +
+	"\n" +
+	"local_port\x18\v \x01(\rR\tlocalPort\x12\x1f\n" +
+	"\vremote_port\x18\f \x01(\rR\n" +
+	"remotePort\"\xd0\x01\n" +
 	"\n" +
 	"SchedEvent\x12!\n" +
 	"\ftimestamp_ns\x18\x01 \x01(\x04R\vtimestampNs\x12\x1c\n" +
@@ -1288,7 +1499,20 @@ const file_rbscope_proto_rawDesc = "" +
 	"\bstart_ns\x18\x01 \x01(\x04R\astartNs\x12\x15\n" +
 	"\x06end_ns\x18\x02 \x01(\x04R\x05endNs\x12*\n" +
 	"\x05state\x18\x03 \x01(\x0e2\x14.rbscope.ThreadStateR\x05state\x12&\n" +
-	"\x0fcause_event_idx\x18\x04 \x01(\rR\rcauseEventIdx\"}\n" +
+	"\x0fcause_event_idx\x18\x04 \x01(\rR\rcauseEventIdx\"\x9f\x02\n" +
+	"\bTcpStats\x12\x17\n" +
+	"\asrtt_us\x18\x01 \x01(\rR\x06srttUs\x12\x19\n" +
+	"\bsnd_cwnd\x18\x02 \x01(\rR\asndCwnd\x12#\n" +
+	"\rtotal_retrans\x18\x03 \x01(\rR\ftotalRetrans\x12\x1f\n" +
+	"\vpackets_out\x18\x04 \x01(\rR\n" +
+	"packetsOut\x12\x1f\n" +
+	"\vretrans_out\x18\x05 \x01(\rR\n" +
+	"retransOut\x12\x19\n" +
+	"\blost_out\x18\x06 \x01(\rR\alostOut\x12\x17\n" +
+	"\arcv_wnd\x18\a \x01(\rR\x06rcvWnd\x12\x1d\n" +
+	"\n" +
+	"bytes_sent\x18\b \x01(\x04R\tbytesSent\x12%\n" +
+	"\x0ebytes_received\x18\t \x01(\x04R\rbytesReceived\"}\n" +
 	"\n" +
 	"StackFrame\x12*\n" +
 	"\x11function_name_idx\x18\x01 \x01(\rR\x0ffunctionNameIdx\x12\"\n" +
@@ -1318,7 +1542,17 @@ const file_rbscope_proto_rawDesc = "" +
 	"\x1eTHREAD_STATE_OFF_CPU_PREEMPTED\x10\x06\x12 \n" +
 	"\x1cTHREAD_STATE_OFF_CPU_UNKNOWN\x10\a\x12\x13\n" +
 	"\x0fTHREAD_STATE_GC\x10\b\x12\x15\n" +
-	"\x11THREAD_STATE_IDLE\x10\tB;Z9github.com/schlubbi/rbscope/collector/pkg/proto/rbscopepbb\x06proto3"
+	"\x11THREAD_STATE_IDLE\x10\t*W\n" +
+	"\x06FdType\x12\x0e\n" +
+	"\n" +
+	"FD_UNKNOWN\x10\x00\x12\v\n" +
+	"\aFD_FILE\x10\x01\x12\n" +
+	"\n" +
+	"\x06FD_TCP\x10\x02\x12\n" +
+	"\n" +
+	"\x06FD_UDP\x10\x03\x12\v\n" +
+	"\aFD_UNIX\x10\x04\x12\v\n" +
+	"\aFD_PIPE\x10\x05B;Z9github.com/schlubbi/rbscope/collector/pkg/proto/rbscopepbb\x06proto3"
 
 var (
 	file_rbscope_proto_rawDescOnce sync.Once
@@ -1332,46 +1566,50 @@ func file_rbscope_proto_rawDescGZIP() []byte {
 	return file_rbscope_proto_rawDescData
 }
 
-var file_rbscope_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_rbscope_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_rbscope_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_rbscope_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_rbscope_proto_goTypes = []any{
 	(OffCPUReason)(0),           // 0: rbscope.OffCPUReason
 	(ThreadState)(0),            // 1: rbscope.ThreadState
-	(*Capture)(nil),             // 2: rbscope.Capture
-	(*CaptureHeader)(nil),       // 3: rbscope.CaptureHeader
-	(*Category)(nil),            // 4: rbscope.Category
-	(*ThreadTimeline)(nil),      // 5: rbscope.ThreadTimeline
-	(*Sample)(nil),              // 6: rbscope.Sample
-	(*IOEvent)(nil),             // 7: rbscope.IOEvent
-	(*SchedEvent)(nil),          // 8: rbscope.SchedEvent
-	(*SpanEvent)(nil),           // 9: rbscope.SpanEvent
-	(*GVLEvent)(nil),            // 10: rbscope.GVLEvent
-	(*AllocationSample)(nil),    // 11: rbscope.AllocationSample
-	(*ThreadStateInterval)(nil), // 12: rbscope.ThreadStateInterval
-	(*StackFrame)(nil),          // 13: rbscope.StackFrame
-	(*OTelContext)(nil),         // 14: rbscope.OTelContext
+	(FdType)(0),                 // 2: rbscope.FdType
+	(*Capture)(nil),             // 3: rbscope.Capture
+	(*CaptureHeader)(nil),       // 4: rbscope.CaptureHeader
+	(*Category)(nil),            // 5: rbscope.Category
+	(*ThreadTimeline)(nil),      // 6: rbscope.ThreadTimeline
+	(*Sample)(nil),              // 7: rbscope.Sample
+	(*IOEvent)(nil),             // 8: rbscope.IOEvent
+	(*SchedEvent)(nil),          // 9: rbscope.SchedEvent
+	(*SpanEvent)(nil),           // 10: rbscope.SpanEvent
+	(*GVLEvent)(nil),            // 11: rbscope.GVLEvent
+	(*AllocationSample)(nil),    // 12: rbscope.AllocationSample
+	(*ThreadStateInterval)(nil), // 13: rbscope.ThreadStateInterval
+	(*TcpStats)(nil),            // 14: rbscope.TcpStats
+	(*StackFrame)(nil),          // 15: rbscope.StackFrame
+	(*OTelContext)(nil),         // 16: rbscope.OTelContext
 }
 var file_rbscope_proto_depIdxs = []int32{
-	3,  // 0: rbscope.Capture.header:type_name -> rbscope.CaptureHeader
-	13, // 1: rbscope.Capture.frame_table:type_name -> rbscope.StackFrame
-	5,  // 2: rbscope.Capture.threads:type_name -> rbscope.ThreadTimeline
-	4,  // 3: rbscope.Capture.categories:type_name -> rbscope.Category
-	6,  // 4: rbscope.ThreadTimeline.samples:type_name -> rbscope.Sample
-	7,  // 5: rbscope.ThreadTimeline.io_events:type_name -> rbscope.IOEvent
-	8,  // 6: rbscope.ThreadTimeline.sched_events:type_name -> rbscope.SchedEvent
-	9,  // 7: rbscope.ThreadTimeline.span_events:type_name -> rbscope.SpanEvent
-	10, // 8: rbscope.ThreadTimeline.gvl_events:type_name -> rbscope.GVLEvent
-	11, // 9: rbscope.ThreadTimeline.allocations:type_name -> rbscope.AllocationSample
-	12, // 10: rbscope.ThreadTimeline.states:type_name -> rbscope.ThreadStateInterval
-	14, // 11: rbscope.Sample.otel_context:type_name -> rbscope.OTelContext
-	0,  // 12: rbscope.SchedEvent.reason:type_name -> rbscope.OffCPUReason
-	14, // 13: rbscope.SpanEvent.otel_context:type_name -> rbscope.OTelContext
-	1,  // 14: rbscope.ThreadStateInterval.state:type_name -> rbscope.ThreadState
-	15, // [15:15] is the sub-list for method output_type
-	15, // [15:15] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	4,  // 0: rbscope.Capture.header:type_name -> rbscope.CaptureHeader
+	15, // 1: rbscope.Capture.frame_table:type_name -> rbscope.StackFrame
+	6,  // 2: rbscope.Capture.threads:type_name -> rbscope.ThreadTimeline
+	5,  // 3: rbscope.Capture.categories:type_name -> rbscope.Category
+	7,  // 4: rbscope.ThreadTimeline.samples:type_name -> rbscope.Sample
+	8,  // 5: rbscope.ThreadTimeline.io_events:type_name -> rbscope.IOEvent
+	9,  // 6: rbscope.ThreadTimeline.sched_events:type_name -> rbscope.SchedEvent
+	10, // 7: rbscope.ThreadTimeline.span_events:type_name -> rbscope.SpanEvent
+	11, // 8: rbscope.ThreadTimeline.gvl_events:type_name -> rbscope.GVLEvent
+	12, // 9: rbscope.ThreadTimeline.allocations:type_name -> rbscope.AllocationSample
+	13, // 10: rbscope.ThreadTimeline.states:type_name -> rbscope.ThreadStateInterval
+	16, // 11: rbscope.Sample.otel_context:type_name -> rbscope.OTelContext
+	14, // 12: rbscope.IOEvent.tcp_stats:type_name -> rbscope.TcpStats
+	2,  // 13: rbscope.IOEvent.fd_type:type_name -> rbscope.FdType
+	0,  // 14: rbscope.SchedEvent.reason:type_name -> rbscope.OffCPUReason
+	16, // 15: rbscope.SpanEvent.otel_context:type_name -> rbscope.OTelContext
+	1,  // 16: rbscope.ThreadStateInterval.state:type_name -> rbscope.ThreadState
+	17, // [17:17] is the sub-list for method output_type
+	17, // [17:17] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_rbscope_proto_init() }
@@ -1384,8 +1622,8 @@ func file_rbscope_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rbscope_proto_rawDesc), len(file_rbscope_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   13,
+			NumEnums:      3,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
