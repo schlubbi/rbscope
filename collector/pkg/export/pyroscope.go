@@ -69,10 +69,10 @@ func (e *PyroscopeExporter) Push(ctx context.Context, prof *profile.Profile) err
 		return fmt.Errorf("pyroscope: push: %w", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("pyroscope: unexpected status %d", resp.StatusCode)
+		return fmt.Errorf("pyroscope: unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
 }

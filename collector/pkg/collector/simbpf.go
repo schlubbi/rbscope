@@ -2,6 +2,7 @@ package collector
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -212,39 +213,37 @@ func pickStack(rng *rand.Rand) simStack {
 
 func (s *SimBPF) buildSampleEvent(stack simStack, rng *rand.Rand) []byte {
 	frames := SimStackNames[stack.id]
-	// Header(24) + stackID(4) + stackLen(4) + traceID(16) + spanID(8) + threadID(8) + frames(N*8)
-	size := eventHeaderSize + 4 + 4 + 16 + 8 + 8 + len(frames)*8
-	buf := make([]byte, size)
 
-	// Header
+	// Build inline format v2 stack data:
+	// version(1) + num_frames(2) + for each frame: label_len(2) + label + path_len(2) + path + line(4)
+	var stackData []byte
+	stackData = append(stackData, 2) // version = 2
+	stackData = binary.LittleEndian.AppendUint16(stackData, uint16(len(frames)))
+
+	for i, name := range frames {
+		// label = method name
+		stackData = binary.LittleEndian.AppendUint16(stackData, uint16(len(name)))
+		stackData = append(stackData, name...)
+		// path = synthetic file path
+		path := fmt.Sprintf("app/models/%s.rb", name[:min(len(name), 20)])
+		stackData = binary.LittleEndian.AppendUint16(stackData, uint16(len(path)))
+		stackData = append(stackData, path...)
+		// line number
+		stackData = binary.LittleEndian.AppendUint32(stackData, uint32(10+i*5))
+	}
+
+	// 40-byte header: type(4) + pid(4) + tid(4) + pad(4) + timestamp(8) + thread_id(8) + stack_data_len(4) + pad(4)
+	buf := make([]byte, rubySampleHeaderSize+len(stackData))
 	binary.LittleEndian.PutUint32(buf[0:4], uint32(EventRubySample))
 	binary.LittleEndian.PutUint32(buf[4:8], s.pid)
-	binary.LittleEndian.PutUint32(buf[8:12], s.pid+uint32(rng.Intn(8))) // tid
-	binary.LittleEndian.PutUint64(buf[12:20], uint64(time.Since(s.startTime).Nanoseconds()))
-	binary.LittleEndian.PutUint32(buf[20:24], uint32(rng.Intn(4))) // cpu
+	tid := s.pid + uint32(rng.Intn(8))
+	binary.LittleEndian.PutUint32(buf[8:12], tid)
+	// pad at 12:16
+	binary.LittleEndian.PutUint64(buf[16:24], uint64(time.Since(s.startTime).Nanoseconds()))
+	binary.LittleEndian.PutUint64(buf[24:32], uint64(tid))
+	binary.LittleEndian.PutUint32(buf[32:36], uint32(len(stackData)))
+	// pad at 36:40
 
-	off := eventHeaderSize
-	binary.LittleEndian.PutUint32(buf[off:], stack.id)
-	off += 4
-	binary.LittleEndian.PutUint32(buf[off:], uint32(len(frames)))
-	off += 4
-	// traceID — random
-	for i := 0; i < 16; i++ {
-		buf[off+i] = byte(rng.Intn(256))
-	}
-	off += 16
-	// spanID — random
-	for i := 0; i < 8; i++ {
-		buf[off+i] = byte(rng.Intn(256))
-	}
-	off += 8
-	// threadID
-	binary.LittleEndian.PutUint64(buf[off:], uint64(s.pid)*1000+uint64(rng.Intn(8)))
-	off += 8
-	// Frames — use stack.id * 1000 + index as pseudo-addresses
-	for i := range frames {
-		binary.LittleEndian.PutUint64(buf[off:], uint64(stack.id)*1000+uint64(i))
-		off += 8
-	}
+	copy(buf[rubySampleHeaderSize:], stackData)
 	return buf
 }
