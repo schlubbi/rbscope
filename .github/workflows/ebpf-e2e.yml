@@ -71,8 +71,7 @@ jobs:
       - name: E2E — start Ruby workload
         run: |
           cat > /tmp/workload.rb << 'RUBY'
-          $LOAD_PATH.unshift File.join(__dir__, '..', 'gem', 'lib')
-          $LOAD_PATH.unshift File.join(__dir__, '..', 'gem', 'ext')
+          $LOAD_PATH.unshift File.expand_path('../../gem/lib', __dir__)
           require 'rbscope'
 
           Rbscope.start(frequency: 99)
@@ -88,7 +87,7 @@ jobs:
           RUBY
 
           cd $GITHUB_WORKSPACE
-          ruby /tmp/workload.rb &
+          ruby -I gem/lib /tmp/workload.rb &
           RUBY_PID=$!
           echo "RUBY_PID=$RUBY_PID" >> "$GITHUB_ENV"
           sleep 2
@@ -215,5 +214,5 @@ jobs:
         working-directory: collector
         run: |
           echo "Testing BPF programs on kernel: ${{ matrix.kernel }}"
-          vimto -kernel ghcr.io/cilium/ci-kernels:${{ matrix.kernel }} -- \
+          CGO_ENABLED=0 vimto -kernel ghcr.io/cilium/ci-kernels:${{ matrix.kernel }} -- \
             go test -v -count=1 ./test/bpf/...
