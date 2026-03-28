@@ -184,7 +184,6 @@ jobs:
   # --- BPF compatibility across kernel versions (no Ruby needed) ---
   bpf-compat:
     runs-on: ubuntu-latest
-    continue-on-error: true  # vimto QEMU VM has restricted BPF permissions
     env:
       CGO_ENABLED: '0'
     strategy:
