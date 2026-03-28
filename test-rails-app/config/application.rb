@@ -60,3 +60,9 @@ begin
 rescue LoadError => e
   Rails.logger.info "[rbscope] OTel not available: #{e.message}"
 end
+
+# --- rbscope profiling ---
+if ENV["RBSCOPE"] == "1"
+  Rbscope.start(frequency: 99)
+  Rails.logger.info "[rbscope] Profiling started at 99Hz (USDT probes active)"
+end

@@ -60,14 +60,18 @@ services:
       - DATABASE_HOST=mysql
       - DATABASE_USER=root
       - DATABASE_PASSWORD=rbscope
+      - RBSCOPE=1
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
       - OTEL_SERVICE_NAME=rbscope-test-app
+      - PYROSCOPE_SERVER_ADDRESS=http://pyroscope:4040
     networks:
       - rbscope-net
     depends_on:
       mysql:
         condition: service_healthy
       otel-collector:
+        condition: service_started
+      pyroscope:
         condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:3000/health"]
@@ -76,7 +80,7 @@ services:
       retries: 10
       start_period: 30s
 
-  # --- Collector in demo mode (no BPF needed) ---
+  # --- Collector in demo mode (simulated stacks, no BPF needed) ---
   collector-demo:
     build:
       context: .
@@ -88,6 +92,34 @@ services:
       - rbscope-net
     depends_on:
       - pyroscope
+
+  # --- Real collector (BPF, attaches to test-app Ruby process) ---
+  collector:
+    build:
+      context: .
+      dockerfile: collector/Dockerfile
+    command:
+      - "run"
+      - "--pid=0"
+      - "--frequency=99"
+      - "--export=pyroscope"
+      - "--pyroscope-url=http://pyroscope:4040"
+      - "--health-port=8081"
+    privileged: true
+    pid: host
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "8081:8081"
+    networks:
+      - rbscope-net
+    depends_on:
+      test-app:
+        condition: service_healthy
+      pyroscope:
+        condition: service_started
 
 volumes:
   mysql-data:

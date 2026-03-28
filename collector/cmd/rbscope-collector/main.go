@@ -118,15 +118,13 @@ func runCollector(_ *cobra.Command, _ []string) error {
 		Logger:      logger,
 	}
 
-	// Load real BPF program if --bpf-obj is specified, otherwise stub.
+	// Load BPF program — use embedded bytecode by default, or --bpf-obj if specified.
 	var bpfProg collector.BPFProgram
-	if flagBPFObj != "" {
-		realBPF, err := bpf.NewRealBPF(flagBPFObj)
-		if err != nil {
-			return fmt.Errorf("create BPF program: %w", err)
-		}
-		bpfProg = realBPF
+	realBPF, err := bpf.NewRealBPF(flagBPFObj)
+	if err != nil {
+		return fmt.Errorf("create BPF program: %w", err)
 	}
+	bpfProg = realBPF
 
 	c := collector.New(cfg, bpfProg)
 
