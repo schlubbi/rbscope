@@ -21,7 +21,7 @@ import (
 
 // Export writes a Capture as CSV files into the given directory.
 func Export(capture *pb.Capture, dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil { // #nosec G301
 		return fmt.Errorf("create csv dir: %w", err)
 	}
 
