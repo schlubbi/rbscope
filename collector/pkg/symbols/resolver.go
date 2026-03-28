@@ -283,7 +283,7 @@ func loadELFSymbols(path string) *elfSymbols {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck
 
 	var allSyms []elfSymbol
 
