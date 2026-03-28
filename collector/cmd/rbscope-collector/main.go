@@ -21,6 +21,7 @@ import (
 	"github.com/schlubbi/rbscope/collector/pkg/discovery"
 	"github.com/schlubbi/rbscope/collector/pkg/export"
 	"github.com/schlubbi/rbscope/collector/pkg/export/gecko"
+	"github.com/schlubbi/rbscope/collector/pkg/symbols"
 	"github.com/schlubbi/rbscope/collector/pkg/timeline"
 )
 
@@ -187,6 +188,13 @@ func runCapture(_ *cobra.Command, _ []string) error {
 		// Gecko format: accumulate into timeline builder, export at end.
 		hostname, _ := os.Hostname()
 		tb = timeline.NewBuilder("capture", hostname, flagCapturePID, 99)
+		// Set up symbol resolver for native stack resolution
+		if resolver, err := symbols.NewResolver(flagCapturePID); err == nil {
+			tb.SetResolver(resolver)
+			logger.Info("native stack resolution enabled", "pid", flagCapturePID)
+		} else {
+			logger.Warn("native stack resolution unavailable", "pid", flagCapturePID, "err", err)
+		}
 		exporters = append(exporters, &timelineExporter{builder: tb})
 	case "pb":
 		fe, err := export.NewFileExporter(flagCaptureOutput)

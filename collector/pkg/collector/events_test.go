@@ -387,3 +387,87 @@ func TestFormatIPv4(t *testing.T) {
 		t.Errorf("formatIPv4(0x6400A8C0): got %q, want %q", got, "192.168.0.100")
 	}
 }
+
+func TestParseEvent_RubySampleWithNativeStack(t *testing.T) {
+	stackData := buildTestStackData("Trilogy#query", "/app/db.rb", 42)
+
+	// Build event with native stack IPs at fixed offset (header + MAX_STACK_SIZE)
+	nativeIPs := []uint64{0x7f001000, 0x7f002000, 0x7f003000} // 3 native IPs
+	nativeStackBytes := len(nativeIPs) * 8
+
+	totalSize := rubySampleHeaderSize + maxRubyStackSize + nativeStackBytes
+	data := make([]byte, totalSize)
+
+	// Header
+	binary.LittleEndian.PutUint32(data[0:4], uint32(EventRubySample))
+	binary.LittleEndian.PutUint32(data[4:8], 100)                        // pid
+	binary.LittleEndian.PutUint32(data[8:12], 200)                       // tid
+	binary.LittleEndian.PutUint32(data[12:16], 1)                        // weight
+	binary.LittleEndian.PutUint64(data[16:24], 1000)                     // timestamp
+	binary.LittleEndian.PutUint64(data[24:32], 42)                       // thread_id
+	binary.LittleEndian.PutUint32(data[32:36], uint32(len(stackData)))   // stack_data_len
+	binary.LittleEndian.PutUint32(data[36:40], uint32(nativeStackBytes)) // native_stack_len
+
+	// Ruby stack data at offset 40
+	copy(data[rubySampleHeaderSize:], stackData)
+
+	// Native IPs at fixed offset (40 + 4096 = 4136)
+	nativeOff := rubySampleHeaderSize + maxRubyStackSize
+	for i, ip := range nativeIPs {
+		binary.LittleEndian.PutUint64(data[nativeOff+i*8:nativeOff+i*8+8], ip)
+	}
+
+	evt, err := ParseEvent(data)
+	if err != nil {
+		t.Fatalf("ParseEvent failed: %v", err)
+	}
+
+	sample := evt.(*RubySampleEvent)
+
+	// Verify Ruby stack parsed correctly
+	if len(sample.StackData) == 0 {
+		t.Fatal("StackData is empty")
+	}
+	frames := ParseInlineStack(sample.StackData)
+	if len(frames) != 1 || frames[0].Label != "Trilogy#query" {
+		t.Errorf("Ruby stack: got %v", frames)
+	}
+
+	// Verify native IPs parsed
+	if len(sample.NativeStackIPs) != 3 {
+		t.Fatalf("NativeStackIPs: got %d, want 3", len(sample.NativeStackIPs))
+	}
+	if sample.NativeStackIPs[0] != 0x7f001000 {
+		t.Errorf("NativeStackIPs[0]: got 0x%x, want 0x7f001000", sample.NativeStackIPs[0])
+	}
+	if sample.NativeStackIPs[2] != 0x7f003000 {
+		t.Errorf("NativeStackIPs[2]: got 0x%x, want 0x7f003000", sample.NativeStackIPs[2])
+	}
+}
+
+func TestParseEvent_RubySampleNoNativeStack(t *testing.T) {
+	// Events without native stack (native_stack_len = 0) should still work
+	stackData := buildTestStackData("Object#foo", "/app/foo.rb", 1)
+	totalSize := rubySampleHeaderSize + len(stackData)
+	data := make([]byte, totalSize)
+
+	binary.LittleEndian.PutUint32(data[0:4], uint32(EventRubySample))
+	binary.LittleEndian.PutUint32(data[4:8], 100)
+	binary.LittleEndian.PutUint32(data[8:12], 200)
+	binary.LittleEndian.PutUint32(data[12:16], 1)
+	binary.LittleEndian.PutUint64(data[16:24], 1000)
+	binary.LittleEndian.PutUint64(data[24:32], 42)
+	binary.LittleEndian.PutUint32(data[32:36], uint32(len(stackData)))
+	binary.LittleEndian.PutUint32(data[36:40], 0) // native_stack_len = 0
+	copy(data[rubySampleHeaderSize:], stackData)
+
+	evt, err := ParseEvent(data)
+	if err != nil {
+		t.Fatalf("ParseEvent failed: %v", err)
+	}
+
+	sample := evt.(*RubySampleEvent)
+	if len(sample.NativeStackIPs) != 0 {
+		t.Errorf("expected no native IPs, got %d", len(sample.NativeStackIPs))
+	}
+}

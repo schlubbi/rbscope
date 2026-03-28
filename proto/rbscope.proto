@@ -203,10 +203,19 @@ message TcpStats {
 }
 
 // StackFrame is a single frame in a call stack.
+// FrameType distinguishes Ruby-level frames from native C frames.
+enum FrameType {
+  FRAME_TYPE_RUBY = 0;      // Ruby-level frame (from gem's rb_profile_thread_frames)
+  FRAME_TYPE_NATIVE = 1;    // Native C/C++ frame (from BPF bpf_get_stack)
+  FRAME_TYPE_CFUNC = 2;     // Ruby C extension function (boundary between Ruby and native)
+}
+
 message StackFrame {
   uint32 function_name_idx = 1;  // index into string_table
   uint32 file_name_idx = 2;     // index into string_table
   uint32 line_number = 3;
+  FrameType frame_type = 4;     // Ruby, native, or cfunc
+  uint64 address = 5;           // raw instruction pointer (native frames only)
 }
 
 // OTelContext links a sample or span to an OpenTelemetry trace.

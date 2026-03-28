@@ -30,17 +30,25 @@ type EventHeader struct {
 }
 
 // rubySampleHeaderSize is the header size for the updated ruby_sample event
-// from ruby_reader.c: type(4) + pid(4) + tid(4) + pad(4) + timestamp(8) + thread_id(8) + stack_data_len(4) + pad(4) = 40
+// from ruby_reader.c: type(4) + pid(4) + tid(4) + weight(4) + timestamp(8) + thread_id(8) + stack_data_len(4) + native_stack_len(4) = 40
 const rubySampleHeaderSize = 40
+
+// maxRubyStackSize matches MAX_STACK_SIZE in ruby_reader.c.
+// Native stack IPs are stored at a fixed offset (header + maxRubyStackSize)
+// to avoid BPF verifier issues with dynamic offsets.
+const maxRubyStackSize = 4096
 
 // RubySampleEvent represents a Ruby stack sample captured by the BPF program.
 // The stack data is serialized in format v2 (inline strings) by the gem.
+// Native stack IPs are captured by bpf_get_stack() for C extension profiling.
 type RubySampleEvent struct {
 	EventHeader
-	Weight       uint32 // number of sample ticks this event represents
-	ThreadID     uint64
-	StackDataLen uint32
-	StackData    []byte // inline format v2 stack data
+	Weight         uint32 // number of sample ticks this event represents
+	ThreadID       uint64
+	StackDataLen   uint32
+	NativeStackLen uint32   // bytes of native IPs (0 if not captured)
+	StackData      []byte   // inline format v2 stack data
+	NativeStackIPs []uint64 // user-space instruction pointers from bpf_get_stack
 }
 
 // InlineFrame represents a single frame parsed from format v2 stack data.
@@ -164,9 +172,9 @@ func parseRubySampleFromRaw(data []byte) (*RubySampleEvent, error) {
 	ev.Timestamp = binary.LittleEndian.Uint64(data[16:24])
 	ev.ThreadID = binary.LittleEndian.Uint64(data[24:32])
 	ev.StackDataLen = binary.LittleEndian.Uint32(data[32:36])
-	// skip _pad1 at 36:40
+	ev.NativeStackLen = binary.LittleEndian.Uint32(data[36:40])
 
-	// Copy inline stack data following the header
+	// Copy inline Ruby stack data following the header
 	off := rubySampleHeaderSize
 	sdLen := int(ev.StackDataLen)
 	if off+sdLen > len(data) {
@@ -175,6 +183,19 @@ func parseRubySampleFromRaw(data []byte) (*RubySampleEvent, error) {
 	if sdLen > 0 {
 		ev.StackData = make([]byte, sdLen)
 		copy(ev.StackData, data[off:off+sdLen])
+	}
+
+	// Parse native stack IPs (fixed offset at header + MAX_STACK_SIZE = 40 + 4096 = 4136)
+	nsLen := int(ev.NativeStackLen)
+	if nsLen > 0 {
+		nativeOff := rubySampleHeaderSize + maxRubyStackSize
+		if nativeOff+nsLen <= len(data) {
+			numIPs := nsLen / 8
+			ev.NativeStackIPs = make([]uint64, numIPs)
+			for i := 0; i < numIPs; i++ {
+				ev.NativeStackIPs[i] = binary.LittleEndian.Uint64(data[nativeOff+i*8 : nativeOff+i*8+8])
+			}
+		}
 	}
 	return ev, nil
 }
