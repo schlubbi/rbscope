@@ -289,14 +289,27 @@ fn adjust_interval(current_interval_ns: u64) -> u64 {
     }
 
     let avg_sample_ns = SAMPLE_DURATION_EWMA_NS.load(Ordering::Relaxed);
+    let target_bps = OVERHEAD_TARGET_BPS.load(Ordering::Relaxed);
+    let max_freq = MAX_FREQUENCY_HZ.load(Ordering::Relaxed);
+
+    compute_interval(current_interval_ns, avg_sample_ns, target_bps, max_freq)
+}
+
+/// Pure computation: given current state, return the new interval.
+/// Separated from globals for testability.
+fn compute_interval(
+    current_interval_ns: u64,
+    avg_sample_ns: u64,
+    target_bps: u32,
+    max_freq_hz: u32,
+) -> u64 {
     if avg_sample_ns == 0 {
         return current_interval_ns;
     }
 
-    let target_bps = OVERHEAD_TARGET_BPS.load(Ordering::Relaxed) as u64;
+    let target_bps = target_bps as u64;
     // overhead = sample_ns / (sample_ns + interval_ns)
     // target: overhead <= target_bps / 10000
-    // => sample_ns * 10000 <= target_bps * (sample_ns + interval_ns)
     let overhead_x10000 = avg_sample_ns * 10000 / (avg_sample_ns + current_interval_ns);
 
     let new_interval = if overhead_x10000 > target_bps {
@@ -310,7 +323,14 @@ fn adjust_interval(current_interval_ns: u64) -> u64 {
         current_interval_ns
     };
 
-    new_interval.clamp(MIN_INTERVAL_NS, MAX_INTERVAL_NS)
+    // Min interval is the configured max frequency (don't go faster than asked)
+    let min_interval = if max_freq_hz > 0 {
+        1_000_000_000 / max_freq_hz as u64
+    } else {
+        MIN_INTERVAL_NS
+    };
+
+    new_interval.clamp(min_interval, MAX_INTERVAL_NS)
 }
 
 // ---------------------------------------------------------------------------
@@ -530,131 +550,142 @@ pub fn sampling_stats() -> (u64, u64, u64, u32) {
 // Tests
 // ---------------------------------------------------------------------------
 
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // All tests use compute_interval() directly — no shared global state.
+    // This allows safe parallel execution.
+
+    const HIGH_MAX_FREQ: u32 = 10_000;
+    const TARGET_2PCT: u32 = 200; // 2.00% in basis points
+
     #[test]
-    fn test_adjust_interval_disabled() {
-        DYNAMIC_RATE_ENABLED.store(false, Ordering::Relaxed);
-        SAMPLE_DURATION_EWMA_NS.store(50_000, Ordering::Relaxed);
-        let result = adjust_interval(10_000_000);
-        assert_eq!(result, 10_000_000, "should not change when disabled");
-        DYNAMIC_RATE_ENABLED.store(true, Ordering::Relaxed);
+    fn test_compute_interval_no_data() {
+        let result = compute_interval(10_000_000, 0, TARGET_2PCT, HIGH_MAX_FREQ);
+        assert_eq!(result, 10_000_000, "should not change with no sample data");
     }
 
     #[test]
-    fn test_adjust_interval_no_data() {
-        DYNAMIC_RATE_ENABLED.store(true, Ordering::Relaxed);
-        SAMPLE_DURATION_EWMA_NS.store(0, Ordering::Relaxed);
-        let result = adjust_interval(10_000_000);
-        assert_eq!(result, 10_000_000, "should not change with no data");
-    }
-
-    #[test]
-    fn test_adjust_interval_backs_off_when_over_budget() {
-        DYNAMIC_RATE_ENABLED.store(true, Ordering::Relaxed);
-        OVERHEAD_TARGET_BPS.store(200, Ordering::Relaxed); // 2%
-
+    fn test_compute_interval_backs_off_when_over_budget() {
         // avg_sample = 500µs, interval = 1ms
         // overhead = 500k / (500k + 1M) = 33% → way over 2%
-        SAMPLE_DURATION_EWMA_NS.store(500_000, Ordering::Relaxed);
-        let result = adjust_interval(1_000_000);
-        assert!(result > 1_000_000, "should back off: got {}", result);
+        let result = compute_interval(1_000_000, 500_000, TARGET_2PCT, HIGH_MAX_FREQ);
         assert_eq!(result, 1_100_000, "should back off by 10%");
     }
 
     #[test]
-    fn test_adjust_interval_speeds_up_when_under_budget() {
-        DYNAMIC_RATE_ENABLED.store(true, Ordering::Relaxed);
-        OVERHEAD_TARGET_BPS.store(200, Ordering::Relaxed); // 2%
-
+    fn test_compute_interval_speeds_up_when_under_budget() {
         // avg_sample = 1µs, interval = 100ms
         // overhead = 1k / (1k + 100M) ≈ 0.001% → way under 2%
-        SAMPLE_DURATION_EWMA_NS.store(1_000, Ordering::Relaxed);
-        let result = adjust_interval(100_000_000);
-        assert!(result < 100_000_000, "should speed up: got {}", result);
+        let result = compute_interval(100_000_000, 1_000, TARGET_2PCT, HIGH_MAX_FREQ);
         assert_eq!(result, 95_000_000, "should speed up by 5%");
     }
 
     #[test]
-    fn test_adjust_interval_holds_when_near_target() {
-        DYNAMIC_RATE_ENABLED.store(true, Ordering::Relaxed);
-        OVERHEAD_TARGET_BPS.store(200, Ordering::Relaxed); // 2%
-
+    fn test_compute_interval_holds_when_near_target() {
         // avg_sample = 200µs, interval = 10ms
         // overhead = 200k / (200k + 10M) ≈ 1.96% → within [1.6%, 2%]
-        SAMPLE_DURATION_EWMA_NS.store(200_000, Ordering::Relaxed);
-        let result = adjust_interval(10_000_000);
+        let result = compute_interval(10_000_000, 200_000, TARGET_2PCT, HIGH_MAX_FREQ);
         assert_eq!(result, 10_000_000, "should hold steady near target");
     }
 
     #[test]
-    fn test_adjust_interval_clamps_min() {
-        DYNAMIC_RATE_ENABLED.store(true, Ordering::Relaxed);
-        OVERHEAD_TARGET_BPS.store(5000, Ordering::Relaxed); // 50%
-
-        // Very cheap samples, very high budget → wants to go below MIN
-        SAMPLE_DURATION_EWMA_NS.store(1, Ordering::Relaxed);
-        let mut interval = MIN_INTERVAL_NS + 1000;
+    fn test_compute_interval_clamps_to_max_frequency() {
+        // Very cheap samples, wants to go faster than 99Hz
+        let min_interval_99hz = 1_000_000_000 / 99;
+        let mut interval = min_interval_99hz + 1000;
         for _ in 0..100 {
-            interval = adjust_interval(interval);
+            interval = compute_interval(interval, 1, 5000, 99);
         }
-        assert!(interval >= MIN_INTERVAL_NS, "should not go below MIN: got {}", interval);
-    }
-
-    #[test]
-    fn test_adjust_interval_clamps_max() {
-        DYNAMIC_RATE_ENABLED.store(true, Ordering::Relaxed);
-        OVERHEAD_TARGET_BPS.store(1, Ordering::Relaxed); // 0.01%
-
-        // Expensive samples, tiny budget → wants to go above MAX
-        SAMPLE_DURATION_EWMA_NS.store(10_000_000, Ordering::Relaxed);
-        let mut interval = MAX_INTERVAL_NS - 1000;
-        for _ in 0..100 {
-            interval = adjust_interval(interval);
-        }
-        assert!(interval <= MAX_INTERVAL_NS, "should not go above MAX: got {}", interval);
-    }
-
-    #[test]
-    fn test_adjust_interval_converges() {
-        DYNAMIC_RATE_ENABLED.store(true, Ordering::Relaxed);
-        OVERHEAD_TARGET_BPS.store(200, Ordering::Relaxed); // 2%
-        SAMPLE_DURATION_EWMA_NS.store(100_000, Ordering::Relaxed); // 100µs
-
-        // Start at 10ms interval, should converge near target
-        let mut interval: u64 = 10_000_000;
-        for _ in 0..200 {
-            interval = adjust_interval(interval);
-        }
-
-        // At convergence: overhead = 100k / (100k + interval) ≈ 2%
-        // => interval ≈ 100k * (10000/200 - 1) = 100k * 49 = 4.9ms
-        let overhead = 100_000.0 / (100_000.0 + interval as f64);
         assert!(
-            overhead < 0.025 && overhead > 0.015,
-            "should converge near 2%, got {:.4} (interval={})",
-            overhead, interval
+            interval >= min_interval_99hz,
+            "should not go below 99Hz interval ({}): got {}",
+            min_interval_99hz,
+            interval
         );
     }
 
     #[test]
-    fn test_update_ewma_first_sample() {
-        SAMPLE_DURATION_EWMA_NS.store(0, Ordering::Relaxed);
-        // Simulate: first sample takes the raw value
-        let prev = 0u64;
-        let duration = 50_000u64;
-        let new_ewma = if prev == 0 { duration } else { (prev * 7 + duration) / 8 };
-        assert_eq!(new_ewma, 50_000);
+    fn test_compute_interval_clamps_max() {
+        // Expensive samples, tiny budget → wants to go above MAX_INTERVAL_NS
+        let mut interval = MAX_INTERVAL_NS - 1000;
+        for _ in 0..100 {
+            interval = compute_interval(interval, 10_000_000, 1, HIGH_MAX_FREQ);
+        }
+        assert!(
+            interval <= MAX_INTERVAL_NS,
+            "should not go above MAX: got {}",
+            interval
+        );
     }
 
     #[test]
-    fn test_update_ewma_smoothing() {
-        // EWMA with α=1/8: heavily smoothed
+    fn test_compute_interval_converges_to_target() {
+        let avg_sample_ns: u64 = 100_000; // 100µs
+
+        let mut interval: u64 = 10_000_000; // start at 10ms
+        for _ in 0..200 {
+            interval = compute_interval(interval, avg_sample_ns, TARGET_2PCT, HIGH_MAX_FREQ);
+        }
+
+        // At convergence: overhead = 100k / (100k + interval) ≈ 2%
+        // => interval ≈ 100k * (10000/200 - 1) = 100k * 49 = 4.9ms
+        let overhead = avg_sample_ns as f64 / (avg_sample_ns as f64 + interval as f64);
+        assert!(
+            overhead < 0.025 && overhead > 0.015,
+            "should converge near 2%, got {:.4} (interval={})",
+            overhead,
+            interval
+        );
+    }
+
+    #[test]
+    fn test_compute_interval_asymmetric_response() {
+        // Verify back-off is faster than speed-up (prevents oscillation)
+        let backoff = compute_interval(1_000_000, 500_000, TARGET_2PCT, HIGH_MAX_FREQ);
+        let speedup = compute_interval(100_000_000, 1_000, TARGET_2PCT, HIGH_MAX_FREQ);
+
+        let backoff_ratio = backoff as f64 / 1_000_000.0;  // 1.1x
+        let speedup_ratio = 100_000_000.0 / speedup as f64; // ~1.053x
+
+        assert!(
+            backoff_ratio > speedup_ratio,
+            "back-off ({:.3}x) should be faster than speed-up ({:.3}x)",
+            backoff_ratio,
+            speedup_ratio
+        );
+    }
+
+    #[test]
+    fn test_adjust_interval_disabled() {
+        DYNAMIC_RATE_ENABLED.store(false, Ordering::Relaxed);
+        SAMPLE_DURATION_EWMA_NS.store(500_000, Ordering::Relaxed);
+        OVERHEAD_TARGET_BPS.store(TARGET_2PCT, Ordering::Relaxed);
+        MAX_FREQUENCY_HZ.store(HIGH_MAX_FREQ, Ordering::Relaxed);
+
+        let result = adjust_interval(10_000_000);
+        assert_eq!(result, 10_000_000, "should not change when disabled");
+
+        // Reset
+        DYNAMIC_RATE_ENABLED.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_ewma_first_sample() {
+        let prev = 0u64;
+        let duration = 50_000u64;
+        let new_ewma = if prev == 0 { duration } else { (prev * 7 + duration) / 8 };
+        assert_eq!(new_ewma, 50_000, "first sample should use raw value");
+    }
+
+    #[test]
+    fn test_ewma_smoothing() {
         let prev = 100_000u64;
         let duration = 20_000u64;
         let new_ewma = (prev * 7 + duration) / 8;
-        assert_eq!(new_ewma, 90_000); // 100k * 7/8 + 20k * 1/8 = 87.5k + 2.5k = 90k
+        assert_eq!(new_ewma, 90_000, "EWMA α=1/8: 100k*7/8 + 20k*1/8 = 90k");
     }
 }

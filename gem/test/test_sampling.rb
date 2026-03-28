@@ -45,7 +45,7 @@ class TestSampling < Minitest::Test
   end
 
   def test_sample_count_at_99hz
-    Rbscope.start(frequency: 99)
+    Rbscope.start(frequency: 99, dynamic_rate: false)
     busy_wait(1.0)
     count = Rbscope.stop
 
@@ -53,7 +53,7 @@ class TestSampling < Minitest::Test
   end
 
   def test_sample_count_at_19hz
-    Rbscope.start(frequency: 19)
+    Rbscope.start(frequency: 19, dynamic_rate: false)
     busy_wait(1.0)
     count = Rbscope.stop
 
