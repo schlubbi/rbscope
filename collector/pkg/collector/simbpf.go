@@ -105,7 +105,7 @@ var simStacks = []simStack{
 // Exported so the exporter can build proper pprof profiles with named frames.
 var SimStackNames = map[uint32][]string{
 	1: {
-		"ActiveRecord::ConnectionAdapters::Mysql2Adapter#exec_query",
+		"ActiveRecord::ConnectionAdapters::TrilogyAdapter#exec_query",
 		"ActiveRecord::ConnectionAdapters::AbstractMysqlAdapter#execute_and_free",
 		"ActiveRecord::Base.find",
 		"PostsController#show",
