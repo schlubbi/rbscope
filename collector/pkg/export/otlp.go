@@ -122,7 +122,7 @@ func (e *OTLPExporter) Flush(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("OTLP push: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("OTLP push: HTTP %d", resp.StatusCode)

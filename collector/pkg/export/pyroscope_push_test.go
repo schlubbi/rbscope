@@ -90,7 +90,7 @@ func TestPyroscopePushExporter_FlushPushesValidPprof(t *testing.T) {
 }
 
 func TestPyroscopePushExporter_FlushClearsAccumulator(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -111,7 +111,7 @@ func TestPyroscopePushExporter_FlushClearsAccumulator(t *testing.T) {
 
 	// Second flush should be a no-op (no HTTP call)
 	callCount := 0
-	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		callCount++
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -128,7 +128,7 @@ func TestPyroscopePushExporter_FlushClearsAccumulator(t *testing.T) {
 }
 
 func TestPyroscopePushExporter_HTTPErrorReturned(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte("overloaded"))
 	}))
@@ -180,7 +180,7 @@ func TestPyroscopePushExporter_SkipsEmptyStacks(t *testing.T) {
 }
 
 func TestPyroscopePushExporter_MultiFrameStack(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()

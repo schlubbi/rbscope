@@ -64,10 +64,10 @@ func TestPyroscopeExporter_NilProfile(t *testing.T) {
 	// Should panic or error with nil profile
 	defer func() {
 		if r := recover(); r == nil {
-			// didn't panic — check error returned
+			// no-op: didn't panic — check error returned
 		}
 	}()
-	err := e.Push(nil, nil)
+	err := e.Push(context.TODO(), nil)
 	if err == nil {
 		t.Log("Push with nil profile returned nil error (may panic instead)")
 	}

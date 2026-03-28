@@ -1,3 +1,4 @@
+// Package collector implements the core event processing loop for rbscope.
 package collector
 
 import (
@@ -198,8 +199,8 @@ func (c *Collector) eventLoop(ctx context.Context) {
 // stubBPF is a no-op implementation of BPFProgram for non-Linux or testing.
 type stubBPF struct{}
 
-func (s *stubBPF) Load() error                        { return nil }
-func (s *stubBPF) AttachPID(_ uint32) error            { return nil }
-func (s *stubBPF) DetachPID(_ uint32) error            { return nil }
+func (s *stubBPF) Load() error                          { return nil }
+func (s *stubBPF) AttachPID(_ uint32) error             { return nil }
+func (s *stubBPF) DetachPID(_ uint32) error             { return nil }
 func (s *stubBPF) ReadRingBuffer(_ []byte) (int, error) { return 0, nil }
-func (s *stubBPF) Close() error                        { return nil }
+func (s *stubBPF) Close() error                         { return nil }

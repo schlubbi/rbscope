@@ -25,7 +25,7 @@ var _ collector.Exporter = (*FileExporter)(nil)
 
 // NewFileExporter opens (or creates) the target file for writing.
 func NewFileExporter(path string) (*FileExporter, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644) // #nosec G304 -- path from user flag
 	if err != nil {
 		return nil, fmt.Errorf("file exporter: open %s: %w", path, err)
 	}
@@ -69,7 +69,7 @@ func (e *FileExporter) Write(msg proto.Message) error {
 
 	// Write length prefix.
 	var lenBuf [4]byte
-	binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(data)))
+	binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(data))) // #nosec G115 -- protobuf length, bounded
 	if _, err := e.file.Write(lenBuf[:]); err != nil {
 		return fmt.Errorf("file exporter: write length: %w", err)
 	}

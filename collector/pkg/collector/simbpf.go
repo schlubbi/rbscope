@@ -89,16 +89,16 @@ type simStack struct {
 // Simulated stacks representing a Rails-like application.
 // Stack IDs map to function names in the SimBPF's symbol table.
 var simStacks = []simStack{
-	{weight: 30, id: 1},  // hot: ActiveRecord query
-	{weight: 20, id: 2},  // hot: view rendering
-	{weight: 15, id: 3},  // warm: JSON serialization
-	{weight: 10, id: 4},  // warm: middleware chain
-	{weight: 8, id: 5},   // cool: cache lookup
-	{weight: 5, id: 6},   // cool: HTTP client
-	{weight: 5, id: 7},   // cool: background job dispatch
-	{weight: 4, id: 8},   // cold: GC marking
-	{weight: 2, id: 9},   // cold: config reload
-	{weight: 1, id: 10},  // rare: migration check
+	{weight: 30, id: 1}, // hot: ActiveRecord query
+	{weight: 20, id: 2}, // hot: view rendering
+	{weight: 15, id: 3}, // warm: JSON serialization
+	{weight: 10, id: 4}, // warm: middleware chain
+	{weight: 8, id: 5},  // cool: cache lookup
+	{weight: 5, id: 6},  // cool: HTTP client
+	{weight: 5, id: 7},  // cool: background job dispatch
+	{weight: 4, id: 8},  // cold: GC marking
+	{weight: 2, id: 9},  // cold: config reload
+	{weight: 1, id: 10}, // rare: migration check
 }
 
 // SimStackNames maps stack IDs to human-readable Ruby function names.
@@ -181,7 +181,7 @@ func (s *SimBPF) generateLoop() {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rng := rand.New(rand.NewSource(time.Now().UnixNano())) // #nosec G404 -- simulation only
 
 	for {
 		select {
@@ -218,30 +218,30 @@ func (s *SimBPF) buildSampleEvent(stack simStack, rng *rand.Rand) []byte {
 	// version(1) + num_frames(2) + for each frame: label_len(2) + label + path_len(2) + path + line(4)
 	var stackData []byte
 	stackData = append(stackData, 2) // version = 2
-	stackData = binary.LittleEndian.AppendUint16(stackData, uint16(len(frames)))
+	stackData = binary.LittleEndian.AppendUint16(stackData, uint16(len(frames))) // #nosec G115
 
 	for i, name := range frames {
 		// label = method name
-		stackData = binary.LittleEndian.AppendUint16(stackData, uint16(len(name)))
+		stackData = binary.LittleEndian.AppendUint16(stackData, uint16(len(name))) // #nosec G115
 		stackData = append(stackData, name...)
 		// path = synthetic file path
 		path := fmt.Sprintf("app/models/%s.rb", name[:min(len(name), 20)])
-		stackData = binary.LittleEndian.AppendUint16(stackData, uint16(len(path)))
+		stackData = binary.LittleEndian.AppendUint16(stackData, uint16(len(path))) // #nosec G115
 		stackData = append(stackData, path...)
 		// line number
-		stackData = binary.LittleEndian.AppendUint32(stackData, uint32(10+i*5))
+		stackData = binary.LittleEndian.AppendUint32(stackData, uint32(10+i*5)) // #nosec G115
 	}
 
 	// 40-byte header: type(4) + pid(4) + tid(4) + pad(4) + timestamp(8) + thread_id(8) + stack_data_len(4) + pad(4)
 	buf := make([]byte, rubySampleHeaderSize+len(stackData))
-	binary.LittleEndian.PutUint32(buf[0:4], uint32(EventRubySample))
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(EventRubySample))   // #nosec G115
 	binary.LittleEndian.PutUint32(buf[4:8], s.pid)
-	tid := s.pid + uint32(rng.Intn(8))
+	tid := s.pid + uint32(rng.Intn(8)) // #nosec G115
 	binary.LittleEndian.PutUint32(buf[8:12], tid)
 	// pad at 12:16
 	binary.LittleEndian.PutUint64(buf[16:24], uint64(time.Since(s.startTime).Nanoseconds()))
 	binary.LittleEndian.PutUint64(buf[24:32], uint64(tid))
-	binary.LittleEndian.PutUint32(buf[32:36], uint32(len(stackData)))
+	binary.LittleEndian.PutUint32(buf[32:36], uint32(len(stackData))) // #nosec G115
 	// pad at 36:40
 
 	copy(buf[rubySampleHeaderSize:], stackData)

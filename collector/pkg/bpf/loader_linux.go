@@ -111,11 +111,11 @@ func (r *RealBPF) AttachPID(pid uint32) error {
 // (e.g. .../lib/rbscope/rbscope.bundle) and system paths (/usr/lib/librbscope.so).
 func findRbscopeLibrary(pid uint32) (string, error) {
 	mapsPath := fmt.Sprintf("/proc/%d/maps", pid)
-	f, err := os.Open(mapsPath)
+	f, err := os.Open(mapsPath) // #nosec G304 -- path derived from PID, reads /proc
 	if err != nil {
 		return "", fmt.Errorf("open %s: %w", mapsPath, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -171,10 +171,15 @@ func (r *RealBPF) ReadRingBuffer(buf []byte) (int, error) {
 // Close releases all BPF resources.
 func (r *RealBPF) Close() error {
 	for _, l := range r.links {
-		l.Close()
+		_ = l.Close()
 	}
 	if r.reader != nil {
-		r.reader.Close()
+		_ = r.reader.Close()
+	}
+	_ = r.objs.Close()
+	return nil
+}
+Close()
 	}
 	r.objs.Close()
 	return nil

@@ -250,7 +250,7 @@ func (e *PyroscopePushExporter) getOrCreateFunc(name string) *profile.Function {
 func hashName(s string) uint64 {
 	var h uint64 = 14695981039346656037
 	for _, c := range s {
-		h ^= uint64(c)
+		h ^= uint64(c) // #nosec G115
 		h *= 1099511628211
 	}
 	return h

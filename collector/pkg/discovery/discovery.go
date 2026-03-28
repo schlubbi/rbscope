@@ -1,8 +1,8 @@
+// Package discovery scans for Ruby processes and emits lifecycle events.
 package discovery
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -16,7 +16,9 @@ import (
 type EventKind int
 
 const (
+	// PIDFound indicates a Ruby process was discovered.
 	PIDFound EventKind = iota
+	// PIDLost indicates a Ruby process has exited.
 	PIDLost
 )
 
@@ -118,7 +120,7 @@ func scanProcForRuby(procPath string) map[uint32]string {
 		if err != nil {
 			continue
 		}
-		cmdData, err := os.ReadFile(filepath.Join(procPath, entry.Name(), "cmdline"))
+		cmdData, err := os.ReadFile(filepath.Join(procPath, entry.Name(), "cmdline")) // #nosec G304 -- reads /proc
 		if err != nil {
 			continue
 		}
@@ -131,15 +133,6 @@ func scanProcForRuby(procPath string) map[uint32]string {
 		}
 	}
 	return result
-}
-
-func readCmdline(pid uint32) string {
-	data, err := os.ReadFile(filepath.Join("/proc", fmt.Sprintf("%d", pid), "cmdline"))
-	if err != nil {
-		return ""
-	}
-	// cmdline fields are null-separated; replace with spaces for readability.
-	return strings.ReplaceAll(string(data), "\x00", " ")
 }
 
 func isRubyProcess(cmdline string) bool {

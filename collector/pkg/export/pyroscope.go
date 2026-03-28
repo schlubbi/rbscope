@@ -68,7 +68,7 @@ func (e *PyroscopeExporter) Push(ctx context.Context, prof *profile.Profile) err
 	if err != nil {
 		return fmt.Errorf("pyroscope: push: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode/100 != 2 {

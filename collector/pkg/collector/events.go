@@ -219,7 +219,7 @@ func parseIOEvent(hdr EventHeader, data []byte) (*IOEvent, error) {
 	}
 	ev := &IOEvent{EventHeader: hdr}
 	off := eventHeaderSize
-	ev.FD = int32(binary.LittleEndian.Uint32(data[off:]))
+	ev.FD = int32(binary.LittleEndian.Uint32(data[off:])) // #nosec G115 -- wire format
 	off += 4
 	ev.Op = binary.LittleEndian.Uint32(data[off:])
 	off += 4
