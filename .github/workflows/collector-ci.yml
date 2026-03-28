@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ['1.23', '1.24']
+        go: ['1.25']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -35,11 +35,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
-      - uses: golangci/golangci-lint-action@v4
+          go-version: '1.26'
+      - uses: golangci/golangci-lint-action@v7
         with:
           working-directory: collector
-          version: latest
           args: --timeout=5m
 
   integration:
@@ -49,7 +48,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.26'
       - name: Integration tests (require CAP_BPF)
         run: |
           sudo setcap cap_bpf,cap_perfmon+ep $(go env GOROOT)/bin/go || true
