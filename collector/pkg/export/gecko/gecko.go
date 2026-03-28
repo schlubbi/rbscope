@@ -67,27 +67,27 @@ type Category struct {
 
 // Thread represents a profiled thread (Gecko raw format).
 type Thread struct {
-	Name           string          `json:"name"`
-	RegisterTime   float64         `json:"registerTime"`
-	ProcessType    string          `json:"processType"`
-	UnregisterTime any             `json:"unregisterTime"` // null
-	TID            int             `json:"tid"`
-	PID            int             `json:"pid"`
-	Markers        GeckoMarkers    `json:"markers"`
-	Samples        GeckoSamples    `json:"samples"`
-	FrameTable     GeckoFrameTable `json:"frameTable"`
-	StackTable     GeckoStackTable `json:"stackTable"`
-	StringTable    []string        `json:"stringTable"`
+	Name           string         `json:"name"`
+	RegisterTime   float64        `json:"registerTime"`
+	ProcessType    string         `json:"processType"`
+	UnregisterTime any            `json:"unregisterTime"` // null
+	TID            int            `json:"tid"`
+	PID            int            `json:"pid"`
+	Markers        GeckoMarkers   `json:"markers"`
+	Samples        SamplesTable   `json:"samples"`
+	FrameTable     FrameTableData `json:"frameTable"`
+	StackTable     StackTableData `json:"stackTable"`
+	StringTable    []string       `json:"stringTable"`
 }
 
-// GeckoSamples uses schema + tuple data format.
-type GeckoSamples struct {
-	Schema GeckoSampleSchema `json:"schema"`
+// SamplesTable uses schema + tuple data format.
+type SamplesTable struct {
+	Schema SampleTupleSchema `json:"schema"`
 	Data   [][]any           `json:"data"`
 }
 
-// GeckoSampleSchema defines tuple positions.
-type GeckoSampleSchema struct {
+// SampleTupleSchema defines tuple positions.
+type SampleTupleSchema struct {
 	Stack          int `json:"stack"`
 	Time           int `json:"time"`
 	EventDelay     int `json:"eventDelay"`
@@ -110,14 +110,14 @@ type GeckoMarkerSchema struct {
 	Data      int `json:"data"`
 }
 
-// GeckoFrameTable uses schema + tuple data format.
-type GeckoFrameTable struct {
-	Schema GeckoFrameSchema `json:"schema"`
+// FrameTableData uses schema + tuple data format.
+type FrameTableData struct {
+	Schema FrameTupleSchema `json:"schema"`
 	Data   [][]any          `json:"data"`
 }
 
-// GeckoFrameSchema defines tuple positions.
-type GeckoFrameSchema struct {
+// FrameTupleSchema defines tuple positions.
+type FrameTupleSchema struct {
 	Location       int `json:"location"`
 	RelevantForJS  int `json:"relevantForJS"`
 	InnerWindowID  int `json:"innerWindowID"`
@@ -128,14 +128,14 @@ type GeckoFrameSchema struct {
 	Subcategory    int `json:"subcategory"`
 }
 
-// GeckoStackTable uses schema + tuple data format.
-type GeckoStackTable struct {
-	Schema GeckoStackSchema `json:"schema"`
+// StackTableData uses schema + tuple data format.
+type StackTableData struct {
+	Schema StackTupleSchema `json:"schema"`
 	Data   [][]any          `json:"data"`
 }
 
-// GeckoStackSchema defines tuple positions.
-type GeckoStackSchema struct {
+// StackTupleSchema defines tuple positions.
+type StackTupleSchema struct {
 	Prefix int `json:"prefix"`
 	Frame  int `json:"frame"`
 }
@@ -183,7 +183,7 @@ type CounterSchema struct {
 	Number int `json:"number"`
 }
 
-// --- Marker phases ---
+// MarkerPhase constants define timing semantics for markers.
 
 const (
 	MarkerPhaseInstant  = 0
@@ -410,22 +410,22 @@ func buildThread(capture *pb.Capture, tl *pb.ThreadTimeline, startTimeMs float64
 		PID:            int(capture.Header.Pid),
 		Samples:        samples,
 		Markers:        markers,
-		FrameTable: GeckoFrameTable{
-			Schema: GeckoFrameSchema{
+		FrameTable: FrameTableData{
+			Schema: FrameTupleSchema{
 				Location: 0, RelevantForJS: 1, InnerWindowID: 2,
 				Implementation: 3, Line: 4, Column: 5, Category: 6, Subcategory: 7,
 			},
 			Data: tb.frameData,
 		},
-		StackTable: GeckoStackTable{
-			Schema: GeckoStackSchema{Prefix: 0, Frame: 1},
+		StackTable: StackTableData{
+			Schema: StackTupleSchema{Prefix: 0, Frame: 1},
 			Data:   tb.stackData,
 		},
 		StringTable: tb.strings,
 	}
 }
 
-func buildSamples(tb *threadBuilder, tl *pb.ThreadTimeline) GeckoSamples {
+func buildSamples(tb *threadBuilder, tl *pb.ThreadTimeline) SamplesTable {
 	data := make([][]any, 0, len(tl.Samples))
 
 	for _, s := range tl.Samples {
@@ -441,8 +441,8 @@ func buildSamples(tb *threadBuilder, tl *pb.ThreadTimeline) GeckoSamples {
 		data = append(data, []any{stackRef, timeMs, 0})
 	}
 
-	return GeckoSamples{
-		Schema: GeckoSampleSchema{Stack: 0, Time: 1, EventDelay: 2},
+	return SamplesTable{
+		Schema: SampleTupleSchema{Stack: 0, Time: 1, EventDelay: 2},
 		Data:   data,
 	}
 }
