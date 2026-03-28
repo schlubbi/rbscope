@@ -212,7 +212,9 @@ jobs:
 
       - name: BPF load tests on kernel ${{ matrix.kernel }}
         working-directory: collector
+        env:
+          CGO_ENABLED: '0'
         run: |
           echo "Testing BPF programs on kernel: ${{ matrix.kernel }}"
-          CGO_ENABLED=0 vimto -kernel ghcr.io/cilium/ci-kernels:${{ matrix.kernel }} -- \
+          vimto -kernel ghcr.io/cilium/ci-kernels:${{ matrix.kernel }} -- \
             go test -v -count=1 ./test/bpf/...

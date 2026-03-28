@@ -18,16 +18,10 @@ linters:
     - unused
     - misspell
     - revive
-    - gosimple
     - unconvert
     - unparam
 
   settings:
-    revive:
-      rules:
-        - name: exported
-          arguments:
-            - "checkPrivateReceivers"
     gosec:
       excludes:
         - G104

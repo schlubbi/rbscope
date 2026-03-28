@@ -206,7 +206,7 @@ unsafe fn ruby_value_to_string(value: rb_sys::VALUE) -> String {
     let ptr = rb_string_value_ptr(&mut val as *mut rb_sys::VALUE);
     let len = rb_sys::RSTRING_LEN(value);
 
-    if ptr.is_null() || len < 0 || len > 10_000 {
+    if ptr.is_null() || !(0..=10_000).contains(&len) {
         return "(unknown)".to_string();
     }
 
