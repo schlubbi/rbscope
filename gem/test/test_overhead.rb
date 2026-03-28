@@ -18,8 +18,8 @@ class TestOverhead < Minitest::Test
       ITERATIONS.times { work_unit }
     end
 
-    # With profiler at always-on rate
-    Rbscope.start(frequency: 19)
+    # With profiler at always-on rate (fixed, no dynamic adjustment)
+    Rbscope.start(frequency: 19, dynamic_rate: false)
     profiled = Benchmark.realtime do
       ITERATIONS.times { work_unit }
     end

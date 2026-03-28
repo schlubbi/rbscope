@@ -120,6 +120,17 @@
    ...
 }
 
+# --- Oniguruma regex engine (Ruby's built-in regex) ---
+
+{
+   ruby_onig_region_resize
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   ...
+   fun:onig_region_resize
+   ...
+}
+
 # --- Conditional jumps on uninitialised memory in VM internals ---
 
 {

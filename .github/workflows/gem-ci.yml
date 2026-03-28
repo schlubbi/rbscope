@@ -73,10 +73,13 @@ jobs:
       - name: Bundle install
         run: bundle install
       - name: Test with ${{ matrix.sanitizer }} sanitizer
-        run: bundle exec rake clobber compile test
+        run: |
+          mkdir -p .cargo
+          printf '[target.x86_64-unknown-linux-gnu]\nrustflags = ["-Zsanitizer=${{ matrix.sanitizer }}", "-Cunsafe-allow-abi-mismatch=sanitizer"]\n' > .cargo/config.toml
+          bundle exec rake clobber compile test
+          rm -rf .cargo
         env:
           RBSCOPE_PROFILE: dev
-          RUSTFLAGS: "-Zsanitizer=${{ matrix.sanitizer }} -Cunsafe-allow-abi-mismatch=sanitizer"
 
   miri:
     runs-on: ubuntu-latest
