@@ -19,19 +19,19 @@ linters:
     - unconvert
     - unparam
 
-linters-settings:
-  revive:
-    rules:
-      - name: exported
-        arguments:
-          - "checkPrivateReceivers"
-  gosec:
-    excludes:
-      - G104  # unhandled errors on deferred Close() calls
+  settings:
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - "checkPrivateReceivers"
+    gosec:
+      excludes:
+        - G104
 
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gosec
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
