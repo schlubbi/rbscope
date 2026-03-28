@@ -1,80 +1,184 @@
 syntax = "proto3";
 package rbscope;
-option go_package = "github.com/schlubbi/rbscope/collector/pkg/export/rbscopepb";
+option go_package = "github.com/schlubbi/rbscope/collector/pkg/proto/rbscopepb";
 
-// Top-level capture file
+// ---- Top-level capture ----
+
+// Capture is rbscope's canonical internal data model. A single capture
+// represents one flush window (typically 10s) of profiling data for one
+// process, organized as per-thread timelines with cross-referenced events.
 message Capture {
   CaptureHeader header = 1;
-  repeated StackFrame frames = 2;        // frame string table
-  repeated Sample samples = 3;           // stack samples
-  repeated SpanEvent spans = 4;          // OTel span events
-  repeated IOEvent io_events = 5;        // kernel I/O events
-  repeated AllocationSample allocations = 6;
-  repeated SchedEvent sched_events = 7;  // off-CPU events
+
+  // String table for deduplication (function names, paths, syscall names,
+  // fd descriptions, service names). Index 0 is always the empty string.
+  repeated string string_table = 2;
+
+  // Frame table — deduplicated stack frames. Referenced by index from
+  // Sample.frame_ids. Built by the collector from inline format v2 data.
+  repeated StackFrame frame_table = 3;
+
+  // Per-thread timelines — the core data structure.
+  repeated ThreadTimeline threads = 4;
+
+  // Categories for UI rendering (matches Gecko's category concept).
+  repeated Category categories = 5;
 }
 
 message CaptureHeader {
-  uint32 version = 1;
+  uint32 version = 1;             // proto version (2 for this format)
   string service_name = 2;
   string hostname = 3;
   uint32 pid = 4;
-  uint64 start_time_ns = 5;
-  uint64 end_time_ns = 6;
+  uint64 start_time_ns = 5;       // wall-clock start of capture window
+  uint64 end_time_ns = 6;         // wall-clock end of capture window
   uint32 sample_frequency_hz = 7;
+  string ruby_version = 8;        // e.g. "4.0.0"
+  string rbscope_version = 9;     // gem + collector version
 }
 
-message StackFrame {
+message Category {
   uint32 id = 1;
-  string function_name = 2;
-  string file_name = 3;
-  uint32 line_number = 4;
+  string name = 2;   // "CPU", "I/O", "GVL", "GC", "Idle"
+  string color = 3;  // for rendering: "blue", "orange", etc.
 }
 
+// ---- Per-thread timeline ----
+
+// ThreadTimeline groups all events for a single native thread. The collector
+// builds this by dispatching decoded BPF events to the right thread based
+// on TID. Events within each list are sorted by timestamp.
+message ThreadTimeline {
+  uint32 thread_id = 1;           // native TID (from BPF)
+  uint64 ruby_thread_value = 2;   // Ruby thread VALUE for cross-ref
+  uint32 thread_name_idx = 3;     // index into string_table
+
+  // Periodic stack samples (from the gem's 99Hz sampler)
+  repeated Sample samples = 4;
+
+  // Kernel-observed events
+  repeated IOEvent io_events = 5;
+  repeated SchedEvent sched_events = 6;
+
+  // Ruby-level events
+  repeated SpanEvent span_events = 7;
+  repeated GVLEvent gvl_events = 8;
+  repeated AllocationSample allocations = 9;
+
+  // Derived thread state timeline — built by the collector from the
+  // combination of sched, I/O, GVL, and sample events.
+  repeated ThreadStateInterval states = 10;
+}
+
+// ---- Events ----
+
+// Sample is a single stack sample from the gem's postponed-job sampler.
 message Sample {
   uint64 timestamp_ns = 1;
-  uint32 thread_id = 2;
-  repeated uint32 frame_ids = 3;  // stack frames, leaf first
-  OTelContext otel_context = 4;    // optional trace correlation
+  repeated uint32 frame_ids = 2;  // indices into Capture.frame_table, leaf first
+  OTelContext otel_context = 3;   // trace/span active at sample time (optional)
+  uint32 weight = 4;              // for dynamic sampling rate (default 1)
 }
 
-message SpanEvent {
+// IOEvent is an I/O operation observed by BPF io_tracer.
+message IOEvent {
   uint64 timestamp_ns = 1;
+  uint32 syscall_idx = 2;         // index into string_table: "read", "write"
+  int32 fd = 3;
+  uint64 bytes = 4;
+  uint64 latency_ns = 5;
+  uint32 fd_info_idx = 6;         // index into string_table: "tcp:10.0.0.1:3306"
+
+  // Cross-references (populated by timeline.Builder)
+  uint32 nearest_sample_idx = 7;        // closest Sample by timestamp
+  uint32 caused_sched_event_idx = 8;    // SchedEvent this I/O triggered
+}
+
+// SchedEvent is an off-CPU period observed by BPF sched_tracer.
+message SchedEvent {
+  uint64 timestamp_ns = 1;       // when the thread went back on-CPU
+  uint64 off_cpu_ns = 2;
+
+  // Why was this thread off-CPU? Derived from concurrent events.
+  OffCPUReason reason = 3;
+
+  // Cross-references
+  uint32 caused_by_io_idx = 4;   // which IOEvent caused the off-CPU
+  uint32 caused_by_gvl_idx = 5;  // which GVLEvent caused the off-CPU
+}
+
+enum OffCPUReason {
+  OFF_CPU_UNKNOWN = 0;
+  OFF_CPU_IO_BLOCKED = 1;
+  OFF_CPU_GVL_WAIT = 2;
+  OFF_CPU_MUTEX = 3;
+  OFF_CPU_PREEMPTED = 4;
+  OFF_CPU_VOLUNTARY_SLEEP = 5;
+}
+
+// SpanEvent represents an OTel span observed via USDT probes.
+message SpanEvent {
+  uint64 start_ns = 1;
   uint64 duration_ns = 2;
-  string operation = 3;
-  string component = 4;
+  uint32 operation_idx = 3;   // index into string_table
+  uint32 component_idx = 4;   // index into string_table
   OTelContext otel_context = 5;
   repeated uint32 frame_ids = 6;
 }
 
-message IOEvent {
+// GVLEvent represents a GVL wait period (future — from GVL profiling TODO).
+message GVLEvent {
   uint64 timestamp_ns = 1;
-  uint32 thread_id = 2;
-  string syscall = 3;             // "read", "write", "sendto", etc.
-  int32 fd = 4;
-  uint64 bytes = 5;
-  uint64 latency_ns = 6;
-  uint32 associated_stack_id = 7;  // links to most recent Sample
-  string fd_info = 8;             // resolved: "tcp:10.0.0.1:3306" or "file:/tmp/x"
+  uint64 wait_ns = 2;
+  uint32 holder_thread_id = 3;   // which thread held the GVL
+  uint32 holder_sample_idx = 4;  // what the holder was doing
 }
 
+// AllocationSample is a heap allocation event (future — from heap TODO).
 message AllocationSample {
   uint64 timestamp_ns = 1;
-  uint32 thread_id = 2;
-  string object_type = 3;
-  uint64 size_bytes = 4;
-  repeated uint32 frame_ids = 5;
+  uint32 object_type_idx = 2;    // index into string_table
+  uint64 size_bytes = 3;
+  repeated uint32 frame_ids = 4;
 }
 
-message SchedEvent {
-  uint64 timestamp_ns = 1;
-  uint32 thread_id = 2;
-  uint64 off_cpu_ns = 3;
-  uint32 associated_stack_id = 4;
+// ---- Derived state ----
+
+// ThreadStateInterval represents what a thread was doing during a time
+// interval. Built by the collector from raw events.
+message ThreadStateInterval {
+  uint64 start_ns = 1;
+  uint64 end_ns = 2;
+  ThreadState state = 3;
+  uint32 cause_event_idx = 4;    // index into the relevant event list
 }
 
+enum ThreadState {
+  THREAD_STATE_UNKNOWN = 0;
+  THREAD_STATE_RUNNING = 1;          // on-CPU, executing Ruby code
+  THREAD_STATE_OFF_CPU_IO = 2;       // blocked on I/O syscall
+  THREAD_STATE_OFF_CPU_GVL = 3;      // waiting for GVL
+  THREAD_STATE_OFF_CPU_MUTEX = 4;    // waiting on a Ruby mutex
+  THREAD_STATE_OFF_CPU_SLEEP = 5;    // voluntary sleep
+  THREAD_STATE_OFF_CPU_PREEMPTED = 6;
+  THREAD_STATE_OFF_CPU_UNKNOWN = 7;
+  THREAD_STATE_GC = 8;              // garbage collection
+  THREAD_STATE_IDLE = 9;            // no work
+}
+
+// ---- Shared types ----
+
+// StackFrame is a single frame in a call stack.
+message StackFrame {
+  uint32 function_name_idx = 1;  // index into string_table
+  uint32 file_name_idx = 2;     // index into string_table
+  uint32 line_number = 3;
+}
+
+// OTelContext links a sample or span to an OpenTelemetry trace.
 message OTelContext {
-  bytes trace_id = 1;   // 16 bytes
-  bytes span_id = 2;    // 8 bytes
-  string service = 3;
-  string operation = 4;
+  bytes trace_id = 1;            // 16 bytes
+  bytes span_id = 2;             // 8 bytes
+  uint32 service_idx = 3;       // index into string_table
+  uint32 operation_idx = 4;     // index into string_table
 }
