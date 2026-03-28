@@ -10,8 +10,9 @@ class TestStackCaching < Minitest::Test
     # because the stack is identical across consecutive samples.
     Rbscope.start(frequency: 999, dynamic_rate: false)
 
-    # Do repetitive work — same call stack each iteration
-    10_000.times { Math.sqrt(42) }
+    # Do repetitive work — same call stack each iteration.
+    # busy_wait keeps the VM active at safe points so samples fire.
+    busy_wait(0.5)
 
     stats = Rbscope.sampling_stats
     Rbscope.stop
@@ -31,13 +32,12 @@ class TestStackCaching < Minitest::Test
   def test_cache_resets_on_restart
     Rbscope.start(frequency: 99, dynamic_rate: false)
     busy_wait(0.1)
-    stats1 = Rbscope.sampling_stats
     Rbscope.stop
 
     Rbscope.start(frequency: 99, dynamic_rate: false)
-    stats2 = Rbscope.sampling_stats
+    stats = Rbscope.sampling_stats
     # Right after start, cache_hit_count should be 0
-    assert_equal 0, stats2[:cache_hit_count],
+    assert_equal 0, stats[:cache_hit_count],
                  "cache_hit_count should reset on restart"
     Rbscope.stop
   end
