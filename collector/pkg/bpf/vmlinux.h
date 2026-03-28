@@ -33,7 +33,38 @@ typedef _Bool bool;
 #define true  1
 #define false 0
 
-// Minimal pt_regs for x86_64
+// Network byte-order types used by bpf_helper_defs.h
+typedef __u16 __be16;
+typedef __u32 __be32;
+typedef __u64 __be64;
+typedef __u16 __le16;
+typedef __u32 __le32;
+typedef __u64 __le64;
+typedef __u32 __wsum;
+typedef __u32 __sum16;
+
+// BPF map types (subset needed by our programs)
+enum bpf_map_type {
+    BPF_MAP_TYPE_UNSPEC = 0,
+    BPF_MAP_TYPE_HASH = 1,
+    BPF_MAP_TYPE_ARRAY = 2,
+    BPF_MAP_TYPE_PROG_ARRAY = 3,
+    BPF_MAP_TYPE_PERF_EVENT_ARRAY = 4,
+    BPF_MAP_TYPE_PERCPU_HASH = 5,
+    BPF_MAP_TYPE_PERCPU_ARRAY = 6,
+    BPF_MAP_TYPE_STACK_TRACE = 7,
+    BPF_MAP_TYPE_LRU_HASH = 9,
+    BPF_MAP_TYPE_LRU_PERCPU_HASH = 10,
+    BPF_MAP_TYPE_RINGBUF = 27,
+};
+
+// BPF map update flags
+#define BPF_ANY     0
+#define BPF_NOEXIST 1
+#define BPF_EXIST   2
+
+// Minimal pt_regs — architecture-specific
+#if defined(__TARGET_ARCH_x86)
 struct pt_regs {
     unsigned long r15;
     unsigned long r14;
@@ -57,6 +88,23 @@ struct pt_regs {
     unsigned long sp;
     unsigned long ss;
 };
+#elif defined(__TARGET_ARCH_arm64)
+struct pt_regs {
+    unsigned long long regs[31];
+    unsigned long long sp;
+    unsigned long long pc;
+    unsigned long long pstate;
+};
+// libbpf's bpf_tracing.h uses user_pt_regs on aarch64
+struct user_pt_regs {
+    unsigned long long regs[31];
+    unsigned long long sp;
+    unsigned long long pc;
+    unsigned long long pstate;
+};
+#else
+#error "Unsupported target architecture"
+#endif
 
 // Tracepoint context passed to SEC("tp/...") programs
 struct trace_event_raw_sys_enter {
