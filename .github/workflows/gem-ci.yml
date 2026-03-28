@@ -80,6 +80,7 @@ jobs:
           rm -rf .cargo
         env:
           RBSCOPE_PROFILE: dev
+          RBSCOPE_SANITIZER: ${{ matrix.sanitizer }}
 
   miri:
     runs-on: ubuntu-latest
