@@ -111,6 +111,9 @@ services:
       memlock:
         soft: -1
         hard: -1
+    volumes:
+      - /sys/kernel/tracing:/sys/kernel/tracing:ro
+      - /sys/kernel/debug:/sys/kernel/debug:ro
     ports:
       - "8081:8081"
     networks:
