@@ -45,7 +45,9 @@ jobs:
       - name: Bundle install
         run: bundle install
       - name: Build (debug)
-        run: RBSCOPE_PROFILE=dev bundle exec rake compile
+        run: bundle exec rake clobber compile
+        env:
+          RBSCOPE_PROFILE: dev
       - name: Test under valgrind
         run: |
           valgrind --tool=memcheck --leak-check=full --track-origins=yes \
@@ -69,11 +71,9 @@ jobs:
       - name: Bundle install
         run: bundle install
       - name: Test with ${{ matrix.sanitizer }} sanitizer
-        run: |
-          RBSCOPE_RUSTFLAGS="-Zsanitizer=${{ matrix.sanitizer }}" \
-          RBSCOPE_PROFILE=dev \
-          bundle exec rake clobber compile test
+        run: bundle exec rake clobber compile test
         env:
+          RBSCOPE_PROFILE: dev
           RUSTFLAGS: "-Zsanitizer=${{ matrix.sanitizer }}"
 
   miri:

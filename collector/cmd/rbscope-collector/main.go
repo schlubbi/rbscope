@@ -182,17 +182,16 @@ func runCapture(_ *cobra.Command, _ []string) error {
 
 	cfg := collector.Config{
 		FrequencyHz: 99, // higher frequency for captures
+		Exporters:   []collector.Exporter{fe},
 		Logger:      logger,
 	}
 
 	var bpfProg collector.BPFProgram
-	if flagCaptureBPFObj != "" {
-		realBPF, err := bpf.NewRealBPF(flagCaptureBPFObj)
-		if err != nil {
-			return fmt.Errorf("create BPF program: %w", err)
-		}
-		bpfProg = realBPF
+	realBPF, err := bpf.NewRealBPF(flagCaptureBPFObj)
+	if err != nil {
+		return fmt.Errorf("create BPF program: %w", err)
 	}
+	bpfProg = realBPF
 
 	c := collector.New(cfg, bpfProg)
 
@@ -251,7 +250,13 @@ func buildExporters(logger *slog.Logger) ([]collector.Exporter, error) {
 				Logger:      logger,
 			}))
 		case "file":
-			logger.Info("enabling file exporter", "dir", flagOutputDir)
+			path := flagOutputDir + "/capture.pb"
+			logger.Info("enabling file exporter", "path", path)
+			fe, err := export.NewFileExporter(path)
+			if err != nil {
+				return nil, fmt.Errorf("create file exporter: %w", err)
+			}
+			exporters = append(exporters, fe)
 		default:
 			return nil, fmt.Errorf("unknown exporter: %q", name)
 		}

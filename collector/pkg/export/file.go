@@ -1,6 +1,7 @@
 package export
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"os"
@@ -8,14 +9,19 @@ import (
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
+
+	"github.com/schlubbi/rbscope/collector/pkg/collector"
 )
 
 // FileExporter writes events to a length-delimited protobuf file.
+// Implements collector.Exporter.
 type FileExporter struct {
 	mu   sync.Mutex
 	file *os.File
 	path string
 }
+
+var _ collector.Exporter = (*FileExporter)(nil)
 
 // NewFileExporter opens (or creates) the target file for writing.
 func NewFileExporter(path string) (*FileExporter, error) {
@@ -24,6 +30,30 @@ func NewFileExporter(path string) (*FileExporter, error) {
 		return nil, fmt.Errorf("file exporter: open %s: %w", path, err)
 	}
 	return &FileExporter{file: f, path: path}, nil
+}
+
+// Export serializes a decoded event and appends it to the file.
+func (e *FileExporter) Export(_ context.Context, event any) error {
+	// Serialize the event as a type-tagged raw record.
+	switch ev := event.(type) {
+	case *collector.RubySampleEvent:
+		return e.WriteRaw("rbscope.RubySampleEvent", ev.StackData)
+	case *collector.RubySpanEvent:
+		return e.WriteRaw("rbscope.RubySpanEvent", nil)
+	case *collector.IOEvent:
+		return e.WriteRaw("rbscope.IOEvent", nil)
+	case *collector.SchedEvent:
+		return e.WriteRaw("rbscope.SchedEvent", nil)
+	default:
+		return nil
+	}
+}
+
+// Flush is a no-op — file writes are synchronous.
+func (e *FileExporter) Flush(_ context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.file.Sync()
 }
 
 // Write appends a protobuf-encoded event to the file. Each record is prefixed
