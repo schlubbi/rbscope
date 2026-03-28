@@ -131,6 +131,26 @@
    ...
 }
 
+{
+   ruby_onig_new_with_source
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   ...
+   fun:onig_new_with_source
+   ...
+}
+
+# --- VM internals ---
+
+{
+   ruby_postponed_job_queue_init
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   ...
+   fun:rb_vm_postponed_job_queue_init
+   ...
+}
+
 # --- Conditional jumps on uninitialised memory in VM internals ---
 
 {
