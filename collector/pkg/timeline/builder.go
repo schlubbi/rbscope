@@ -207,4 +207,3 @@ func defaultCategories() []*pb.Category {
 		{Id: 5, Name: "Idle", Color: "transparent"},
 	}
 }
-
