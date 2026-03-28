@@ -184,6 +184,8 @@ jobs:
   # --- BPF compatibility across kernel versions (no Ruby needed) ---
   bpf-compat:
     runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: '0'
     strategy:
       fail-fast: false
       matrix:
@@ -212,8 +214,6 @@ jobs:
 
       - name: BPF load tests on kernel ${{ matrix.kernel }}
         working-directory: collector
-        env:
-          CGO_ENABLED: '0'
         run: |
           echo "Testing BPF programs on kernel: ${{ matrix.kernel }}"
           vimto -kernel ghcr.io/cilium/ci-kernels:${{ matrix.kernel }} -- \
