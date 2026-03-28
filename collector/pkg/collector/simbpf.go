@@ -279,15 +279,15 @@ type simIOTarget struct {
 // Simulated IO targets representing a Rails app talking to MySQL, Redis, etc.
 var simIOTargets = []simIOTarget{
 	{weight: 40, op: IoOpRead, fdType: 2, localPort: 54321, remotePort: 3306,
-		remoteAddr: 0x0100000A, srttUs: 500, latencyNs: 2_000_000},   // MySQL read, RTT=0.5ms
+		remoteAddr: 0x0100000A, srttUs: 500, latencyNs: 2_000_000}, // MySQL read, RTT=0.5ms
 	{weight: 20, op: IoOpWrite, fdType: 2, localPort: 54321, remotePort: 3306,
-		remoteAddr: 0x0100000A, srttUs: 500, latencyNs: 500_000},      // MySQL write
+		remoteAddr: 0x0100000A, srttUs: 500, latencyNs: 500_000}, // MySQL write
 	{weight: 15, op: IoOpRead, fdType: 2, localPort: 54322, remotePort: 6379,
-		remoteAddr: 0x0200000A, srttUs: 100, latencyNs: 200_000},      // Redis read, RTT=0.1ms
+		remoteAddr: 0x0200000A, srttUs: 100, latencyNs: 200_000}, // Redis read, RTT=0.1ms
 	{weight: 10, op: IoOpRead, fdType: 1, localPort: 0, remotePort: 0,
-		remoteAddr: 0, srttUs: 0, latencyNs: 50_000},                  // file read
+		remoteAddr: 0, srttUs: 0, latencyNs: 50_000}, // file read
 	{weight: 10, op: IoOpWrite, fdType: 5, localPort: 0, remotePort: 0,
-		remoteAddr: 0, srttUs: 0, latencyNs: 10_000},                  // pipe write (log)
+		remoteAddr: 0, srttUs: 0, latencyNs: 10_000}, // pipe write (log)
 	{weight: 5, op: IoOpConnect, fdType: 2, localPort: 54323, remotePort: 443,
 		remoteAddr: 0x01010101, srttUs: 15000, latencyNs: 30_000_000}, // HTTPS connect, RTT=15ms
 }
@@ -347,14 +347,14 @@ func (s *SimBPF) buildIOEvent(rng *rand.Rand) []byte {
 	// TCP stats (48 bytes, only for TCP sockets)
 	if target.fdType == 2 { // FD_TYPE_TCP
 		binary.LittleEndian.PutUint32(buf[64:68], target.srttUs)
-		binary.LittleEndian.PutUint32(buf[68:72], 10+uint32(rng.Intn(20)))  // snd_cwnd
-		binary.LittleEndian.PutUint32(buf[72:76], uint32(rng.Intn(5)))      // total_retrans
-		binary.LittleEndian.PutUint32(buf[76:80], uint32(rng.Intn(8)))      // packets_out
-		binary.LittleEndian.PutUint32(buf[80:84], uint32(rng.Intn(2)))      // retrans_out
-		binary.LittleEndian.PutUint32(buf[84:88], 0)                        // lost_out
-		binary.LittleEndian.PutUint32(buf[88:92], 65535)                     // rcv_wnd
-		binary.LittleEndian.PutUint64(buf[96:104], uint64(rng.Intn(100000))) // bytes_sent
-		binary.LittleEndian.PutUint64(buf[104:112], uint64(rng.Intn(500000))) // bytes_received
+		binary.LittleEndian.PutUint32(buf[68:72], 10+uint32(rng.Intn(20)))    // #nosec G115 -- sim
+		binary.LittleEndian.PutUint32(buf[72:76], uint32(rng.Intn(5)))        // #nosec G115 -- sim
+		binary.LittleEndian.PutUint32(buf[76:80], uint32(rng.Intn(8)))        // #nosec G115 -- sim
+		binary.LittleEndian.PutUint32(buf[80:84], uint32(rng.Intn(2)))        // #nosec G115 -- sim
+		binary.LittleEndian.PutUint32(buf[84:88], 0)                          // lost_out
+		binary.LittleEndian.PutUint32(buf[88:92], 65535)                      // rcv_wnd
+		binary.LittleEndian.PutUint64(buf[96:104], uint64(rng.Intn(100000)))  // #nosec G115 -- sim
+		binary.LittleEndian.PutUint64(buf[104:112], uint64(rng.Intn(500000))) // #nosec G115 -- sim
 	}
 
 	return buf

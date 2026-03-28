@@ -231,33 +231,33 @@ func TestParseEvent_IOEnriched(t *testing.T) {
 
 	// Header
 	binary.LittleEndian.PutUint32(data[0:4], uint32(EventIO))
-	binary.LittleEndian.PutUint32(data[4:8], 1000)  // pid
-	binary.LittleEndian.PutUint32(data[8:12], 1001) // tid
+	binary.LittleEndian.PutUint32(data[4:8], 1000)         // pid
+	binary.LittleEndian.PutUint32(data[8:12], 1001)        // tid
 	binary.LittleEndian.PutUint64(data[16:24], 5000000000) // timestamp
 
 	// IO fields
-	binary.LittleEndian.PutUint32(data[24:28], 1) // op = read
-	binary.LittleEndian.PutUint32(data[28:32], 7) // fd = 7
-	binary.LittleEndian.PutUint64(data[32:40], 4096) // bytes
+	binary.LittleEndian.PutUint32(data[24:28], 1)       // op = read
+	binary.LittleEndian.PutUint32(data[28:32], 7)       // fd = 7
+	binary.LittleEndian.PutUint64(data[32:40], 4096)    // bytes
 	binary.LittleEndian.PutUint64(data[40:48], 2000000) // latency = 2ms
 
 	// Socket enrichment
-	data[48] = 2  // fd_type = TCP
-	data[49] = 1  // sock_state = TCP_ESTABLISHED
-	binary.LittleEndian.PutUint16(data[50:52], 54321) // local_port
-	binary.LittleEndian.PutUint16(data[52:54], 3306)  // remote_port
+	data[48] = 2                                           // fd_type = TCP
+	data[49] = 1                                           // sock_state = TCP_ESTABLISHED
+	binary.LittleEndian.PutUint16(data[50:52], 54321)      // local_port
+	binary.LittleEndian.PutUint16(data[52:54], 3306)       // remote_port
 	binary.LittleEndian.PutUint32(data[56:60], 0x0100A8C0) // local = 192.168.0.1
 	binary.LittleEndian.PutUint32(data[60:64], 0x0100000A) // remote = 10.0.0.1
 
 	// TCP stats
-	binary.LittleEndian.PutUint32(data[64:68], 500)  // srtt_us
-	binary.LittleEndian.PutUint32(data[68:72], 10)   // snd_cwnd
-	binary.LittleEndian.PutUint32(data[72:76], 3)    // total_retrans
-	binary.LittleEndian.PutUint32(data[76:80], 5)    // packets_out
-	binary.LittleEndian.PutUint32(data[80:84], 1)    // retrans_out
-	binary.LittleEndian.PutUint32(data[84:88], 0)    // lost_out
-	binary.LittleEndian.PutUint32(data[88:92], 65535) // rcv_wnd
-	binary.LittleEndian.PutUint64(data[96:104], 100000) // bytes_sent
+	binary.LittleEndian.PutUint32(data[64:68], 500)      // srtt_us
+	binary.LittleEndian.PutUint32(data[68:72], 10)       // snd_cwnd
+	binary.LittleEndian.PutUint32(data[72:76], 3)        // total_retrans
+	binary.LittleEndian.PutUint32(data[76:80], 5)        // packets_out
+	binary.LittleEndian.PutUint32(data[80:84], 1)        // retrans_out
+	binary.LittleEndian.PutUint32(data[84:88], 0)        // lost_out
+	binary.LittleEndian.PutUint32(data[88:92], 65535)    // rcv_wnd
+	binary.LittleEndian.PutUint64(data[96:104], 100000)  // bytes_sent
 	binary.LittleEndian.PutUint64(data[104:112], 500000) // bytes_received
 
 	evt, err := ParseEvent(data)
@@ -307,23 +307,23 @@ func TestParseEvent_IOEnriched(t *testing.T) {
 	}
 
 	// TCP stats
-	if io.TcpStats == nil {
-		t.Fatal("TcpStats is nil")
+	if io.TCPStats == nil {
+		t.Fatal("TCPStats is nil")
 	}
-	if io.TcpStats.SrttUs != 500 {
-		t.Errorf("SrttUs: got %d, want 500", io.TcpStats.SrttUs)
+	if io.TCPStats.SrttUs != 500 {
+		t.Errorf("SrttUs: got %d, want 500", io.TCPStats.SrttUs)
 	}
-	if io.TcpStats.SndCwnd != 10 {
-		t.Errorf("SndCwnd: got %d, want 10", io.TcpStats.SndCwnd)
+	if io.TCPStats.SndCwnd != 10 {
+		t.Errorf("SndCwnd: got %d, want 10", io.TCPStats.SndCwnd)
 	}
-	if io.TcpStats.TotalRetrans != 3 {
-		t.Errorf("TotalRetrans: got %d, want 3", io.TcpStats.TotalRetrans)
+	if io.TCPStats.TotalRetrans != 3 {
+		t.Errorf("TotalRetrans: got %d, want 3", io.TCPStats.TotalRetrans)
 	}
-	if io.TcpStats.BytesSent != 100000 {
-		t.Errorf("BytesSent: got %d, want 100000", io.TcpStats.BytesSent)
+	if io.TCPStats.BytesSent != 100000 {
+		t.Errorf("BytesSent: got %d, want 100000", io.TCPStats.BytesSent)
 	}
-	if io.TcpStats.BytesReceived != 500000 {
-		t.Errorf("BytesReceived: got %d, want 500000", io.TcpStats.BytesReceived)
+	if io.TCPStats.BytesReceived != 500000 {
+		t.Errorf("BytesReceived: got %d, want 500000", io.TCPStats.BytesReceived)
 	}
 }
 
@@ -333,9 +333,9 @@ func TestParseEvent_IOEnrichedFileType(t *testing.T) {
 	binary.LittleEndian.PutUint32(data[4:8], 1000)
 	binary.LittleEndian.PutUint32(data[8:12], 1001)
 	binary.LittleEndian.PutUint64(data[16:24], 1000)
-	binary.LittleEndian.PutUint32(data[24:28], 1) // read
-	binary.LittleEndian.PutUint32(data[28:32], 5) // fd
-	binary.LittleEndian.PutUint64(data[32:40], 512) // bytes
+	binary.LittleEndian.PutUint32(data[24:28], 1)     // read
+	binary.LittleEndian.PutUint32(data[28:32], 5)     // fd
+	binary.LittleEndian.PutUint64(data[32:40], 512)   // bytes
 	binary.LittleEndian.PutUint64(data[40:48], 50000) // latency
 
 	data[48] = 1 // fd_type = FILE
@@ -352,19 +352,19 @@ func TestParseEvent_IOEnrichedFileType(t *testing.T) {
 	if io.FormatFdInfo() != "file" {
 		t.Errorf("FormatFdInfo: got %q, want %q", io.FormatFdInfo(), "file")
 	}
-	if io.TcpStats != nil {
-		t.Errorf("TcpStats should be nil for file, got %+v", io.TcpStats)
+	if io.TCPStats != nil {
+		t.Errorf("TCPStats should be nil for file, got %+v", io.TCPStats)
 	}
 }
 
 func TestIoOpName(t *testing.T) {
 	tests := map[uint32]string{
-		IoOpRead:    "read",
-		IoOpWrite:   "write",
-		IoOpSendto:  "sendto",
+		IoOpRead:     "read",
+		IoOpWrite:    "write",
+		IoOpSendto:   "sendto",
 		IoOpRecvfrom: "recvfrom",
-		IoOpConnect: "connect",
-		99:          "syscall_99",
+		IoOpConnect:  "connect",
+		99:           "syscall_99",
 	}
 	for op, want := range tests {
 		got := IoOpName(op)

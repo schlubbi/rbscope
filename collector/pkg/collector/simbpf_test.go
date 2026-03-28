@@ -260,9 +260,9 @@ func TestSimBPF_IOEventParsesCorrectly(t *testing.T) {
 			if io.RemotePort == 0 {
 				t.Error("TCP IO event has RemotePort=0")
 			}
-			if io.TcpStats == nil {
-				t.Error("TCP IO event has nil TcpStats")
-			} else if io.TcpStats.SrttUs == 0 {
+			if io.TCPStats == nil {
+				t.Error("TCP IO event has nil TCPStats")
+			} else if io.TCPStats.SrttUs == 0 {
 				t.Error("TCP IO event has SrttUs=0")
 			}
 			info := io.FormatFdInfo()

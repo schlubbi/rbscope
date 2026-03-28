@@ -80,17 +80,17 @@ func (b *Builder) Ingest(event any) {
 			ioEvent.RemotePort = uint32(ev.RemotePort)
 		}
 		// Populate TCP stats
-		if ev.TcpStats != nil {
+		if ev.TCPStats != nil {
 			ioEvent.TcpStats = &pb.TcpStats{
-				SrttUs:        ev.TcpStats.SrttUs,
-				SndCwnd:       ev.TcpStats.SndCwnd,
-				TotalRetrans:  ev.TcpStats.TotalRetrans,
-				PacketsOut:    ev.TcpStats.PacketsOut,
-				RetransOut:    ev.TcpStats.RetransOut,
-				LostOut:       ev.TcpStats.LostOut,
-				RcvWnd:        ev.TcpStats.RcvWnd,
-				BytesSent:     ev.TcpStats.BytesSent,
-				BytesReceived: ev.TcpStats.BytesReceived,
+				SrttUs:        ev.TCPStats.SrttUs,
+				SndCwnd:       ev.TCPStats.SndCwnd,
+				TotalRetrans:  ev.TCPStats.TotalRetrans,
+				PacketsOut:    ev.TCPStats.PacketsOut,
+				RetransOut:    ev.TCPStats.RetransOut,
+				LostOut:       ev.TCPStats.LostOut,
+				RcvWnd:        ev.TCPStats.RcvWnd,
+				BytesSent:     ev.TCPStats.BytesSent,
+				BytesReceived: ev.TCPStats.BytesReceived,
 			}
 		}
 		tb.ioEvents = append(tb.ioEvents, ioEvent)

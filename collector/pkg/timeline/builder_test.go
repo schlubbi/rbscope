@@ -425,7 +425,7 @@ func TestBuilderIOEventFdInfo(t *testing.T) {
 		FdType: 2, SockState: 1,
 		LocalPort: 54321, RemotePort: 3306,
 		LocalAddr: 0x0100A8C0, RemoteAddr: 0x0100000A,
-		TcpStats: &collector.IOTcpStats{
+		TCPStats: &collector.IOTCPStats{
 			SrttUs: 500, SndCwnd: 10, TotalRetrans: 3,
 			PacketsOut: 5, RcvWnd: 65535,
 		},

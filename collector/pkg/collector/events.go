@@ -75,11 +75,11 @@ type IOEvent struct {
 	LocalAddr  uint32 // IPv4, network byte order
 	RemoteAddr uint32 // IPv4, network byte order
 	// TCP performance stats
-	TcpStats *IOTcpStats // nil if not a TCP socket
+	TCPStats *IOTCPStats // nil if not a TCP socket
 }
 
-// IOTcpStats holds TCP performance metrics captured from struct tcp_sock.
-type IOTcpStats struct {
+// IOTCPStats holds TCP performance metrics captured from struct tcp_sock.
+type IOTCPStats struct {
 	SrttUs        uint32
 	SndCwnd       uint32
 	TotalRetrans  uint32
@@ -93,11 +93,11 @@ type IOTcpStats struct {
 
 // IoOp constants matching the BPF-side IO_OP_* enum.
 const (
-	IoOpRead    = 1
-	IoOpWrite   = 2
-	IoOpSendto  = 3
+	IoOpRead     = 1
+	IoOpWrite    = 2
+	IoOpSendto   = 3
 	IoOpRecvfrom = 4
-	IoOpConnect = 5
+	IoOpConnect  = 5
 )
 
 // SchedEvent captures a context-switch or scheduling event.
@@ -292,7 +292,7 @@ func parseIOEventEnriched(data []byte) (*IOEvent, error) {
 
 	// IO fields
 	ev.Op = binary.LittleEndian.Uint32(data[24:28])
-	ev.FD = int32(binary.LittleEndian.Uint32(data[28:32])) // #nosec G115 -- wire format
+	ev.FD = int32(binary.LittleEndian.Uint32(data[28:32]))    // #nosec G115 -- wire format
 	ev.Bytes = int64(binary.LittleEndian.Uint64(data[32:40])) // #nosec G115 -- wire format
 	ev.LatencyNs = binary.LittleEndian.Uint64(data[40:48])
 
@@ -307,21 +307,21 @@ func parseIOEventEnriched(data []byte) (*IOEvent, error) {
 
 	// TCP stats (only populate if it's a TCP socket)
 	if ev.FdType == 2 { // FD_TYPE_TCP
-		tcp := &IOTcpStats{
-			SrttUs:        binary.LittleEndian.Uint32(data[64:68]),
-			SndCwnd:       binary.LittleEndian.Uint32(data[68:72]),
-			TotalRetrans:  binary.LittleEndian.Uint32(data[72:76]),
-			PacketsOut:    binary.LittleEndian.Uint32(data[76:80]),
-			RetransOut:    binary.LittleEndian.Uint32(data[80:84]),
-			LostOut:       binary.LittleEndian.Uint32(data[84:88]),
-			RcvWnd:        binary.LittleEndian.Uint32(data[88:92]),
+		tcp := &IOTCPStats{
+			SrttUs:       binary.LittleEndian.Uint32(data[64:68]),
+			SndCwnd:      binary.LittleEndian.Uint32(data[68:72]),
+			TotalRetrans: binary.LittleEndian.Uint32(data[72:76]),
+			PacketsOut:   binary.LittleEndian.Uint32(data[76:80]),
+			RetransOut:   binary.LittleEndian.Uint32(data[80:84]),
+			LostOut:      binary.LittleEndian.Uint32(data[84:88]),
+			RcvWnd:       binary.LittleEndian.Uint32(data[88:92]),
 			// skip pad at 92:96
 			BytesSent:     binary.LittleEndian.Uint64(data[96:104]),
 			BytesReceived: binary.LittleEndian.Uint64(data[104:112]),
 		}
 		// Only set if there's actual data (srtt_us > 0 indicates real stats)
 		if tcp.SrttUs > 0 || tcp.TotalRetrans > 0 || tcp.PacketsOut > 0 {
-			ev.TcpStats = tcp
+			ev.TCPStats = tcp
 		}
 	}
 
