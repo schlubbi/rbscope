@@ -36,14 +36,14 @@ func makeSampleEvent(tid uint32, ts uint64, frames []collector.InlineFrame) *col
 	}
 }
 
-func makeIOEvent(tid uint32, ts uint64, fd int32, latNs uint64) *collector.IOEvent {
+func makeIOEvent(tid uint32, ts uint64, latNs uint64) *collector.IOEvent {
 	return &collector.IOEvent{
 		EventHeader: collector.EventHeader{
 			Type:      collector.EventIO,
 			TID:       tid,
 			Timestamp: ts,
 		},
-		FD:        fd,
+		FD:        5,
 		Op:        1, // read
 		Bytes:     1024,
 		LatencyNs: latNs,
@@ -73,40 +73,40 @@ func TestBuilderBasicCapture(t *testing.T) {
 	b.Ingest(makeSampleEvent(100, 2_000_000, frames))
 	b.Ingest(makeSampleEvent(200, 1_500_000, frames[:1]))
 
-	cap := b.Build()
+	capture := b.Build()
 
 	// Header
-	if cap.Header.Version != 2 {
-		t.Errorf("version = %d, want 2", cap.Header.Version)
+	if capture.Header.Version != 2 {
+		t.Errorf("version = %d, want 2", capture.Header.Version)
 	}
-	if cap.Header.ServiceName != "test-app" {
-		t.Errorf("service = %q, want test-app", cap.Header.ServiceName)
+	if capture.Header.ServiceName != "test-app" {
+		t.Errorf("service = %q, want test-app", capture.Header.ServiceName)
 	}
-	if cap.Header.Pid != 1234 {
-		t.Errorf("pid = %d, want 1234", cap.Header.Pid)
+	if capture.Header.Pid != 1234 {
+		t.Errorf("pid = %d, want 1234", capture.Header.Pid)
 	}
 
 	// Threads
-	if len(cap.Threads) != 2 {
-		t.Fatalf("threads = %d, want 2", len(cap.Threads))
+	if len(capture.Threads) != 2 {
+		t.Fatalf("threads = %d, want 2", len(capture.Threads))
 	}
 
 	// Threads sorted by TID
-	if cap.Threads[0].ThreadId != 100 || cap.Threads[1].ThreadId != 200 {
-		t.Errorf("thread order: %d, %d", cap.Threads[0].ThreadId, cap.Threads[1].ThreadId)
+	if capture.Threads[0].ThreadId != 100 || capture.Threads[1].ThreadId != 200 {
+		t.Errorf("thread order: %d, %d", capture.Threads[0].ThreadId, capture.Threads[1].ThreadId)
 	}
 
 	// Thread 100 has 2 samples, thread 200 has 1
-	if len(cap.Threads[0].Samples) != 2 {
-		t.Errorf("thread 100 samples = %d, want 2", len(cap.Threads[0].Samples))
+	if len(capture.Threads[0].Samples) != 2 {
+		t.Errorf("thread 100 samples = %d, want 2", len(capture.Threads[0].Samples))
 	}
-	if len(cap.Threads[1].Samples) != 1 {
-		t.Errorf("thread 200 samples = %d, want 1", len(cap.Threads[1].Samples))
+	if len(capture.Threads[1].Samples) != 1 {
+		t.Errorf("thread 200 samples = %d, want 1", len(capture.Threads[1].Samples))
 	}
 
 	// Samples sorted by timestamp
-	if cap.Threads[0].Samples[0].TimestampNs != 1_000_000 {
-		t.Errorf("first sample ts = %d", cap.Threads[0].Samples[0].TimestampNs)
+	if capture.Threads[0].Samples[0].TimestampNs != 1_000_000 {
+		t.Errorf("first sample ts = %d", capture.Threads[0].Samples[0].TimestampNs)
 	}
 }
 
@@ -120,11 +120,11 @@ func TestStringTableDedup(t *testing.T) {
 	b.Ingest(makeSampleEvent(1, 100, frames))
 	b.Ingest(makeSampleEvent(1, 200, frames))
 
-	cap := b.Build()
+	capture := b.Build()
 
 	// "foo" and "bar.rb" should appear exactly once in string table
 	fooCount := 0
-	for _, s := range cap.StringTable {
+	for _, s := range capture.StringTable {
 		if s == "foo" {
 			fooCount++
 		}
@@ -134,11 +134,11 @@ func TestStringTableDedup(t *testing.T) {
 	}
 
 	// Both samples should reference the same frame index
-	if len(cap.Threads) != 1 {
+	if len(capture.Threads) != 1 {
 		t.Fatal("expected 1 thread")
 	}
-	s0 := cap.Threads[0].Samples[0].FrameIds
-	s1 := cap.Threads[0].Samples[1].FrameIds
+	s0 := capture.Threads[0].Samples[0].FrameIds
+	s1 := capture.Threads[0].Samples[1].FrameIds
 	if len(s0) != 1 || len(s1) != 1 || s0[0] != s1[0] {
 		t.Errorf("frame dedup failed: s0=%v, s1=%v", s0, s1)
 	}
@@ -159,16 +159,16 @@ func TestFrameTableDedup(t *testing.T) {
 	b.Ingest(makeSampleEvent(1, 100, framesA))
 	b.Ingest(makeSampleEvent(1, 200, framesB))
 
-	cap := b.Build()
+	capture := b.Build()
 
 	// Frame table should have 3 unique frames (a, b, shared)
-	if len(cap.FrameTable) != 3 {
-		t.Errorf("frame table size = %d, want 3", len(cap.FrameTable))
+	if len(capture.FrameTable) != 3 {
+		t.Errorf("frame table size = %d, want 3", len(capture.FrameTable))
 	}
 
 	// The "shared" frame should be the same index in both samples
-	s0 := cap.Threads[0].Samples[0].FrameIds
-	s1 := cap.Threads[0].Samples[1].FrameIds
+	s0 := capture.Threads[0].Samples[0].FrameIds
+	s1 := capture.Threads[0].Samples[1].FrameIds
 	if s0[1] != s1[1] {
 		t.Errorf("shared frame not deduped: s0[1]=%d, s1[1]=%d", s0[1], s1[1])
 	}
@@ -182,11 +182,11 @@ func TestIOToSampleCrossRef(t *testing.T) {
 	b.Ingest(makeSampleEvent(1, 5000, []collector.InlineFrame{{Label: "c", Path: "c.rb", Line: 1}}))
 
 	// IO at t=2800 → nearest sample should be at t=3000 (index 1)
-	b.Ingest(makeIOEvent(1, 2800, 5, 100))
+	b.Ingest(makeIOEvent(1, 2800, 100))
 
-	cap := b.Build()
+	capture := b.Build()
 
-	io := cap.Threads[0].IoEvents[0]
+	io := capture.Threads[0].IoEvents[0]
 	if io.NearestSampleIdx != 1 {
 		t.Errorf("nearest sample idx = %d, want 1", io.NearestSampleIdx)
 	}
@@ -196,16 +196,16 @@ func TestIOToSchedCrossRef(t *testing.T) {
 	b := NewBuilder("svc", "h", 1, 99)
 
 	// IO from t=1000 with 500ns latency → covers [1000, 1500]
-	b.Ingest(makeIOEvent(1, 1000, 5, 500))
+	b.Ingest(makeIOEvent(1, 1000, 500))
 
 	// Sched: thread went back on CPU at t=1500 after being off for 400ns → off from [1100, 1500]
 	// This overlaps with the IO window
 	b.Ingest(makeSchedEvent(1, 1500, 400))
 
-	cap := b.Build()
+	capture := b.Build()
 
-	io := cap.Threads[0].IoEvents[0]
-	sched := cap.Threads[0].SchedEvents[0]
+	io := capture.Threads[0].IoEvents[0]
+	sched := capture.Threads[0].SchedEvents[0]
 
 	if io.CausedSchedEventIdx != 0 {
 		t.Errorf("IO.CausedSchedEventIdx = %d, want 0", io.CausedSchedEventIdx)
@@ -227,9 +227,9 @@ func TestThreadStateDeriv(t *testing.T) {
 	// Off-CPU from [2000, 2500] (500ns)
 	b.Ingest(makeSchedEvent(1, 2500, 500))
 
-	cap := b.Build()
+	capture := b.Build()
 
-	states := cap.Threads[0].States
+	states := capture.Threads[0].States
 	if len(states) < 3 {
 		t.Fatalf("states = %d, want >= 3", len(states))
 	}
@@ -260,16 +260,16 @@ func TestIOSchedCrossRefUpdatesState(t *testing.T) {
 	b := NewBuilder("svc", "h", 1, 99)
 
 	// IO read at t=1000, latency=500ns → [1000, 1500]
-	b.Ingest(makeIOEvent(1, 1000, 5, 500))
+	b.Ingest(makeIOEvent(1, 1000, 500))
 	// Off-CPU at [1100, 1500] → overlaps with IO
 	b.Ingest(makeSchedEvent(1, 1500, 400))
 
-	cap := b.Build()
+	capture := b.Build()
 
 	// The derived state should show OFF_CPU_IO (not OFF_CPU_UNKNOWN)
 	// because the cross-ref identified the IO cause
 	found := false
-	for _, s := range cap.Threads[0].States {
+	for _, s := range capture.Threads[0].States {
 		if s.State == pb.ThreadState_THREAD_STATE_OFF_CPU_IO {
 			found = true
 			break
@@ -287,13 +287,13 @@ func TestProtoRoundTrip(t *testing.T) {
 		{Label: "foo", Path: "foo.rb", Line: 42},
 	}
 	b.Ingest(makeSampleEvent(100, 1_000_000, frames))
-	b.Ingest(makeIOEvent(100, 2_000_000, 5, 500))
+	b.Ingest(makeIOEvent(100, 2_000_000, 500))
 	b.Ingest(makeSchedEvent(100, 3_000_000, 1000))
 
-	cap := b.Build()
+	capture := b.Build()
 
 	// Serialize
-	data, err := proto.Marshal(cap)
+	data, err := proto.Marshal(capture)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -397,18 +397,18 @@ func TestNearestSampleIdx(t *testing.T) {
 
 func TestEmptyCapture(t *testing.T) {
 	b := NewBuilder("svc", "h", 1, 99)
-	cap := b.Build()
+	capture := b.Build()
 
-	if cap.Header.Version != 2 {
-		t.Errorf("version = %d", cap.Header.Version)
+	if capture.Header.Version != 2 {
+		t.Errorf("version = %d", capture.Header.Version)
 	}
-	if len(cap.Threads) != 0 {
-		t.Errorf("threads = %d, want 0", len(cap.Threads))
+	if len(capture.Threads) != 0 {
+		t.Errorf("threads = %d, want 0", len(capture.Threads))
 	}
-	if len(cap.StringTable) != 1 { // just the empty string
-		t.Errorf("string table = %d, want 1", len(cap.StringTable))
+	if len(capture.StringTable) != 1 { // just the empty string
+		t.Errorf("string table = %d, want 1", len(capture.StringTable))
 	}
-	if len(cap.Categories) == 0 {
+	if len(capture.Categories) == 0 {
 		t.Error("expected default categories")
 	}
 }
