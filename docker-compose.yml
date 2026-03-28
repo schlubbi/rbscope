@@ -1,5 +1,23 @@
 services:
   # --- Backend infrastructure ---
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: rbscope
+      MYSQL_DATABASE: rbscope_dev
+    ports:
+      - "13306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - rbscope-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-prbscope"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
     command: ["--config=/etc/otelcol/config.yaml"]
@@ -38,14 +56,21 @@ services:
     ports:
       - "3000:3000"
     environment:
+      - RAILS_ENV=development
+      - DATABASE_HOST=mysql
+      - DATABASE_USER=root
+      - DATABASE_PASSWORD=rbscope
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
       - OTEL_SERVICE_NAME=rbscope-test-app
     networks:
       - rbscope-net
     depends_on:
-      - otel-collector
+      mysql:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
     healthcheck:
-      test: ["CMD", "ruby", "-e", "require 'net/http'; Net::HTTP.get(URI('http://localhost:3000/health'))"]
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/health"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -63,6 +88,9 @@ services:
       - rbscope-net
     depends_on:
       - pyroscope
+
+volumes:
+  mysql-data:
 
 networks:
   rbscope-net:

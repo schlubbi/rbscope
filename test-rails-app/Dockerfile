@@ -1,6 +1,11 @@
-FROM ruby:3.3-slim
+FROM ruby:4.0-slim
 
-RUN apt-get update && apt-get install -y build-essential rustc cargo curl clang && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    default-libmysqlclient-dev \
+    libyaml-dev \
+    rustc cargo clang curl \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -19,4 +24,6 @@ HEALTHCHECK --interval=5s --timeout=3s --start-period=30s \
   CMD curl -sf http://localhost:3000/health || exit 1
 
 EXPOSE 3000
-CMD ["bundle", "exec", "puma", "-b", "tcp://0.0.0.0:3000", "-t", "1:4"]
+
+# Entrypoint: migrate, seed, then start pitchfork
+CMD ["bash", "-c", "bundle exec rails db:prepare && bundle exec pitchfork -c config/pitchfork.rb"]

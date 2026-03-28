@@ -2,11 +2,20 @@
 
 source "https://rubygems.org"
 
-gem "puma", "~> 6.0"
-gem "rbscope", path: "../gem"
-gem "rack-test", group: :test
+ruby ">= 4.0.0"
 
-# OTel for Path B: spans → Jaeger
+gem "rails", "~> 8.1"
+gem "pitchfork", "~> 0.18"
+gem "trilogy", "~> 2.11"
+gem "rbscope", path: "../gem"
+
+# OTel for trace export to Jaeger/OTel Collector
 gem "opentelemetry-sdk"
 gem "opentelemetry-exporter-otlp"
 gem "opentelemetry-instrumentation-rack"
+gem "opentelemetry-instrumentation-rails"
+gem "opentelemetry-instrumentation-active_record"
+
+group :test do
+  gem "rack-test"
+end
