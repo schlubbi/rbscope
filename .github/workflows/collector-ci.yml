@@ -2,9 +2,9 @@ name: Collector CI
 
 on:
   push:
-    paths: ['collector/**', 'proto/**']
+    paths: ['collector/**', 'proto/**', '.github/workflows/collector-ci.yml']
   pull_request:
-    paths: ['collector/**', 'proto/**']
+    paths: ['collector/**', 'proto/**', '.github/workflows/collector-ci.yml']
 
 defaults:
   run:

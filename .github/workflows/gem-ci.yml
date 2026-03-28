@@ -2,9 +2,9 @@ name: Gem CI
 
 on:
   push:
-    paths: ['gem/**']
+    paths: ['gem/**', '.github/workflows/gem-ci.yml']
   pull_request:
-    paths: ['gem/**']
+    paths: ['gem/**', '.github/workflows/gem-ci.yml']
 
 defaults:
   run:
