@@ -26,10 +26,10 @@ type bpfObjects struct {
 
 func (o *bpfObjects) Close() error {
 	if o.Events != nil {
-		o.Events.Close()
+		_ = o.Events.Close()
 	}
 	if o.HandleRubySample != nil {
-		o.HandleRubySample.Close()
+		_ = o.HandleRubySample.Close()
 	}
 	return nil
 }
@@ -75,7 +75,7 @@ func (r *RealBPF) Load() error {
 	}
 	rd, err := ringbuf.NewReader(r.objs.Events)
 	if err != nil {
-		r.objs.Close()
+		r.objs.Close() //nolint:errcheck // cleanup on error path
 		return fmt.Errorf("open ring buffer: %w", err)
 	}
 	r.reader = rd
@@ -145,7 +145,7 @@ func findRbscopeLibrary(pid uint32) (string, error) {
 }
 
 // DetachPID detaches all uprobes for the given PID.
-func (r *RealBPF) DetachPID(pid uint32) error {
+func (r *RealBPF) DetachPID(_ uint32) error {
 	remaining := r.links[:0]
 	for _, l := range r.links {
 		if err := l.Close(); err != nil {

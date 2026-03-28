@@ -97,7 +97,7 @@ func TestOTLPExporter_SkipsUnknownEvents(t *testing.T) {
 }
 
 func TestOTLPExporter_FlushEmptyNoOp(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("unexpected request for empty flush")
 		w.WriteHeader(http.StatusOK)
 	}))

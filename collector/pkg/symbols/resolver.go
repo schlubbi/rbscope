@@ -1,3 +1,4 @@
+// Package symbols resolves addresses to function names via /proc maps.
 package symbols
 
 import (

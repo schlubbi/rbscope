@@ -1,3 +1,4 @@
+// Package export provides exporters for sending profiling data to backends.
 package export
 
 import (
@@ -20,15 +21,15 @@ import (
 
 // DatadogConfig configures the Datadog profiling exporter.
 type DatadogConfig struct {
-	IntakeURL       string
-	APIKey          string
-	Service         string
-	Env             string
-	Version         string
-	Tags            map[string]string
-	SymbolMap       map[uint32][]string // stackID → frame names (for demo mode)
-	FlushEvery      time.Duration
-	Logger          *slog.Logger
+	IntakeURL  string
+	APIKey     string
+	Service    string
+	Env        string
+	Version    string
+	Tags       map[string]string
+	SymbolMap  map[uint32][]string // stackID → frame names (for demo mode)
+	FlushEvery time.Duration
+	Logger     *slog.Logger
 }
 
 // DatadogExporter implements collector.Exporter by accumulating stack samples
@@ -178,10 +179,10 @@ func (e *DatadogExporter) pushProfile(ctx context.Context) error {
 
 // datadogEvent is the JSON metadata sent in the "event" form part.
 type datadogEvent struct {
-	Attachments    []string `json:"attachments"`
-	TagsProfiler   string   `json:"tags_profiler"`
-	Family         string   `json:"family"`
-	Version        string   `json:"version"`
+	Attachments  []string `json:"attachments"`
+	TagsProfiler string   `json:"tags_profiler"`
+	Family       string   `json:"family"`
+	Version      string   `json:"version"`
 }
 
 func (e *DatadogExporter) buildMultipartForm(prof *profile.Profile) (*bytes.Buffer, string, error) {

@@ -8,12 +8,12 @@ import (
 
 // PprofBuilder accumulates stack samples and produces a pprof Profile.
 type PprofBuilder struct {
-	mu       sync.Mutex
-	strings  map[string]int64 // dedup string table
-	locs     map[uint64]*profile.Location
-	samples  []*profile.Sample
-	locID    uint64
-	period   int64
+	mu            sync.Mutex
+	strings       map[string]int64 // dedup string table
+	locs          map[uint64]*profile.Location
+	samples       []*profile.Sample
+	locID         uint64
+	period        int64
 	durationNanos int64
 }
 

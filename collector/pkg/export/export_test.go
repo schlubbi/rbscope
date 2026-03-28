@@ -64,7 +64,7 @@ func TestPyroscopeExporter_NilProfile(t *testing.T) {
 	// Should panic or error with nil profile
 	defer func() {
 		if r := recover(); r == nil {
-			// no-op: didn't panic — check error returned
+			_ = r // no-op: didn't panic — check error returned
 		}
 	}()
 	err := e.Push(context.TODO(), nil)
@@ -92,7 +92,10 @@ func TestFileExporter_CreateClose(t *testing.T) {
 
 func TestPyroscopePushExporter_InlineStack(t *testing.T) {
 	// Build a format v2 inline stack with 2 frames
-	stackData := buildInlineStack([]struct{ label, path string; line uint32 }{
+	stackData := buildInlineStack([]struct {
+		label, path string
+		line        uint32
+	}{
 		{"UsersController#index", "/app/controllers/users_controller.rb", 15},
 		{"ActionController::Base#process", "/gems/actionpack/base.rb", 42},
 	})

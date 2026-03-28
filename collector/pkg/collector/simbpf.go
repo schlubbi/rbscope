@@ -29,11 +29,13 @@ func NewSimBPF(freqHz int) *SimBPF {
 	}
 }
 
+// Load initializes the simulated BPF program.
 func (s *SimBPF) Load() error {
 	s.startTime = time.Now()
 	return nil
 }
 
+// AttachPID begins generating simulated events for the given PID.
 func (s *SimBPF) AttachPID(pid uint32) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -48,6 +50,7 @@ func (s *SimBPF) AttachPID(pid uint32) error {
 	return nil
 }
 
+// DetachPID stops generating events for the given PID.
 func (s *SimBPF) DetachPID(_ uint32) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -60,6 +63,7 @@ func (s *SimBPF) DetachPID(_ uint32) error {
 	return nil
 }
 
+// ReadRingBuffer reads the next simulated event into buf.
 func (s *SimBPF) ReadRingBuffer(buf []byte) (int, error) {
 	select {
 	case data := <-s.eventBuf:
@@ -70,6 +74,7 @@ func (s *SimBPF) ReadRingBuffer(buf []byte) (int, error) {
 	}
 }
 
+// Close stops event generation and releases resources.
 func (s *SimBPF) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -217,7 +222,7 @@ func (s *SimBPF) buildSampleEvent(stack simStack, rng *rand.Rand) []byte {
 	// Build inline format v2 stack data:
 	// version(1) + num_frames(2) + for each frame: label_len(2) + label + path_len(2) + path + line(4)
 	var stackData []byte
-	stackData = append(stackData, 2) // version = 2
+	stackData = append(stackData, 2)                                             // version = 2
 	stackData = binary.LittleEndian.AppendUint16(stackData, uint16(len(frames))) // #nosec G115
 
 	for i, name := range frames {
@@ -234,12 +239,12 @@ func (s *SimBPF) buildSampleEvent(stack simStack, rng *rand.Rand) []byte {
 
 	// 40-byte header: type(4) + pid(4) + tid(4) + pad(4) + timestamp(8) + thread_id(8) + stack_data_len(4) + pad(4)
 	buf := make([]byte, rubySampleHeaderSize+len(stackData))
-	binary.LittleEndian.PutUint32(buf[0:4], uint32(EventRubySample))   // #nosec G115
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(EventRubySample)) // #nosec G115
 	binary.LittleEndian.PutUint32(buf[4:8], s.pid)
 	tid := s.pid + uint32(rng.Intn(8)) // #nosec G115
 	binary.LittleEndian.PutUint32(buf[8:12], tid)
 	// pad at 12:16
-	binary.LittleEndian.PutUint64(buf[16:24], uint64(time.Since(s.startTime).Nanoseconds()))
+	binary.LittleEndian.PutUint64(buf[16:24], uint64(time.Since(s.startTime).Nanoseconds())) // #nosec G115
 	binary.LittleEndian.PutUint64(buf[24:32], uint64(tid))
 	binary.LittleEndian.PutUint32(buf[32:36], uint32(len(stackData))) // #nosec G115
 	// pad at 36:40

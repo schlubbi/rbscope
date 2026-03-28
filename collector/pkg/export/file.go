@@ -25,7 +25,7 @@ var _ collector.Exporter = (*FileExporter)(nil)
 
 // NewFileExporter opens (or creates) the target file for writing.
 func NewFileExporter(path string) (*FileExporter, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644) // #nosec G304 -- path from user flag
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // #nosec G304 -- path from user flag
 	if err != nil {
 		return nil, fmt.Errorf("file exporter: open %s: %w", path, err)
 	}

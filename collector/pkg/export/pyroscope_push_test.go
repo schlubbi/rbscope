@@ -193,7 +193,10 @@ func TestPyroscopePushExporter_MultiFrameStack(t *testing.T) {
 	defer e.cancel()
 
 	// Build a 4-frame stack
-	stackData := buildInlineStack([]struct{ label, path string; line uint32 }{
+	stackData := buildInlineStack([]struct {
+		label, path string
+		line        uint32
+	}{
 		{"ActiveRecord::Base.find", "/gems/ar/base.rb", 100},
 		{"PostsController#show", "/app/controllers/posts_controller.rb", 25},
 		{"ActionController::Metal#dispatch", "/gems/actionpack/metal.rb", 80},

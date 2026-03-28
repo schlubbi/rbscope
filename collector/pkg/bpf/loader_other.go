@@ -19,8 +19,10 @@ func NewRealBPF(_ string) (*RealBPF, error) {
 	return nil, fmt.Errorf("BPF not supported on this platform (%s/%s)", runtime.GOOS, runtime.GOARCH)
 }
 
-func (r *RealBPF) Load() error                          { return fmt.Errorf("BPF not supported on this platform") }
-func (r *RealBPF) AttachPID(_ uint32) error              { return fmt.Errorf("BPF not supported on this platform") }
-func (r *RealBPF) DetachPID(_ uint32) error              { return fmt.Errorf("BPF not supported on this platform") }
-func (r *RealBPF) ReadRingBuffer(_ []byte) (int, error)  { return 0, fmt.Errorf("BPF not supported on this platform") }
-func (r *RealBPF) Close() error                          { return nil }
+func (r *RealBPF) Load() error              { return fmt.Errorf("BPF not supported on this platform") }
+func (r *RealBPF) AttachPID(_ uint32) error { return fmt.Errorf("BPF not supported on this platform") }
+func (r *RealBPF) DetachPID(_ uint32) error { return fmt.Errorf("BPF not supported on this platform") }
+func (r *RealBPF) ReadRingBuffer(_ []byte) (int, error) {
+	return 0, fmt.Errorf("BPF not supported on this platform")
+}
+func (r *RealBPF) Close() error { return nil }

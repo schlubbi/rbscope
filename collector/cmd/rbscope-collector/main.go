@@ -1,3 +1,4 @@
+// Package main provides the rbscope-collector CLI.
 package main
 
 import (

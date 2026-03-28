@@ -17,21 +17,21 @@ import (
 // OTLPConfig configures the OTLP exporter.
 type OTLPConfig struct {
 	// Endpoint is the OTLP HTTP endpoint (e.g. "http://localhost:4318").
-	Endpoint   string
+	Endpoint    string
 	ServiceName string
-	FlushEvery time.Duration
-	Logger     *slog.Logger
+	FlushEvery  time.Duration
+	Logger      *slog.Logger
 }
 
 // OTLPExporter implements collector.Exporter by converting stack samples
 // into OTLP trace spans and pushing them via HTTP/JSON to an OTLP collector
 // (e.g. Jaeger).
 type OTLPExporter struct {
-	endpoint   string
+	endpoint    string
 	serviceName string
-	log        *slog.Logger
-	client     *http.Client
-	flushEvery time.Duration
+	log         *slog.Logger
+	client      *http.Client
+	flushEvery  time.Duration
 
 	mu      sync.Mutex
 	samples []*collector.RubySampleEvent
