@@ -36,7 +36,7 @@ func makeSampleEvent(tid uint32, ts uint64, frames []collector.InlineFrame) *col
 	}
 }
 
-func makeIOEvent(tid uint32, ts uint64, op uint32, fd int32, latNs uint64) *collector.IOEvent {
+func makeIOEvent(tid uint32, ts uint64, fd int32, latNs uint64) *collector.IOEvent {
 	return &collector.IOEvent{
 		EventHeader: collector.EventHeader{
 			Type:      collector.EventIO,
@@ -44,7 +44,7 @@ func makeIOEvent(tid uint32, ts uint64, op uint32, fd int32, latNs uint64) *coll
 			Timestamp: ts,
 		},
 		FD:        fd,
-		Op:        op,
+		Op:        1, // read
 		Bytes:     1024,
 		LatencyNs: latNs,
 	}
@@ -182,7 +182,7 @@ func TestIOToSampleCrossRef(t *testing.T) {
 	b.Ingest(makeSampleEvent(1, 5000, []collector.InlineFrame{{Label: "c", Path: "c.rb", Line: 1}}))
 
 	// IO at t=2800 → nearest sample should be at t=3000 (index 1)
-	b.Ingest(makeIOEvent(1, 2800, 1, 5, 100))
+	b.Ingest(makeIOEvent(1, 2800, 5, 100))
 
 	cap := b.Build()
 
@@ -196,7 +196,7 @@ func TestIOToSchedCrossRef(t *testing.T) {
 	b := NewBuilder("svc", "h", 1, 99)
 
 	// IO from t=1000 with 500ns latency → covers [1000, 1500]
-	b.Ingest(makeIOEvent(1, 1000, 1, 5, 500))
+	b.Ingest(makeIOEvent(1, 1000, 5, 500))
 
 	// Sched: thread went back on CPU at t=1500 after being off for 400ns → off from [1100, 1500]
 	// This overlaps with the IO window
@@ -260,7 +260,7 @@ func TestIOSchedCrossRefUpdatesState(t *testing.T) {
 	b := NewBuilder("svc", "h", 1, 99)
 
 	// IO read at t=1000, latency=500ns → [1000, 1500]
-	b.Ingest(makeIOEvent(1, 1000, 1, 5, 500))
+	b.Ingest(makeIOEvent(1, 1000, 5, 500))
 	// Off-CPU at [1100, 1500] → overlaps with IO
 	b.Ingest(makeSchedEvent(1, 1500, 400))
 
@@ -287,7 +287,7 @@ func TestProtoRoundTrip(t *testing.T) {
 		{Label: "foo", Path: "foo.rb", Line: 42},
 	}
 	b.Ingest(makeSampleEvent(100, 1_000_000, frames))
-	b.Ingest(makeIOEvent(100, 2_000_000, 1, 5, 500))
+	b.Ingest(makeIOEvent(100, 2_000_000, 5, 500))
 	b.Ingest(makeSchedEvent(100, 3_000_000, 1000))
 
 	cap := b.Build()
