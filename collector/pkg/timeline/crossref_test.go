@@ -6,7 +6,7 @@ import (
 	pb "github.com/schlubbi/rbscope/collector/pkg/proto/rbscopepb"
 )
 
-func TestCrossRefIOToSamplesEmpty(t *testing.T) {
+func TestCrossRefIOToSamplesEmpty(_ *testing.T) {
 	tb := &threadBuilder{}
 	tb.ioEvents = []*pb.IOEvent{{TimestampNs: 100}}
 	// No samples — should not panic
