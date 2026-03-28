@@ -22,8 +22,9 @@ jobs:
       - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
         with:
           ruby-version: ${{ matrix.ruby }}
-          bundler-cache: true
           cargo-cache: true
+      - name: Bundle install
+        run: bundle install
       - name: Build and test
         run: bundle exec rake clobber compile test
       - name: Rust unit tests
@@ -38,10 +39,11 @@ jobs:
       - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
         with:
           ruby-version: '4.0'
-          bundler-cache: true
           cargo-cache: true
       - name: Install valgrind
         run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: Bundle install
+        run: bundle install
       - name: Build (debug)
         run: RBSCOPE_PROFILE=dev bundle exec rake compile
       - name: Test under valgrind
@@ -62,9 +64,10 @@ jobs:
       - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
         with:
           ruby-version: '4.0'
-          bundler-cache: true
           cargo-cache: true
           rustup-toolchain: nightly
+      - name: Bundle install
+        run: bundle install
       - name: Test with ${{ matrix.sanitizer }} sanitizer
         run: |
           RBSCOPE_RUSTFLAGS="-Zsanitizer=${{ matrix.sanitizer }}" \
