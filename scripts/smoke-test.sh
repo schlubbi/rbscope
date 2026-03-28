@@ -84,8 +84,8 @@ wait_for "Collector" "$COLLECTOR_URL/healthz"
 echo ""
 echo "1. Test app endpoints"
 check "GET /health" curl -sf "$APP_URL/health"
-check "GET /fast"   curl -sf "$APP_URL/fast"
-check "GET /slow"   curl -sf "$APP_URL/slow"
+check "GET /posts"  curl -sf "$APP_URL/posts"
+check "GET /posts/1" curl -sf "$APP_URL/posts/1"
 check "GET /work"   curl -sf "$APP_URL/work"
 
 # --- Standalone capture (Path A) ---
@@ -97,8 +97,9 @@ check_output "GET /profile/capture returns speedscope JSON" '"$schema":"https://
 # --- Generate traffic for tracing ---
 echo ""
 echo "3. Generating trace traffic..."
-for i in $(seq 1 5); do
-  curl -sf "$APP_URL/slow" >/dev/null 2>&1 &
+for i in $(seq 1 10); do
+  curl -sf "$APP_URL/posts" >/dev/null 2>&1 &
+  curl -sf "$APP_URL/posts/1" >/dev/null 2>&1 &
   curl -sf "$APP_URL/work" >/dev/null 2>&1 &
 done
 wait
