@@ -243,7 +243,7 @@ func (s *SimBPF) buildSampleEvent(stack simStack, rng *rand.Rand) []byte {
 	binary.LittleEndian.PutUint32(buf[4:8], s.pid)
 	tid := s.pid + uint32(rng.Intn(8)) // #nosec G115
 	binary.LittleEndian.PutUint32(buf[8:12], tid)
-	binary.LittleEndian.PutUint32(buf[12:16], 1) // weight = 1
+	binary.LittleEndian.PutUint32(buf[12:16], 1)                                             // weight = 1
 	binary.LittleEndian.PutUint64(buf[16:24], uint64(time.Since(s.startTime).Nanoseconds())) // #nosec G115
 	binary.LittleEndian.PutUint64(buf[24:32], uint64(tid))
 	binary.LittleEndian.PutUint32(buf[32:36], uint32(len(stackData))) // #nosec G115
