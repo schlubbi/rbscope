@@ -21,7 +21,7 @@ func crossRefIOToSamples(tb *threadBuilder) {
 // crossRefIOToSched links IOEvents with SchedEvents that overlap in time.
 // An IO event caused an off-CPU period if the IO latency window overlaps
 // the sched off-CPU window.
-func crossRefIOToSched(tb *threadBuilder) {
+func crossRefIOToSched(tb *threadBuilder, _ *IdleClassifier) {
 	if len(tb.ioEvents) == 0 || len(tb.schedEvents) == 0 {
 		return
 	}
@@ -43,8 +43,9 @@ func crossRefIOToSched(tb *threadBuilder) {
 }
 
 // deriveThreadStates builds ThreadStateInterval entries from sched events.
-// Gaps between off-CPU periods are assumed to be RUNNING.
-func deriveThreadStates(tb *threadBuilder) []*pb.ThreadStateInterval {
+// Gaps between off-CPU periods are assumed to be RUNNING. Uses the idle
+// classifier to map IO-blocked periods on daemon ports to IDLE.
+func deriveThreadStates(tb *threadBuilder, classifier *IdleClassifier) []*pb.ThreadStateInterval {
 	if len(tb.schedEvents) == 0 {
 		return nil
 	}
@@ -65,8 +66,16 @@ func deriveThreadStates(tb *threadBuilder) []*pb.ThreadStateInterval {
 			})
 		}
 
-		// Map the off-CPU reason to a thread state
+		// Map the off-CPU reason to a thread state.
+		// If caused by an IO event, use the idle classifier.
 		state := offCPUReasonToState(sched.Reason)
+		if sched.Reason == pb.OffCPUReason_OFF_CPU_IO_BLOCKED {
+			ioIdx := int(sched.CausedByIoIdx)
+			if ioIdx < len(tb.rawIOEvents) && tb.rawIOEvents[ioIdx] != nil {
+				state = classifier.ClassifyIOState(tb.rawIOEvents[ioIdx])
+			}
+		}
+
 		states = append(states, &pb.ThreadStateInterval{
 			StartNs:       offStart,
 			EndNs:         offEnd,

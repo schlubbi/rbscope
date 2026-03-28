@@ -25,20 +25,23 @@ type Builder struct {
 	service   string
 	hostname  string
 	frequency uint32
+
+	idleClassifier *IdleClassifier
 }
 
 // NewBuilder creates a Builder for a new capture window.
 func NewBuilder(service, hostname string, pid, frequencyHz uint32) *Builder {
 	st := newStringTable()
 	return &Builder{
-		threads:   make(map[uint32]*threadBuilder),
-		strings:   st,
-		frames:    newFrameTable(st),
-		startTime: time.Now(),
-		pid:       pid,
-		service:   service,
-		hostname:  hostname,
-		frequency: frequencyHz,
+		threads:        make(map[uint32]*threadBuilder),
+		strings:        st,
+		frames:         newFrameTable(st),
+		startTime:      time.Now(),
+		pid:            pid,
+		service:        service,
+		hostname:       hostname,
+		frequency:      frequencyHz,
+		idleClassifier: NewIdleClassifier(),
 	}
 }
 
@@ -94,6 +97,7 @@ func (b *Builder) Ingest(event any) {
 			}
 		}
 		tb.ioEvents = append(tb.ioEvents, ioEvent)
+		tb.rawIOEvents = append(tb.rawIOEvents, ev)
 
 	case *collector.SchedEvent:
 		tb := b.thread(ev.TID)
@@ -132,11 +136,11 @@ func (b *Builder) Build() *pb.Capture {
 		// Cross-reference: IO → nearest sample
 		crossRefIOToSamples(tb)
 
-		// Cross-reference: IO ↔ sched
-		crossRefIOToSched(tb)
+		// Cross-reference: IO ↔ sched (with idle classification)
+		crossRefIOToSched(tb, b.idleClassifier)
 
-		// Derive thread state intervals
-		states := deriveThreadStates(tb)
+		// Derive thread state intervals (with idle classification)
+		states := deriveThreadStates(tb, b.idleClassifier)
 
 		tl := &pb.ThreadTimeline{
 			ThreadId:    tid,
@@ -195,6 +199,7 @@ type threadBuilder struct {
 	ioEvents    []*pb.IOEvent
 	schedEvents []*pb.SchedEvent
 	spanEvents  []*pb.SpanEvent
+	rawIOEvents []*collector.IOEvent // kept for idle classification
 }
 
 func defaultCategories() []*pb.Category {
