@@ -20,6 +20,7 @@ import (
 	"github.com/schlubbi/rbscope/collector/pkg/collector"
 	"github.com/schlubbi/rbscope/collector/pkg/discovery"
 	"github.com/schlubbi/rbscope/collector/pkg/export"
+	csvexport "github.com/schlubbi/rbscope/collector/pkg/export/csv"
 	"github.com/schlubbi/rbscope/collector/pkg/export/gecko"
 	"github.com/schlubbi/rbscope/collector/pkg/timeline"
 )
@@ -91,7 +92,7 @@ func captureCmd() *cobra.Command {
 	f.Uint32Var(&flagCapturePID, "pid", 0, "Target PID (required)")
 	f.DurationVar(&flagCaptureDuration, "duration", 10*time.Second, "Capture duration")
 	f.StringVar(&flagCaptureOutput, "output", "capture.pb", "Output file path")
-	f.StringVar(&flagCaptureFormat, "format", "pb", "Output format: pb (protobuf) or gecko (Firefox Profiler JSON)")
+	f.StringVar(&flagCaptureFormat, "format", "pb", "Output format: pb (protobuf), gecko (Firefox Profiler JSON), or csv (DuckDB-ready)")
 	f.StringVar(&flagCaptureBPFObj, "bpf-obj", "", "Path to compiled BPF ELF object")
 	_ = cmd.MarkFlagRequired("pid")
 
@@ -183,8 +184,8 @@ func runCapture(_ *cobra.Command, _ []string) error {
 	var tb *timeline.Builder
 
 	switch flagCaptureFormat {
-	case "gecko":
-		// Gecko format: accumulate into timeline builder, export at end.
+	case "gecko", "csv":
+		// Both formats: accumulate into timeline builder, export at end.
 		hostname, _ := os.Hostname()
 		tb = timeline.NewBuilder("capture", hostname, flagCapturePID, 99)
 		exporters = append(exporters, &timelineExporter{builder: tb})
@@ -196,7 +197,7 @@ func runCapture(_ *cobra.Command, _ []string) error {
 		defer func() { _ = fe.Close() }()
 		exporters = append(exporters, fe)
 	default:
-		return fmt.Errorf("unknown format: %q (use pb or gecko)", flagCaptureFormat)
+		return fmt.Errorf("unknown format: %q (use pb, gecko, or csv)", flagCaptureFormat)
 	}
 
 	cfg := collector.Config{
@@ -228,13 +229,21 @@ func runCapture(_ *cobra.Command, _ []string) error {
 
 	<-ctx.Done()
 
-	// For gecko format, build the capture and export.
+	// For timeline-based formats, build the capture and export.
 	if tb != nil {
 		capture := tb.Build()
-		if err := gecko.Export(capture, flagCaptureOutput); err != nil {
-			return fmt.Errorf("export gecko profile: %w", err)
+		switch flagCaptureFormat {
+		case "gecko":
+			if err := gecko.Export(capture, flagCaptureOutput); err != nil {
+				return fmt.Errorf("export gecko profile: %w", err)
+			}
+			logger.Info("gecko profile exported", "output", flagCaptureOutput)
+		case "csv":
+			if err := csvexport.Export(capture, flagCaptureOutput); err != nil {
+				return fmt.Errorf("export csv: %w", err)
+			}
+			logger.Info("csv export complete", "output", flagCaptureOutput)
 		}
-		logger.Info("gecko profile exported", "output", flagCaptureOutput)
 	}
 
 	logger.Info("capture complete", "output", flagCaptureOutput, "duration", flagCaptureDuration)
