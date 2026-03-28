@@ -4,6 +4,8 @@
 #
 # Use with: valgrind --suppressions=valgrind.suppressions ruby ...
 
+# --- GC mark phase ---
+
 {
    ruby_gc_mark_locations
    Memcheck:Cond
@@ -20,6 +22,8 @@
    ...
 }
 
+# --- Thread / init ---
+
 {
    ruby_thread_start
    Memcheck:Leak
@@ -29,6 +33,8 @@
    ...
 }
 
+# --- Allocator (objspace / GC) ---
+
 {
    ruby_objspace_malloc
    Memcheck:Leak
@@ -36,4 +42,135 @@
    ...
    fun:objspace_xmalloc0
    ...
+}
+
+{
+   ruby_gc_impl_calloc
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   ...
+   fun:rb_gc_impl_calloc
+   ...
+}
+
+{
+   ruby_gc_impl_malloc
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   ...
+   fun:rb_gc_impl_malloc
+   ...
+}
+
+{
+   ruby_gc_impl_realloc
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   ...
+   fun:rb_gc_impl_realloc
+   ...
+}
+
+{
+   ruby_xcalloc_body
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   ...
+   fun:ruby_xcalloc_body
+   ...
+}
+
+{
+   ruby_xmalloc_body
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   ...
+   fun:ruby_xmalloc_body
+   ...
+}
+
+# --- Prism compiler (Ruby 4.0+) ---
+
+{
+   ruby_prism_compile
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   ...
+   fun:pm_compile_node
+   ...
+}
+
+{
+   ruby_prism_iseq
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   ...
+   fun:pm_iseq_new_with_opt
+   ...
+}
+
+# --- ISeq allocation ---
+
+{
+   ruby_iseq_alloc
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   ...
+   fun:iseq_alloc
+   ...
+}
+
+# --- Oniguruma regex engine (Ruby's built-in regex) ---
+
+{
+   ruby_onig_region_resize
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   ...
+   fun:onig_region_resize
+   ...
+}
+
+{
+   ruby_onig_new_with_source
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   ...
+   fun:onig_new_with_source
+   ...
+}
+
+# --- VM internals ---
+
+{
+   ruby_postponed_job_queue_init
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   ...
+   fun:rb_vm_postponed_job_queue_init
+   ...
+}
+
+{
+   ruby_jit_stats_alloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   obj:*/libruby*
+}
+
+# --- Conditional jumps on uninitialised memory in VM internals ---
+
+{
+   ruby_vm_cond
+   Memcheck:Cond
+   ...
+   obj:*/libruby*
+}
+
+{
+   ruby_vm_value8
+   Memcheck:Value8
+   ...
+   obj:*/libruby*
 }

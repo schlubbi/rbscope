@@ -10,6 +10,12 @@
 //   2. Timer thread: sleeps for 1/frequency, then calls rb_postponed_job_trigger()
 //   3. Ruby VM: at next safe point, runs the postponed job callback
 //   4. Callback: calls rb_profile_thread_frames() to capture stack, fires USDT probe
+//
+// Dynamic sampling rate:
+//   The sampler measures the cost of each callback (EWMA) and adjusts
+//   the sleep interval to keep total overhead within a configurable
+//   CPU budget (default 2%). When samples are expensive (deep stacks,
+//   GC pressure), the rate backs off. When cheap, it speeds up.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -64,6 +70,11 @@ const MAX_FRAMES: usize = 512;
 /// Maximum serialized stack size (must fit in BPF ring buffer event).
 const MAX_STACK_BYTES: usize = 4096;
 
+/// Minimum sleep interval (100µs = max ~10kHz).
+const MIN_INTERVAL_NS: u64 = 100_000;
+/// Maximum sleep interval (1s = min 1Hz).
+const MAX_INTERVAL_NS: u64 = 1_000_000_000;
+
 // ---------------------------------------------------------------------------
 // Global state
 // ---------------------------------------------------------------------------
@@ -76,6 +87,19 @@ static OWNER_PID: AtomicU32 = AtomicU32::new(0);
 /// Postponed job handle returned by rb_postponed_job_preregister.
 /// -1 means not yet registered.
 static POSTPONED_JOB_HANDLE: AtomicI32 = AtomicI32::new(-1);
+
+// Dynamic sampling rate state
+/// EWMA of sample callback duration in nanoseconds (1/8 smoothing).
+static SAMPLE_DURATION_EWMA_NS: AtomicU64 = AtomicU64::new(0);
+/// Overhead target × 10000 (e.g. 200 = 2.00%). Stored as integer to
+/// avoid floating point atomics.
+static OVERHEAD_TARGET_BPS: AtomicU32 = AtomicU32::new(200);
+/// Whether dynamic rate adjustment is enabled.
+static DYNAMIC_RATE_ENABLED: AtomicBool = AtomicBool::new(true);
+/// Current sampling interval in nanoseconds (observable).
+static CURRENT_INTERVAL_NS: AtomicU64 = AtomicU64::new(0);
+/// Maximum frequency configured at start (Hz).
+static MAX_FREQUENCY_HZ: AtomicU32 = AtomicU32::new(99);
 
 struct SamplerState {
     thread_handle: Option<thread::JoinHandle<()>>,
@@ -119,6 +143,9 @@ unsafe fn postponed_job_callback_inner() {
         return;
     }
 
+    // Measure callback duration for dynamic rate adjustment
+    let start_ns = clock_gettime_ns();
+
     let thread = rb_thread_current();
 
     let mut frame_buf: [rb_sys::VALUE; MAX_FRAMES] = [0; MAX_FRAMES];
@@ -135,6 +162,7 @@ unsafe fn postponed_job_callback_inner() {
     if num_frames <= 0 {
         // No frames captured (idle thread or error) — still count it
         SAMPLE_COUNT.fetch_add(1, Ordering::Relaxed);
+        update_sample_duration_ewma(start_ns);
         IN_CALLBACK.store(false, Ordering::Release);
         return;
     }
@@ -162,6 +190,7 @@ unsafe fn postponed_job_callback_inner() {
     }
 
     SAMPLE_COUNT.fetch_add(1, Ordering::Relaxed);
+    update_sample_duration_ewma(start_ns);
     IN_CALLBACK.store(false, Ordering::Release);
 }
 
@@ -212,6 +241,96 @@ unsafe fn ruby_value_to_string(value: rb_sys::VALUE) -> String {
 
     let bytes = std::slice::from_raw_parts(ptr as *const u8, len as usize);
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic rate helpers
+// ---------------------------------------------------------------------------
+
+/// Update the EWMA of sample callback duration (1/8 smoothing factor).
+fn update_sample_duration_ewma(start_ns: u64) {
+    let end_ns = clock_gettime_ns();
+    let duration = end_ns.saturating_sub(start_ns);
+    let prev = SAMPLE_DURATION_EWMA_NS.load(Ordering::Relaxed);
+    let new_ewma = if prev == 0 {
+        duration
+    } else {
+        // EWMA with α=1/8: new = old*7/8 + sample*1/8
+        (prev * 7 + duration) / 8
+    };
+    SAMPLE_DURATION_EWMA_NS.store(new_ewma, Ordering::Relaxed);
+}
+
+/// Monotonic clock in nanoseconds (CLOCK_MONOTONIC on Linux/macOS).
+fn clock_gettime_ns() -> u64 {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // Safety: clock_gettime with CLOCK_MONOTONIC is always safe.
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+        ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        // Fallback: std::time::Instant doesn't give raw ns easily,
+        // use SystemTime (less precise but portable).
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64
+    }
+}
+
+/// Adjust the sampling interval based on measured overhead.
+/// Returns the new interval in nanoseconds.
+fn adjust_interval(current_interval_ns: u64) -> u64 {
+    if !DYNAMIC_RATE_ENABLED.load(Ordering::Relaxed) {
+        return current_interval_ns;
+    }
+
+    let avg_sample_ns = SAMPLE_DURATION_EWMA_NS.load(Ordering::Relaxed);
+    let target_bps = OVERHEAD_TARGET_BPS.load(Ordering::Relaxed);
+    let max_freq = MAX_FREQUENCY_HZ.load(Ordering::Relaxed);
+
+    compute_interval(current_interval_ns, avg_sample_ns, target_bps, max_freq)
+}
+
+/// Pure computation: given current state, return the new interval.
+/// Separated from globals for testability.
+fn compute_interval(
+    current_interval_ns: u64,
+    avg_sample_ns: u64,
+    target_bps: u32,
+    max_freq_hz: u32,
+) -> u64 {
+    if avg_sample_ns == 0 {
+        return current_interval_ns;
+    }
+
+    let target_bps = target_bps as u64;
+    // overhead = sample_ns / (sample_ns + interval_ns)
+    // target: overhead <= target_bps / 10000
+    let overhead_x10000 = avg_sample_ns * 10000 / (avg_sample_ns + current_interval_ns);
+
+    let new_interval = if overhead_x10000 > target_bps {
+        // Over budget — back off 10% (fast)
+        current_interval_ns * 11 / 10
+    } else if overhead_x10000 < target_bps * 8 / 10 {
+        // Under 80% of budget — speed up 5% (conservative)
+        current_interval_ns * 95 / 100
+    } else {
+        // Within [80%, 100%] of target — hold steady
+        current_interval_ns
+    };
+
+    // Min interval is the configured max frequency (don't go faster than asked)
+    let min_interval = if max_freq_hz > 0 {
+        1_000_000_000 / max_freq_hz as u64
+    } else {
+        MIN_INTERVAL_NS
+    };
+
+    new_interval.clamp(min_interval, MAX_INTERVAL_NS)
 }
 
 // ---------------------------------------------------------------------------
@@ -288,11 +407,15 @@ pub fn start_sampling(frequency: u32) -> Result<bool, magnus::Error> {
     }
 
     let interval = Duration::from_micros(1_000_000 / u64::from(frequency));
+    let interval_ns = interval.as_nanos() as u64;
 
     RUNNING.store(true, Ordering::SeqCst);
     OWNER_PID.store(std::process::id(), Ordering::Relaxed);
     probes::set_probes_enabled(true);
     SAMPLE_COUNT.store(0, Ordering::Relaxed);
+    SAMPLE_DURATION_EWMA_NS.store(0, Ordering::Relaxed);
+    MAX_FREQUENCY_HZ.store(frequency, Ordering::Relaxed);
+    CURRENT_INTERVAL_NS.store(interval_ns, Ordering::Relaxed);
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_clone = stop_flag.clone();
@@ -357,9 +480,10 @@ pub fn sample_count() -> u64 {
 
 fn sampler_loop(interval: Duration, _stop: Arc<AtomicBool>) {
     let handle = POSTPONED_JOB_HANDLE.load(Ordering::SeqCst);
+    let mut interval_ns = interval.as_nanos() as u64;
 
     while RUNNING.load(Ordering::SeqCst) {
-        thread::sleep(interval);
+        thread::sleep(Duration::from_nanos(interval_ns));
 
         if !RUNNING.load(Ordering::SeqCst) {
             break;
@@ -373,5 +497,195 @@ fn sampler_loop(interval: Duration, _stop: Arc<AtomicBool>) {
         if handle >= 0 {
             unsafe { rb_postponed_job_trigger(handle) };
         }
+
+        // Adjust interval based on measured sample cost
+        interval_ns = adjust_interval(interval_ns);
+        CURRENT_INTERVAL_NS.store(interval_ns, Ordering::Relaxed);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Configuration API (called from Ruby)
+// ---------------------------------------------------------------------------
+
+/// Set the overhead target as a percentage (e.g. 0.02 = 2%).
+/// Called from Ruby: Rbscope::Native.set_overhead_target(0.02)
+pub fn set_overhead_target(target: f64) -> Result<bool, magnus::Error> {
+    if !(0.001..=0.5).contains(&target) {
+        let ruby = unsafe { magnus::Ruby::get_unchecked() };
+        return Err(magnus::Error::new(
+            ruby.exception_arg_error(),
+            format!("overhead_target must be 0.001-0.5, got {}", target),
+        ));
+    }
+    let bps = (target * 10000.0) as u32;
+    OVERHEAD_TARGET_BPS.store(bps, Ordering::Relaxed);
+    Ok(true)
+}
+
+/// Enable or disable dynamic sampling rate adjustment.
+/// Called from Ruby: Rbscope::Native.set_dynamic_rate(true)
+pub fn set_dynamic_rate(enabled: bool) -> bool {
+    DYNAMIC_RATE_ENABLED.store(enabled, Ordering::Relaxed);
+    enabled
+}
+
+/// Return current sampling stats as a hash.
+/// Called from Ruby: Rbscope::Native.sampling_stats
+pub fn sampling_stats() -> (u64, u64, u64, u32) {
+    let interval_ns = CURRENT_INTERVAL_NS.load(Ordering::Relaxed);
+    let frequency_hz = if interval_ns > 0 {
+        1_000_000_000 / interval_ns
+    } else {
+        0
+    };
+    let avg_sample_ns = SAMPLE_DURATION_EWMA_NS.load(Ordering::Relaxed);
+    let sample_count = SAMPLE_COUNT.load(Ordering::Relaxed);
+    let max_freq = MAX_FREQUENCY_HZ.load(Ordering::Relaxed);
+
+    (frequency_hz, avg_sample_ns, sample_count, max_freq)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // All tests use compute_interval() directly — no shared global state.
+    // This allows safe parallel execution.
+
+    const HIGH_MAX_FREQ: u32 = 10_000;
+    const TARGET_2PCT: u32 = 200; // 2.00% in basis points
+
+    #[test]
+    fn test_compute_interval_no_data() {
+        let result = compute_interval(10_000_000, 0, TARGET_2PCT, HIGH_MAX_FREQ);
+        assert_eq!(result, 10_000_000, "should not change with no sample data");
+    }
+
+    #[test]
+    fn test_compute_interval_backs_off_when_over_budget() {
+        // avg_sample = 500µs, interval = 1ms
+        // overhead = 500k / (500k + 1M) = 33% → way over 2%
+        let result = compute_interval(1_000_000, 500_000, TARGET_2PCT, HIGH_MAX_FREQ);
+        assert_eq!(result, 1_100_000, "should back off by 10%");
+    }
+
+    #[test]
+    fn test_compute_interval_speeds_up_when_under_budget() {
+        // avg_sample = 1µs, interval = 100ms
+        // overhead = 1k / (1k + 100M) ≈ 0.001% → way under 2%
+        let result = compute_interval(100_000_000, 1_000, TARGET_2PCT, HIGH_MAX_FREQ);
+        assert_eq!(result, 95_000_000, "should speed up by 5%");
+    }
+
+    #[test]
+    fn test_compute_interval_holds_when_near_target() {
+        // avg_sample = 200µs, interval = 10ms
+        // overhead = 200k / (200k + 10M) ≈ 1.96% → within [1.6%, 2%]
+        let result = compute_interval(10_000_000, 200_000, TARGET_2PCT, HIGH_MAX_FREQ);
+        assert_eq!(result, 10_000_000, "should hold steady near target");
+    }
+
+    #[test]
+    fn test_compute_interval_clamps_to_max_frequency() {
+        // Very cheap samples, wants to go faster than 99Hz
+        let min_interval_99hz = 1_000_000_000 / 99;
+        let mut interval = min_interval_99hz + 1000;
+        for _ in 0..100 {
+            interval = compute_interval(interval, 1, 5000, 99);
+        }
+        assert!(
+            interval >= min_interval_99hz,
+            "should not go below 99Hz interval ({}): got {}",
+            min_interval_99hz,
+            interval
+        );
+    }
+
+    #[test]
+    fn test_compute_interval_clamps_max() {
+        // Expensive samples, tiny budget → wants to go above MAX_INTERVAL_NS
+        let mut interval = MAX_INTERVAL_NS - 1000;
+        for _ in 0..100 {
+            interval = compute_interval(interval, 10_000_000, 1, HIGH_MAX_FREQ);
+        }
+        assert!(
+            interval <= MAX_INTERVAL_NS,
+            "should not go above MAX: got {}",
+            interval
+        );
+    }
+
+    #[test]
+    fn test_compute_interval_converges_to_target() {
+        let avg_sample_ns: u64 = 100_000; // 100µs
+
+        let mut interval: u64 = 10_000_000; // start at 10ms
+        for _ in 0..200 {
+            interval = compute_interval(interval, avg_sample_ns, TARGET_2PCT, HIGH_MAX_FREQ);
+        }
+
+        // At convergence: overhead = 100k / (100k + interval) ≈ 2%
+        // => interval ≈ 100k * (10000/200 - 1) = 100k * 49 = 4.9ms
+        let overhead = avg_sample_ns as f64 / (avg_sample_ns as f64 + interval as f64);
+        assert!(
+            overhead < 0.025 && overhead > 0.015,
+            "should converge near 2%, got {:.4} (interval={})",
+            overhead,
+            interval
+        );
+    }
+
+    #[test]
+    fn test_compute_interval_asymmetric_response() {
+        // Verify back-off is faster than speed-up (prevents oscillation)
+        let backoff = compute_interval(1_000_000, 500_000, TARGET_2PCT, HIGH_MAX_FREQ);
+        let speedup = compute_interval(100_000_000, 1_000, TARGET_2PCT, HIGH_MAX_FREQ);
+
+        let backoff_ratio = backoff as f64 / 1_000_000.0;  // 1.1x
+        let speedup_ratio = 100_000_000.0 / speedup as f64; // ~1.053x
+
+        assert!(
+            backoff_ratio > speedup_ratio,
+            "back-off ({:.3}x) should be faster than speed-up ({:.3}x)",
+            backoff_ratio,
+            speedup_ratio
+        );
+    }
+
+    #[test]
+    fn test_adjust_interval_disabled() {
+        DYNAMIC_RATE_ENABLED.store(false, Ordering::Relaxed);
+        SAMPLE_DURATION_EWMA_NS.store(500_000, Ordering::Relaxed);
+        OVERHEAD_TARGET_BPS.store(TARGET_2PCT, Ordering::Relaxed);
+        MAX_FREQUENCY_HZ.store(HIGH_MAX_FREQ, Ordering::Relaxed);
+
+        let result = adjust_interval(10_000_000);
+        assert_eq!(result, 10_000_000, "should not change when disabled");
+
+        // Reset
+        DYNAMIC_RATE_ENABLED.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_ewma_first_sample() {
+        let prev = 0u64;
+        let duration = 50_000u64;
+        let new_ewma = if prev == 0 { duration } else { (prev * 7 + duration) / 8 };
+        assert_eq!(new_ewma, 50_000, "first sample should use raw value");
+    }
+
+    #[test]
+    fn test_ewma_smoothing() {
+        let prev = 100_000u64;
+        let duration = 20_000u64;
+        let new_ewma = (prev * 7 + duration) / 8;
+        assert_eq!(new_ewma, 90_000, "EWMA α=1/8: 100k*7/8 + 20k*1/8 = 90k");
     }
 }

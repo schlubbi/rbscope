@@ -461,6 +461,7 @@ checksum = "cca7ad6a7e21e72151d56fe2495a259b5670e204c3adac41ee7ef676ea08117a"
 name = "rbscope"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "magnus",
  "proptest",
  "rb-sys",

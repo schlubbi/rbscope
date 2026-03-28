@@ -10,6 +10,9 @@ class TestOverhead < Minitest::Test
   WARMUP = 1_000
 
   def test_overhead_under_one_percent
+    # Sanitizers add instrumentation that inflates timing measurements
+    threshold = ENV["RBSCOPE_SANITIZER"] ? 20.0 : 5.0
+
     # Warmup
     WARMUP.times { work_unit }
 
@@ -18,8 +21,8 @@ class TestOverhead < Minitest::Test
       ITERATIONS.times { work_unit }
     end
 
-    # With profiler at always-on rate
-    Rbscope.start(frequency: 19)
+    # With profiler at always-on rate (fixed, no dynamic adjustment)
+    Rbscope.start(frequency: 19, dynamic_rate: false)
     profiled = Benchmark.realtime do
       ITERATIONS.times { work_unit }
     end
@@ -29,12 +32,11 @@ class TestOverhead < Minitest::Test
 
     puts "\n  Overhead: #{overhead_pct.round(2)}% " \
          "(baseline=#{(baseline * 1000).round(1)}ms, " \
-         "profiled=#{(profiled * 1000).round(1)}ms)"
+         "profiled=#{(profiled * 1000).round(1)}ms, " \
+         "threshold=#{threshold}%)"
 
-    # Allow up to 5% in test environment (real target is <1% in production,
-    # but test machines have more variance)
-    assert overhead_pct < 5.0,
-           "overhead #{overhead_pct.round(2)}% exceeds 5% threshold"
+    assert overhead_pct < threshold,
+           "overhead #{overhead_pct.round(2)}% exceeds #{threshold}% threshold"
   end
 
   private
