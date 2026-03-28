@@ -12,6 +12,7 @@ import (
 
 	"github.com/schlubbi/rbscope/collector/pkg/collector"
 	pb "github.com/schlubbi/rbscope/collector/pkg/proto/rbscopepb"
+	"github.com/schlubbi/rbscope/collector/pkg/symbols"
 )
 
 // Builder accumulates raw BPF events and produces a Capture proto.
@@ -27,6 +28,7 @@ type Builder struct {
 	frequency uint32
 
 	idleClassifier *IdleClassifier
+	resolver       *symbols.Resolver // for native stack symbol resolution
 }
 
 // NewBuilder creates a Builder for a new capture window.
@@ -45,16 +47,32 @@ func NewBuilder(service, hostname string, pid, frequencyHz uint32) *Builder {
 	}
 }
 
+// SetResolver sets the symbol resolver for native stack resolution.
+// If set, native IPs from bpf_get_stack are resolved to function names
+// and merged with Ruby frames.
+func (b *Builder) SetResolver(r *symbols.Resolver) {
+	b.resolver = r
+}
+
 // Ingest processes a decoded BPF event, routing it to the correct thread.
 func (b *Builder) Ingest(event any) {
 	switch ev := event.(type) {
 	case *collector.RubySampleEvent:
 		tb := b.thread(ev.TID)
 		frames := collector.ParseInlineStack(ev.StackData)
-		frameIDs := make([]uint32, len(frames))
-		for i, f := range frames {
-			frameIDs[i] = b.frames.Intern(f.Label, f.Path, f.Line)
+		frameIDs := make([]uint32, 0, len(frames)+len(ev.NativeStackIPs))
+
+		// Intern Ruby frames (leaf-first order)
+		for _, f := range frames {
+			frameIDs = append(frameIDs, b.frames.Intern(f.Label, f.Path, f.Line))
 		}
+
+		// Resolve and append native C frames from bpf_get_stack
+		if len(ev.NativeStackIPs) > 0 && b.resolver != nil {
+			nativeFrames := b.resolveNativeStack(ev.NativeStackIPs)
+			frameIDs = append(frameIDs, nativeFrames...)
+		}
+
 		sample := &pb.Sample{
 			TimestampNs: ev.Timestamp,
 			FrameIds:    frameIDs,
@@ -113,6 +131,32 @@ func (b *Builder) Ingest(event any) {
 		tb := b.thread(ev.TID)
 		_ = tb // placeholder for span correlation
 	}
+}
+
+// resolveNativeStack resolves native instruction pointers from bpf_get_stack
+// into frame table indices. Filters out Ruby VM internals (libruby.so) to
+// keep only C extension and system library frames.
+//
+// Native IPs from bpf_get_stack are in leaf-first order (innermost frame
+// first), which matches our frame_ids convention.
+func (b *Builder) resolveNativeStack(ips []uint64) []uint32 {
+	var frameIDs []uint32
+	for _, ip := range ips {
+		funcName, libPath, isRubyVM := b.resolver.ResolveFunc(ip)
+		// Skip Ruby VM internals — we already have Ruby-level frames
+		// from the gem. We only want C extension frames (libtrilogy,
+		// libnokogiri, etc.) and system library frames (libc, libpthread).
+		if isRubyVM {
+			continue
+		}
+		// Skip empty/anonymous frames
+		if funcName == "" {
+			continue
+		}
+		fid := b.frames.Intern(funcName, libPath, 0)
+		frameIDs = append(frameIDs, fid)
+	}
+	return frameIDs
 }
 
 // Build produces the final Capture with cross-references and thread states.

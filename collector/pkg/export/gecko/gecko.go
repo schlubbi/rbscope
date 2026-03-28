@@ -344,8 +344,14 @@ func (tb *threadBuilder) internFrame(rbFrameIdx uint32) int {
 		line = int(frame.LineNumber)
 	}
 
+	// Determine category: native C frames get "Kernel" (blue), Ruby gets "Ruby" (yellow)
+	cat := catRuby
+	if isNativeFrame(fileName) {
+		cat = catKernel
+	}
+
 	idx := len(tb.frameData)
-	tb.frameData = append(tb.frameData, []any{locIdx, false, nil, nil, line, nil, catRuby, 0})
+	tb.frameData = append(tb.frameData, []any{locIdx, false, nil, nil, line, nil, cat, 0})
 	tb.frameKeys[key] = idx
 	return idx
 }
@@ -550,6 +556,15 @@ func lookupString(table []string, idx uint32) string {
 		return table[idx]
 	}
 	return ""
+}
+
+// isNativeFrame returns true if the file path looks like a native library
+// rather than a Ruby source file.
+func isNativeFrame(path string) bool {
+	return strings.HasSuffix(path, ".so") ||
+		strings.Contains(path, ".so.") ||
+		strings.HasSuffix(path, ".dylib") ||
+		strings.HasPrefix(path, "[") // [vdso], [vsyscall]
 }
 
 func threadStateToCat(s pb.ThreadState) int {

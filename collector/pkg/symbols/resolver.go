@@ -1,7 +1,9 @@
-// Package symbols resolves addresses to function names via /proc maps.
+// Package symbols resolves addresses to function names via /proc maps
+// and ELF symbol tables.
 package symbols
 
 import (
+	"debug/elf"
 	"fmt"
 	"os"
 	"sort"
@@ -18,20 +20,24 @@ type Mapping struct {
 }
 
 // Resolver translates instruction pointer addresses into function names
-// by reading /proc/<pid>/maps and (optionally) ELF symbol tables.
+// by reading /proc/<pid>/maps and ELF symbol tables.
 type Resolver struct {
 	pid      uint32
 	mappings []Mapping // sorted by StartAddr
 
 	mu    sync.RWMutex
 	cache map[uint64]string
+
+	elfMu    sync.RWMutex
+	elfCache map[string]*elfSymbols // path → sorted symbol table
 }
 
 // NewResolver creates a Resolver for the given pid by reading its /proc maps.
 func NewResolver(pid uint32) (*Resolver, error) {
 	r := &Resolver{
-		pid:   pid,
-		cache: make(map[uint64]string),
+		pid:      pid,
+		cache:    make(map[uint64]string),
+		elfCache: make(map[string]*elfSymbols),
 	}
 	if err := r.Refresh(); err != nil {
 		return nil, err
@@ -164,4 +170,170 @@ func parseMapsLine(line string) (Mapping, bool, error) {
 		Offset:    offset,
 		Path:      path,
 	}, executable, nil
+}
+
+// ResolveFunc resolves an instruction pointer to a function name.
+// Returns the function name, the library path, and whether the address
+// belongs to a Ruby VM library (libruby.so or ruby binary).
+func (r *Resolver) ResolveFunc(addr uint64) (funcName, libPath string, isRubyVM bool) {
+	i := sort.Search(len(r.mappings), func(i int) bool {
+		return r.mappings[i].StartAddr > addr
+	})
+	if i == 0 {
+		return fmt.Sprintf("0x%x", addr), "", false
+	}
+	m := r.mappings[i-1]
+	if addr >= m.EndAddr {
+		return fmt.Sprintf("0x%x", addr), "", false
+	}
+
+	fileOffset := addr - m.StartAddr + m.Offset
+	libPath = m.Path
+	isRubyVM = isRubyLibrary(libPath)
+
+	// Try ELF symbol lookup
+	syms := r.getELFSymbols(libPath)
+	if syms != nil {
+		if name := syms.lookup(fileOffset); name != "" {
+			return name, libPath, isRubyVM
+		}
+	}
+
+	// Fallback to path+offset
+	name := libPath
+	if name == "" {
+		name = "[anon]"
+	}
+	return fmt.Sprintf("%s+0x%x", name, fileOffset), libPath, isRubyVM
+}
+
+// isRubyLibrary returns true if the path looks like a Ruby VM library.
+func isRubyLibrary(path string) bool {
+	base := path
+	if idx := strings.LastIndex(path, "/"); idx >= 0 {
+		base = path[idx+1:]
+	}
+	return strings.HasPrefix(base, "libruby") ||
+		base == "ruby" ||
+		strings.HasPrefix(base, "ruby4") ||
+		strings.HasPrefix(base, "ruby3")
+}
+
+// --- ELF symbol table cache ---
+
+// elfSymbol is a single symbol from an ELF file.
+type elfSymbol struct {
+	Addr uint64 // file offset (value - section load addr, or just Value for ET_EXEC)
+	Size uint64
+	Name string
+}
+
+// elfSymbols holds a sorted symbol table for one ELF file.
+type elfSymbols struct {
+	syms []elfSymbol // sorted by Addr
+}
+
+// lookup finds the function containing the given file offset.
+func (es *elfSymbols) lookup(fileOffset uint64) string {
+	// Binary search for the last symbol whose Addr <= fileOffset.
+	i := sort.Search(len(es.syms), func(i int) bool {
+		return es.syms[i].Addr > fileOffset
+	})
+	if i == 0 {
+		return ""
+	}
+	sym := es.syms[i-1]
+	// Check if fileOffset is within the symbol's range.
+	if sym.Size > 0 && fileOffset >= sym.Addr+sym.Size {
+		return ""
+	}
+	// For symbols with size 0 (common in .dynsym), allow if within
+	// a reasonable range (next symbol's address).
+	if sym.Size == 0 && i < len(es.syms) && fileOffset >= es.syms[i].Addr {
+		return ""
+	}
+	return sym.Name
+}
+
+func (r *Resolver) getELFSymbols(path string) *elfSymbols {
+	if path == "" || strings.HasPrefix(path, "[") {
+		return nil
+	}
+
+	r.elfMu.RLock()
+	if syms, ok := r.elfCache[path]; ok {
+		r.elfMu.RUnlock()
+		return syms
+	}
+	r.elfMu.RUnlock()
+
+	// Load and parse
+	syms := loadELFSymbols(path)
+
+	r.elfMu.Lock()
+	r.elfCache[path] = syms
+	r.elfMu.Unlock()
+
+	return syms
+}
+
+// loadELFSymbols reads .symtab and .dynsym from an ELF file.
+func loadELFSymbols(path string) *elfSymbols {
+	f, err := elf.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var allSyms []elfSymbol
+
+	// Try .symtab first (more complete, but stripped in many prod binaries)
+	if symbols, err := f.Symbols(); err == nil {
+		for _, s := range symbols {
+			if s.Info&0xf == uint8(elf.STT_FUNC) && s.Value > 0 {
+				allSyms = append(allSyms, elfSymbol{
+					Addr: s.Value,
+					Size: s.Size,
+					Name: s.Name,
+				})
+			}
+		}
+	}
+
+	// Also try .dynsym (always present in shared libs)
+	if symbols, err := f.DynamicSymbols(); err == nil {
+		for _, s := range symbols {
+			if s.Info&0xf == uint8(elf.STT_FUNC) && s.Value > 0 {
+				allSyms = append(allSyms, elfSymbol{
+					Addr: s.Value,
+					Size: s.Size,
+					Name: s.Name,
+				})
+			}
+		}
+	}
+
+	if len(allSyms) == 0 {
+		return nil
+	}
+
+	// Sort by address and deduplicate
+	sort.Slice(allSyms, func(i, j int) bool {
+		return allSyms[i].Addr < allSyms[j].Addr
+	})
+
+	// Deduplicate (prefer .symtab entries with size over .dynsym without)
+	deduped := make([]elfSymbol, 0, len(allSyms))
+	for i, s := range allSyms {
+		if i > 0 && s.Addr == allSyms[i-1].Addr {
+			// Keep the one with size > 0
+			if s.Size > 0 && deduped[len(deduped)-1].Size == 0 {
+				deduped[len(deduped)-1] = s
+			}
+			continue
+		}
+		deduped = append(deduped, s)
+	}
+
+	return &elfSymbols{syms: deduped}
 }
