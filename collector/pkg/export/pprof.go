@@ -1,109 +1,101 @@
 package export
 
 import (
-	"sync"
-
 	"github.com/google/pprof/profile"
+	pb "github.com/schlubbi/rbscope/collector/pkg/proto/rbscopepb"
 )
 
-// PprofBuilder accumulates stack samples and produces a pprof Profile.
-type PprofBuilder struct {
-	mu            sync.Mutex
-	strings       map[string]int64 // dedup string table
-	locs          map[uint64]*profile.Location
-	samples       []*profile.Sample
-	locID         uint64
-	period        int64
-	durationNanos int64
-}
-
-// NewPprofBuilder creates a builder. period is the sampling period in
-// nanoseconds (e.g. 1e9/19 for 19 Hz).
-func NewPprofBuilder(periodNanos int64) *PprofBuilder {
-	return &PprofBuilder{
-		strings: make(map[string]int64),
-		locs:    make(map[uint64]*profile.Location),
-		period:  periodNanos,
-	}
-}
-
-// AddSample records a single stack sample.
-func (b *PprofBuilder) AddSample(stackID uint32, labels map[string]string, value int64) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	addr := uint64(stackID)
-	loc := b.getOrCreateLoc(addr)
-
-	labelSet := make(map[string][]string, len(labels))
-	for k, v := range labels {
-		labelSet[k] = []string{v}
-	}
-
-	s := &profile.Sample{
-		Location: []*profile.Location{loc},
-		Value:    []int64{value},
-		Label:    labelSet,
-	}
-	b.samples = append(b.samples, s)
-}
-
-// Build produces the accumulated profile and returns it. The builder is NOT
-// reset—call Flush for build-and-reset semantics.
-func (b *PprofBuilder) Build() *profile.Profile {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	locations := make([]*profile.Location, 0, len(b.locs))
-	for _, loc := range b.locs {
-		locations = append(locations, loc)
-	}
-
-	p := &profile.Profile{
+// CaptureToProfile converts a built rbscope Capture into a pprof Profile.
+// This produces unified stacks (Ruby + native C extension + syscall) because
+// the Capture has already gone through Builder.Build() which synthesizes
+// I/O samples with cross-referenced native and Ruby frames.
+func CaptureToProfile(capture *pb.Capture) *profile.Profile {
+	prof := &profile.Profile{
 		SampleType: []*profile.ValueType{
 			{Type: "samples", Unit: "count"},
+			{Type: "cpu", Unit: "nanoseconds"},
 		},
-		Sample:   b.samples,
-		Location: locations,
-		Period:   b.period,
-		PeriodType: &profile.ValueType{
-			Type: "cpu",
-			Unit: "nanoseconds",
-		},
-		DurationNanos: b.durationNanos,
+		PeriodType: &profile.ValueType{Type: "cpu", Unit: "nanoseconds"},
+		Period:     int64(10_000_000), // 10ms = 100Hz equivalent
 	}
-	return p
-}
 
-// Flush builds the profile, resets internal state, and returns the profile.
-func (b *PprofBuilder) Flush() *profile.Profile {
-	p := b.Build()
+	// Build lookup tables for strings and frames from the Capture.
+	funcMap := make(map[string]*profile.Function)
+	locMap := make(map[uint64]*profile.Location)
+	var funcID, locID uint64
 
-	b.mu.Lock()
-	b.samples = nil
-	b.locs = make(map[uint64]*profile.Location)
-	b.strings = make(map[string]int64)
-	b.mu.Unlock()
+	getOrCreateFunc := func(name, filename string) *profile.Function {
+		key := name + "\x00" + filename
+		if fn, ok := funcMap[key]; ok {
+			return fn
+		}
+		funcID++
+		fn := &profile.Function{
+			ID:       funcID,
+			Name:     name,
+			Filename: filename,
+		}
+		funcMap[key] = fn
+		prof.Function = append(prof.Function, fn)
+		return fn
+	}
 
-	return p
-}
-
-// SetDuration records the wall-clock duration for the current interval.
-func (b *PprofBuilder) SetDuration(nanos int64) {
-	b.mu.Lock()
-	b.durationNanos = nanos
-	b.mu.Unlock()
-}
-
-func (b *PprofBuilder) getOrCreateLoc(addr uint64) *profile.Location {
-	if loc, ok := b.locs[addr]; ok {
+	getOrCreateLoc := func(name, filename string, line int64) *profile.Location {
+		addr := hashName(name + filename)
+		if loc, ok := locMap[addr]; ok {
+			return loc
+		}
+		fn := getOrCreateFunc(name, filename)
+		locID++
+		loc := &profile.Location{
+			ID:      locID,
+			Address: addr,
+			Line:    []profile.Line{{Function: fn, Line: line}},
+		}
+		locMap[addr] = loc
+		prof.Location = append(prof.Location, loc)
 		return loc
 	}
-	b.locID++
-	loc := &profile.Location{
-		ID:      b.locID,
-		Address: addr,
+
+	// Resolve a frame index to name and path using the Capture's tables.
+	resolveFrame := func(frameIdx uint32) (string, string, int64) {
+		if int(frameIdx) >= len(capture.FrameTable) {
+			return "<unknown>", "", 0
+		}
+		f := capture.FrameTable[frameIdx]
+		name := lookupString(capture.StringTable, f.FunctionNameIdx)
+		path := lookupString(capture.StringTable, f.FileNameIdx)
+		return name, path, int64(f.LineNumber)
 	}
-	b.locs[addr] = loc
-	return loc
+
+	for _, thread := range capture.Threads {
+		for _, sample := range thread.Samples {
+			if len(sample.FrameIds) == 0 {
+				continue
+			}
+
+			locs := make([]*profile.Location, 0, len(sample.FrameIds))
+			for _, fid := range sample.FrameIds {
+				name, path, line := resolveFrame(fid)
+				if name == "" {
+					name = "<unknown>"
+				}
+				locs = append(locs, getOrCreateLoc(name, path, line))
+			}
+
+			prof.Sample = append(prof.Sample, &profile.Sample{
+				Location: locs,
+				Value:    []int64{int64(sample.Weight), int64(sample.Weight) * 10_000_000},
+			})
+		}
+	}
+
+	return prof
+}
+
+func lookupString(table []string, idx uint32) string {
+	if int(idx) >= len(table) {
+		return ""
+	}
+	return table[idx]
 }
