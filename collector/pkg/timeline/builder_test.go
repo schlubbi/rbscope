@@ -825,3 +825,329 @@ func TestExtractRubyFrameIDs(t *testing.T) {
 		t.Errorf("wrong Ruby frames: got %v, want [%d, %d]", result, rubyFrame1, rubyFrame2)
 	}
 }
+
+func TestFindSuspendedStack(t *testing.T) {
+	mkStack := func(ts uint64) *collector.GVLStackEvent {
+		return &collector.GVLStackEvent{TimestampNs: ts}
+	}
+
+	stacks := []*collector.GVLStackEvent{
+		mkStack(1_000_000_000), // 1s
+		mkStack(1_010_000_000), // 1.01s
+		mkStack(1_050_000_000), // 1.05s
+		mkStack(1_200_000_000), // 1.2s
+	}
+
+	t.Run("exact match", func(t *testing.T) {
+		got := findSuspendedStack(stacks, 1_050_000_000)
+		if got == nil || got.TimestampNs != 1_050_000_000 {
+			t.Errorf("expected stack at 1.05s, got %v", got)
+		}
+	})
+
+	t.Run("between stacks picks earlier", func(t *testing.T) {
+		got := findSuspendedStack(stacks, 1_030_000_000) // between 1.01s and 1.05s
+		if got == nil || got.TimestampNs != 1_010_000_000 {
+			t.Errorf("expected stack at 1.01s, got %v", got)
+		}
+	})
+
+	t.Run("before all stacks", func(t *testing.T) {
+		got := findSuspendedStack(stacks, 999_000_000) // before first stack
+		if got != nil {
+			t.Errorf("expected nil, got ts=%d", got.TimestampNs)
+		}
+	})
+
+	t.Run("after all stacks within window", func(t *testing.T) {
+		got := findSuspendedStack(stacks, 1_250_000_000) // 50ms after last
+		if got == nil || got.TimestampNs != 1_200_000_000 {
+			t.Errorf("expected stack at 1.2s, got %v", got)
+		}
+	})
+
+	t.Run("after all stacks beyond window", func(t *testing.T) {
+		got := findSuspendedStack(stacks, 1_500_000_000) // 300ms after last
+		if got != nil {
+			t.Errorf("expected nil (beyond 100ms window), got ts=%d", got.TimestampNs)
+		}
+	})
+
+	t.Run("empty stacks", func(t *testing.T) {
+		got := findSuspendedStack(nil, 1_000_000_000)
+		if got != nil {
+			t.Errorf("expected nil for empty stacks, got %v", got)
+		}
+	})
+
+	t.Run("single stack within window", func(t *testing.T) {
+		single := []*collector.GVLStackEvent{mkStack(1_000_000_000)}
+		got := findSuspendedStack(single, 1_005_000_000) // 5ms later
+		if got == nil || got.TimestampNs != 1_000_000_000 {
+			t.Errorf("expected stack at 1s, got %v", got)
+		}
+	})
+}
+
+func TestParseAndInternSuspendedStack(t *testing.T) {
+	b := NewBuilder("test", "host", 1000, 99)
+
+	frames := []collector.InlineFrame{
+		{Label: "Trilogy#query", Path: "(unknown)", Line: 0},
+		{Label: "PostsController#index", Path: "app/controllers/posts_controller.rb", Line: 10},
+	}
+	data := makeStackData(frames)
+	ids := b.parseAndInternSuspendedStack(data)
+
+	if len(ids) != 2 {
+		t.Fatalf("expected 2 frame IDs, got %d", len(ids))
+	}
+
+	// Verify frames were interned with correct names
+	f0 := b.frames.table[ids[0]]
+	if b.strings.Lookup(f0.FunctionNameIdx) != "Trilogy#query" {
+		t.Errorf("frame[0] name = %q, want Trilogy#query", b.strings.Lookup(f0.FunctionNameIdx))
+	}
+	f1 := b.frames.table[ids[1]]
+	if b.strings.Lookup(f1.FunctionNameIdx) != "PostsController#index" {
+		t.Errorf("frame[1] name = %q, want PostsController#index", b.strings.Lookup(f1.FunctionNameIdx))
+	}
+
+	t.Run("empty data", func(t *testing.T) {
+		ids := b.parseAndInternSuspendedStack(nil)
+		if ids != nil {
+			t.Errorf("expected nil for empty data, got %v", ids)
+		}
+	})
+
+	t.Run("idempotent interning", func(t *testing.T) {
+		ids2 := b.parseAndInternSuspendedStack(data)
+		if ids[0] != ids2[0] || ids[1] != ids2[1] {
+			t.Errorf("second parse returned different IDs: %v vs %v", ids, ids2)
+		}
+	})
+}
+
+func TestCorrelateIOWithSuspendedStacks(t *testing.T) {
+	b := NewBuilder("test", "host", 1000, 99)
+	tid := uint32(100)
+
+	trilogyFrames := []collector.InlineFrame{
+		{Label: "Trilogy#query", Path: "(unknown)", Line: 0},
+		{Label: "PostsController#index", Path: "app/controllers/posts_controller.rb", Line: 10},
+	}
+	httpFrames := []collector.InlineFrame{
+		{Label: "IO#readpartial", Path: "(unknown)", Line: 0},
+		{Label: "Pitchfork::HttpParser#read", Path: "pitchfork/http_parser.rb", Line: 5},
+	}
+
+	b.suspendedStacks[tid] = []*collector.GVLStackEvent{
+		{TimestampNs: 1_050_000_000, StackData: makeStackData(httpFrames)},
+		{TimestampNs: 1_000_000_000, StackData: makeStackData(trilogyFrames)},
+		// Intentionally out of order — correlate should sort
+	}
+
+	tb := &threadBuilder{}
+	tb.ioEvents = []*pb.IOEvent{
+		{TimestampNs: 1_005_000_000}, // 5ms after trilogy stack
+		{TimestampNs: 1_055_000_000}, // 5ms after http stack
+	}
+
+	b.correlateIOWithSuspendedStacks(tid, tb)
+
+	// First IO event should match the Trilogy SUSPENDED stack
+	if len(tb.ioEvents[0].RubyContextFrameIds) == 0 {
+		t.Fatal("IO event[0] should have Ruby context from Trilogy SUSPENDED stack")
+	}
+	leaf0 := b.strings.Lookup(b.frames.table[tb.ioEvents[0].RubyContextFrameIds[0]].FunctionNameIdx)
+	if leaf0 != "Trilogy#query" {
+		t.Errorf("IO event[0] leaf = %q, want Trilogy#query", leaf0)
+	}
+
+	// Second IO event should match the HTTP SUSPENDED stack
+	if len(tb.ioEvents[1].RubyContextFrameIds) == 0 {
+		t.Fatal("IO event[1] should have Ruby context from HTTP SUSPENDED stack")
+	}
+	leaf1 := b.strings.Lookup(b.frames.table[tb.ioEvents[1].RubyContextFrameIds[0]].FunctionNameIdx)
+	if leaf1 != "IO#readpartial" {
+		t.Errorf("IO event[1] leaf = %q, want IO#readpartial", leaf1)
+	}
+
+	t.Run("no stacks for TID", func(t *testing.T) {
+		tb2 := &threadBuilder{}
+		tb2.ioEvents = []*pb.IOEvent{{TimestampNs: 1_000_000_000}}
+		b.correlateIOWithSuspendedStacks(999, tb2) // different TID
+		if len(tb2.ioEvents[0].RubyContextFrameIds) != 0 {
+			t.Error("expected no Ruby context for unknown TID")
+		}
+	})
+}
+
+func TestHasExtensionFrames(t *testing.T) {
+	st := newStringTable()
+	ft := newFrameTable(st)
+
+	libcFrame := ft.Intern("write", "/usr/lib/libc.so.6", 0)
+	trilogyFrame := ft.Intern("rb_trilogy_query", "/gems/trilogy-2.11/lib/trilogy/cext.so", 0)
+	ldFrame := ft.Intern("_dl_start", "/lib/ld-linux-aarch64.so.1", 0)
+
+	t.Run("libc only", func(t *testing.T) {
+		if hasExtensionFrames([]uint32{libcFrame, ldFrame}, ft) {
+			t.Error("libc + ld-linux should NOT count as extension frames")
+		}
+	})
+
+	t.Run("with C extension", func(t *testing.T) {
+		if !hasExtensionFrames([]uint32{libcFrame, trilogyFrame}, ft) {
+			t.Error("trilogy.so SHOULD count as extension frame")
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		if hasExtensionFrames(nil, ft) {
+			t.Error("empty frame list should return false")
+		}
+	})
+
+	t.Run("libpthread", func(t *testing.T) {
+		pthreadFrame := ft.Intern("pthread_mutex_lock", "/usr/lib/libpthread.so.0", 0)
+		if hasExtensionFrames([]uint32{pthreadFrame}, ft) {
+			t.Error("libpthread should NOT count as extension frame")
+		}
+	})
+}
+
+func TestIsPlausibleIOContext(t *testing.T) {
+	b := NewBuilder("test", "host", 1000, 99)
+
+	trilogyRuby := b.frames.Intern("Trilogy#query", "(unknown)", 0)
+	ioReadpartial := b.frames.Intern("IO#readpartial", "(unknown)", 0)
+	controllerFrame := b.frames.Intern("PostsController#index", "app/controllers/posts_controller.rb", 10)
+	idleFrame := b.frames.Intern("Pitchfork::Waiter#get_readers", "(unknown)", 0)
+	sleepFrame := b.frames.Intern("Kernel#sleep", "(unknown)", 0)
+
+	trilogyNative := b.frames.Intern("rb_trilogy_query", "/gems/trilogy/cext.so", 0)
+	libcWrite := b.frames.Intern("write", "/usr/lib/libc.so.6", 0)
+
+	t.Run("Trilogy ruby + Trilogy native = plausible", func(t *testing.T) {
+		if !b.isPlausibleIOContext(
+			[]uint32{trilogyRuby, controllerFrame},
+			[]uint32{libcWrite, trilogyNative},
+		) {
+			t.Error("Trilogy#query with Trilogy native frames should be plausible")
+		}
+	})
+
+	t.Run("idle frame = not plausible", func(t *testing.T) {
+		if b.isPlausibleIOContext(
+			[]uint32{idleFrame},
+			[]uint32{libcWrite},
+		) {
+			t.Error("idle get_readers frame should NOT be plausible")
+		}
+	})
+
+	t.Run("Kernel#sleep = not plausible", func(t *testing.T) {
+		if b.isPlausibleIOContext(
+			[]uint32{sleepFrame},
+			[]uint32{libcWrite},
+		) {
+			t.Error("Kernel#sleep frame should NOT be plausible")
+		}
+	})
+
+	t.Run("IO#readpartial + extension native = not plausible", func(t *testing.T) {
+		if b.isPlausibleIOContext(
+			[]uint32{ioReadpartial, controllerFrame},
+			[]uint32{libcWrite, trilogyNative},
+		) {
+			t.Error("generic IO#readpartial with extension native frames should NOT be plausible")
+		}
+	})
+
+	t.Run("IO#readpartial + libc only = plausible", func(t *testing.T) {
+		if !b.isPlausibleIOContext(
+			[]uint32{ioReadpartial, controllerFrame},
+			[]uint32{libcWrite},
+		) {
+			t.Error("IO#readpartial with plain libc write should be plausible (no extension mismatch)")
+		}
+	})
+
+	t.Run("empty ruby frames = not plausible", func(t *testing.T) {
+		if b.isPlausibleIOContext(nil, []uint32{libcWrite}) {
+			t.Error("empty Ruby frames should NOT be plausible")
+		}
+	})
+}
+
+func TestSynthesizeIOSamples_PlausibilityRejection(t *testing.T) {
+	b := NewBuilder("test", "host", 1000, 99)
+
+	// Ruby context from HTTP I/O, but native stack from Trilogy
+	httpLeaf := b.frames.Intern("IO#readpartial", "(unknown)", 0)
+	controllerFrame := b.frames.Intern("PostsController#index", "app/controllers/posts_controller.rb", 10)
+	trilogyNative := b.frames.Intern("rb_trilogy_query", "/gems/trilogy/cext.so", 0)
+	libcRead := b.frames.Intern("read", "/usr/lib/libc.so.6", 0)
+
+	tb := &threadBuilder{}
+	tb.samples = []*pb.Sample{
+		{TimestampNs: 1_000_000_000, FrameIds: []uint32{httpLeaf, controllerFrame}, Weight: 1},
+	}
+	tb.ioEvents = []*pb.IOEvent{
+		{
+			TimestampNs:         1_000_500_000,
+			NativeFrameIds:      []uint32{libcRead, trilogyNative},
+			RubyContextFrameIds: []uint32{httpLeaf, controllerFrame}, // mismatched!
+			NearestSampleIdx:    0,
+		},
+	}
+
+	b.synthesizeIOSamples(tb)
+
+	// Should NOT synthesize — IO#readpartial context doesn't match Trilogy native stack
+	ioSamples := 0
+	for _, s := range tb.samples {
+		if s.IsIoSample {
+			ioSamples++
+		}
+	}
+	if ioSamples != 0 {
+		t.Errorf("expected 0 synthesized samples (plausibility rejected), got %d", ioSamples)
+	}
+}
+
+func TestSynthesizeIOSamples_FallbackAlsoChecksPlausibility(t *testing.T) {
+	b := NewBuilder("test", "host", 1000, 99)
+
+	// Nearest timer sample has Trilogy#query — should pass plausibility for Trilogy native
+	trilogyRuby := b.frames.Intern("Trilogy#query", "(unknown)", 0)
+	controllerFrame := b.frames.Intern("PostsController#index", "app/controllers/posts_controller.rb", 10)
+	trilogyNative := b.frames.Intern("rb_trilogy_query", "/gems/trilogy/cext.so", 0)
+	libcRead := b.frames.Intern("read", "/usr/lib/libc.so.6", 0)
+
+	tb := &threadBuilder{}
+	tb.samples = []*pb.Sample{
+		{TimestampNs: 1_000_000_000, FrameIds: []uint32{trilogyRuby, controllerFrame}, Weight: 1},
+	}
+	tb.ioEvents = []*pb.IOEvent{
+		{
+			TimestampNs:    1_000_500_000,
+			NativeFrameIds: []uint32{libcRead, trilogyNative},
+			// No RubyContextFrameIds — falls back to nearest sample
+			NearestSampleIdx: 0,
+		},
+	}
+
+	b.synthesizeIOSamples(tb)
+
+	ioSamples := 0
+	for _, s := range tb.samples {
+		if s.IsIoSample {
+			ioSamples++
+		}
+	}
+	if ioSamples != 1 {
+		t.Fatalf("expected 1 synthesized sample via fallback, got %d", ioSamples)
+	}
+}
