@@ -508,7 +508,8 @@ unsafe extern "C" fn gvl_event_callback(
     // Under miri, the type is opaque (c_void) so we skip this.
     #[cfg(not(miri))]
     let thread_value = if !_event_data.is_null() {
-        (*_event_data).thread as u64
+        #[allow(clippy::unnecessary_cast)]
+        { (*_event_data).thread as u64 }
     } else {
         0
     };
