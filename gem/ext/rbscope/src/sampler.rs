@@ -218,6 +218,7 @@ unsafe fn postponed_job_callback_inner() {
         // Incrementing cache stats for observability only.
         CACHE_HIT_COUNT.fetch_add(1, Ordering::Relaxed);
     }
+    LAST_STACK_HASH.store(stack_hash, Ordering::Relaxed);
 
     // Stack caching disabled: always fire the probe. The cache saved
     // ~65µs per sample by skipping string extraction for identical stacks,
