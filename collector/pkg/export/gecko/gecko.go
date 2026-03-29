@@ -193,13 +193,17 @@ const (
 
 const (
 	catOther  = 0
-	catRuby   = 1
-	catIO     = 2
-	catGVL    = 3
-	catGC     = 4
-	catKernel = 5
-	catOTel   = 6
-	catIdle   = 7
+	catApp    = 1  // User application code — green
+	catRails  = 2  // Rails framework — red
+	catGem    = 3  // Third-party gems — lightblue
+	catRuby   = 4  // Ruby stdlib / core — purple
+	catCfunc  = 5  // C extension functions — yellow
+	catNative = 6  // Native C library code (.so/.dylib) — blue
+	catIO     = 7  // I/O markers — orange
+	catGVL    = 8  // GVL contention — magenta
+	catGC     = 9  // Garbage collection — brown
+	catOTel   = 10 // OTel spans — purple
+	catIdle   = 11 // Idle/waiting — grey
 )
 
 // Export converts a Capture proto to Gecko JSON and writes it to path.
@@ -316,7 +320,7 @@ func (tb *threadBuilder) internFrame(rbFrameIdx uint32) int {
 		}
 		locIdx := tb.internString(label)
 		idx := len(tb.frameData)
-		tb.frameData = append(tb.frameData, []any{locIdx, false, nil, nil, nil, nil, catRuby, 0})
+		tb.frameData = append(tb.frameData, []any{locIdx, false, nil, nil, nil, nil, catOther, 0})
 		tb.frameKeys[key] = idx
 		return idx
 	}
@@ -344,14 +348,11 @@ func (tb *threadBuilder) internFrame(rbFrameIdx uint32) int {
 		line = int(frame.LineNumber)
 	}
 
-	// Determine category: native C frames get "Kernel" (blue), Ruby gets "Ruby" (yellow)
-	cat := catRuby
-	if isNativeFrame(fileName) {
-		cat = catKernel
-	}
+	// Determine category from file path (App, Rails, gem, Ruby, cfunc, Native)
+	cat, subcat := categorizeFrame(fileName)
 
 	idx := len(tb.frameData)
-	tb.frameData = append(tb.frameData, []any{locIdx, false, nil, nil, line, nil, cat, 0})
+	tb.frameData = append(tb.frameData, []any{locIdx, false, nil, nil, line, nil, cat, subcat})
 	tb.frameKeys[key] = idx
 	return idx
 }
@@ -490,7 +491,7 @@ func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) MarkersTable {
 
 		nameIdx := tb.internString("Off-CPU")
 		data = append(data, []any{
-			nameIdx, startMs, endMs, MarkerPhaseInterval, catKernel,
+			nameIdx, startMs, endMs, MarkerPhaseInterval, catNative,
 			map[string]any{
 				"type":     "rbscope-sched",
 				"offCpuMs": float64(sched.OffCpuNs) / 1e6,
@@ -567,10 +568,85 @@ func isNativeFrame(path string) bool {
 		strings.HasPrefix(path, "[") // [vdso], [vsyscall]
 }
 
+// railsComponents lists all Rails framework gem names.
+var railsComponents = []string{
+	"activesupport", "activemodel", "activerecord", "actionview",
+	"actionpack", "activejob", "actionmailer", "actioncable",
+	"activestorage", "actionmailbox", "actiontext", "railties",
+}
+
+func railsSubcategories() []string {
+	subs := make([]string, len(railsComponents))
+	copy(subs, railsComponents)
+	return subs
+}
+
+// categorizeFrame determines the category and subcategory for a Ruby frame
+// based on its file path. Follows Vernier's PR #121 approach:
+//
+//	App code (app/, lib/, config/) → green
+//	Rails (activerecord, actionview, ...) → red
+//	Gems (/gems/) → lightblue
+//	Ruby stdlib → purple
+//	cfunc (<cfunc>) → yellow
+//	Native (.so, .dylib) → blue
+func categorizeFrame(fileName string) (cat, subcat int) {
+	if fileName == "" {
+		return catApp, 0
+	}
+
+	// Native C code — .so, .dylib, [vdso]
+	if isNativeFrame(fileName) {
+		return catNative, 0
+	}
+
+	// cfunc marker
+	if fileName == "<cfunc>" {
+		return catCfunc, 0
+	}
+
+	// GC
+	if fileName == "(gc)" || strings.HasPrefix(fileName, "<internal:gc") {
+		return catGC, 0
+	}
+
+	// Ruby internals: <internal:...>
+	if strings.HasPrefix(fileName, "<internal:") {
+		return catRuby, 1 // core
+	}
+
+	// Rails framework — check before generic gem path
+	for i, component := range railsComponents {
+		// Match paths like:
+		//   /gems/activerecord-8.1.0/lib/...  (production, bundler)
+		//   activerecord/lib/...               (dev/relative)
+		if strings.Contains(fileName, "/"+component+"-") ||
+			strings.Contains(fileName, "/"+component+"/") ||
+			strings.HasPrefix(fileName, component+"/") ||
+			strings.HasPrefix(fileName, component+"-") {
+			return catRails, i
+		}
+	}
+
+	// Third-party gems: /gems/ in path
+	if strings.Contains(fileName, "/gems/") ||
+		strings.Contains(fileName, "/bundler/") {
+		return catGem, 0
+	}
+
+	// Ruby stdlib: /lib/ruby/ in path
+	if strings.Contains(fileName, "/lib/ruby/") {
+		return catRuby, 0 // stdlib
+	}
+
+	// Application code — everything else (app/, lib/, config/, spec/, etc.)
+	return catApp, 0
+}
+
 func threadStateToCat(s pb.ThreadState) int {
 	switch s {
 	case pb.ThreadState_THREAD_STATE_RUNNING:
-		return catRuby
+		return catApp
 	case pb.ThreadState_THREAD_STATE_OFF_CPU_IO:
 		return catIO
 	case pb.ThreadState_THREAD_STATE_OFF_CPU_GVL:
@@ -581,7 +657,7 @@ func threadStateToCat(s pb.ThreadState) int {
 		return catIdle
 	case pb.ThreadState_THREAD_STATE_OFF_CPU_PREEMPTED,
 		pb.ThreadState_THREAD_STATE_OFF_CPU_UNKNOWN:
-		return catKernel
+		return catNative
 	default:
 		return catOther
 	}
@@ -615,13 +691,17 @@ func threadStateLabel(s pb.ThreadState) string {
 func defaultCategories() []Category {
 	return []Category{
 		{Name: "Other", Color: "grey", Subcategories: []string{"Other"}},
-		{Name: "Ruby", Color: "yellow", Subcategories: []string{"User Code"}},
+		{Name: "App", Color: "green", Subcategories: []string{"Controller", "Model", "Job", "Mailer", "View"}},
+		{Name: "Rails", Color: "red", Subcategories: railsSubcategories()},
+		{Name: "gem", Color: "lightblue", Subcategories: []string{"gem"}},
+		{Name: "Ruby", Color: "purple", Subcategories: []string{"stdlib", "core"}},
+		{Name: "cfunc", Color: "yellow", Subcategories: []string{"cfunc"}},
+		{Name: "Native", Color: "blue", Subcategories: []string{"C Extension", "System Library"}},
 		{Name: "I/O", Color: "orange", Subcategories: []string{"Network", "File"}},
-		{Name: "GVL", Color: "red", Subcategories: []string{"Wait"}},
-		{Name: "GC", Color: "grey", Subcategories: []string{"GC"}},
-		{Name: "Kernel", Color: "blue", Subcategories: []string{"Scheduler"}},
-		{Name: "OTel", Color: "purple", Subcategories: []string{"Span"}},
-		{Name: "Idle", Color: "lightblue", Subcategories: []string{"Idle"}},
+		{Name: "GVL", Color: "magenta", Subcategories: []string{"Wait"}},
+		{Name: "GC", Color: "brown", Subcategories: []string{"GC"}},
+		{Name: "OTel", Color: "lightgreen", Subcategories: []string{"Span"}},
+		{Name: "Idle", Color: "grey", Subcategories: []string{"Idle"}},
 	}
 }
 
