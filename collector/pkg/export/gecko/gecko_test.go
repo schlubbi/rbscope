@@ -106,8 +106,8 @@ func TestBuild_TopLevel(t *testing.T) {
 	if profile.Meta.Product != "rbscope — test-app" {
 		t.Errorf("product: got %q", profile.Meta.Product)
 	}
-	if len(profile.Meta.Categories) != 8 {
-		t.Errorf("categories: got %d, want 8", len(profile.Meta.Categories))
+	if len(profile.Meta.Categories) != 12 {
+		t.Errorf("categories: got %d, want 12", len(profile.Meta.Categories))
 	}
 	if len(profile.Meta.MarkerSchema) != 4 {
 		t.Errorf("marker schemas: got %d, want 4", len(profile.Meta.MarkerSchema))
@@ -253,7 +253,7 @@ func TestBuild_Categories(t *testing.T) {
 	profile := Build(capture)
 
 	cats := profile.Meta.Categories
-	expected := []string{"Other", "Ruby", "I/O", "GVL", "GC", "Kernel", "OTel", "Idle"}
+	expected := []string{"Other", "App", "Rails", "gem", "Ruby", "cfunc", "Native", "I/O", "GVL", "GC", "OTel", "Idle"}
 	for i, want := range expected {
 		if i >= len(cats) || cats[i].Name != want {
 			t.Errorf("category[%d]: got %q, want %q", i, cats[i].Name, want)
@@ -402,5 +402,60 @@ func TestBuild_StackSharing(t *testing.T) {
 	idx1 := samples.Data[1][0]
 	if idx0 != idx1 {
 		t.Errorf("identical stacks got different indices: %v vs %v", idx0, idx1)
+	}
+}
+
+func TestCategorizeFrame(t *testing.T) {
+	tests := []struct {
+		path    string
+		wantCat int
+		desc    string
+	}{
+		// App code
+		{"app/controllers/posts_controller.rb", catApp, "app controller"},
+		{"app/models/post.rb", catApp, "app model"},
+		{"lib/my_service.rb", catApp, "app lib"},
+		{"config/initializers/foo.rb", catApp, "app config"},
+		{"", catApp, "empty path"},
+
+		// Rails
+		{"/gems/activerecord-8.1.0/lib/active_record/base.rb", catRails, "activerecord gem path"},
+		{"activerecord/lib/active_record/base.rb", catRails, "activerecord relative path"},
+		{"/gems/actionview-8.1.0/lib/action_view/template.rb", catRails, "actionview"},
+		{"/gems/activesupport-8.1.0/lib/active_support/core_ext.rb", catRails, "activesupport"},
+		{"/gems/railties-8.1.0/lib/rails.rb", catRails, "railties"},
+
+		// Gems
+		{"/gems/trilogy-2.9.0/lib/trilogy.rb", catGem, "trilogy gem"},
+		{"/gems/nokogiri-1.16.0/lib/nokogiri.rb", catGem, "nokogiri gem"},
+		{"/gems/puma-6.0.0/lib/puma/server.rb", catGem, "puma gem"},
+		{"/bundler/gems/sidekiq-abc123/lib/sidekiq.rb", catGem, "bundler gem"},
+
+		// Ruby stdlib/core
+		{"/lib/ruby/3.3.0/json.rb", catRuby, "stdlib"},
+		{"/lib/ruby/4.0.0/net/http.rb", catRuby, "stdlib net/http"},
+		{"<internal:kernel>", catRuby, "internal kernel"},
+		{"<internal:io>", catRuby, "internal io"},
+
+		// GC
+		{"(gc)", catGC, "gc"},
+		{"<internal:gc>", catGC, "internal gc"},
+
+		// cfunc
+		{"<cfunc>", catCfunc, "cfunc"},
+
+		// Native
+		{"libtrilogy.so", catNative, "native .so"},
+		{"libc.so.6", catNative, "libc"},
+		{"bcrypt_ext.so", catNative, "native ext"},
+		{"libxml2.dylib", catNative, "native .dylib"},
+		{"[vdso]", catNative, "vdso"},
+	}
+
+	for _, tt := range tests {
+		cat, _ := categorizeFrame(tt.path)
+		if cat != tt.wantCat {
+			t.Errorf("%s (%q): got category %d, want %d", tt.desc, tt.path, cat, tt.wantCat)
+		}
 	}
 }
