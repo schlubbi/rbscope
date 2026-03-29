@@ -43,7 +43,10 @@ type RealBPF struct {
 	ioObjs     *iotracerObjects
 	ioReader   *ringbuf.Reader
 	ioLinks    []link.Link
-	readToggle bool // alternates reads between ruby and io ring buffers
+	gvlObjs    *gvltracerObjects
+	gvlReader  *ringbuf.Reader
+	gvlLinks   []link.Link
+	readToggle int // rotates reads across ring buffers
 }
 
 // Compile-time interface check.
@@ -88,6 +91,12 @@ func (r *RealBPF) Load() error {
 	if err := r.loadIOTracer(); err != nil {
 		// IO tracing is optional — log but don't fail
 		fmt.Fprintf(os.Stderr, "rbscope: io_tracer load skipped: %v\n", err)
+	}
+
+	// Load gvl_tracer for GVL state change events
+	if err := r.loadGVLTracer(); err != nil {
+		// GVL tracing is optional — log but don't fail
+		fmt.Fprintf(os.Stderr, "rbscope: gvl_tracer load skipped: %v\n", err)
 	}
 
 	return nil
@@ -138,6 +147,26 @@ func (r *RealBPF) loadIOTracer() error {
 	return nil
 }
 
+// loadGVLTracer loads the gvl_tracer BPF program for GVL state tracking.
+// The uprobe is attached per-PID in AttachPID.
+func (r *RealBPF) loadGVLTracer() error {
+	gvlObjs := &gvltracerObjects{}
+	if err := loadGvltracerObjects(gvlObjs, nil); err != nil {
+		return fmt.Errorf("load gvl_tracer: %w", err)
+	}
+	r.gvlObjs = gvlObjs
+
+	rd, err := ringbuf.NewReader(gvlObjs.GvlEvents)
+	if err != nil {
+		gvlObjs.Close() //nolint:errcheck
+		r.gvlObjs = nil
+		return fmt.Errorf("open gvl ring buffer: %w", err)
+	}
+	r.gvlReader = rd
+
+	return nil
+}
+
 // AttachPID attaches a uprobe to the rbscope shared library mapped into the
 // target process. It scans /proc/{pid}/maps to locate the library rather
 // than assuming a fixed install path. Also adds the PID to the io_tracer's
@@ -167,6 +196,16 @@ func (r *RealBPF) AttachPID(pid uint32) error {
 		if err := r.ioObjs.TargetPids.Put(pid, val); err != nil {
 			// Non-fatal: io tracing just won't filter this PID
 			fmt.Fprintf(os.Stderr, "rbscope: add pid %d to io target_pids: %v\n", pid, err)
+		}
+	}
+
+	// Attach GVL uprobe (if gvl_tracer is loaded)
+	if r.gvlObjs != nil {
+		gl, err := ex.Uprobe("__rbscope_probe_gvl_event", r.gvlObjs.HandleGvlEvent, &link.UprobeOptions{PID: int(pid)})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "rbscope: gvl uprobe attach for pid %d: %v\n", pid, err)
+		} else {
+			r.gvlLinks = append(r.gvlLinks, gl)
 		}
 	}
 
@@ -232,42 +271,32 @@ func (r *RealBPF) DetachPID(_ uint32) error {
 }
 
 // ReadRingBuffer reads a single record from the BPF ring buffers.
-// It alternates between the ruby_reader and io_tracer ring buffers
-// with short poll timeouts so neither starves.
+// It rotates between the ruby_reader, io_tracer, and gvl_tracer ring buffers
+// with short poll timeouts so none starves.
 func (r *RealBPF) ReadRingBuffer(buf []byte) (int, error) {
-	// Alternate which reader we try first to prevent starvation
-	r.readToggle = !r.readToggle
+	// Rotate which reader we try first
+	r.readToggle = (r.readToggle + 1) % 3
 
-	if r.readToggle && r.ioReader != nil {
-		// Try IO reader first
-		r.ioReader.SetDeadline(time.Now().Add(10 * time.Millisecond))
-		record, err := r.ioReader.Read()
-		if err == nil {
-			n := copy(buf, record.RawSample)
-			return n, nil
+	// Try readers in rotation order
+	readers := []*ringbuf.Reader{r.reader, r.ioReader, r.gvlReader}
+	timeouts := []time.Duration{25 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond}
+
+	for i := 0; i < 3; i++ {
+		idx := (r.readToggle + i) % 3
+		rd := readers[idx]
+		if rd == nil {
+			continue
 		}
-		// Fall through to ruby reader
-	}
-
-	// Try ruby reader
-	r.reader.SetDeadline(time.Now().Add(25 * time.Millisecond))
-	record, err := r.reader.Read()
-	if err == nil {
-		n := copy(buf, record.RawSample)
-		return n, nil
-	}
-
-	// If we tried ruby first, also try IO
-	if !r.readToggle && r.ioReader != nil {
-		r.ioReader.SetDeadline(time.Now().Add(10 * time.Millisecond))
-		record, err := r.ioReader.Read()
+		rd.SetDeadline(time.Now().Add(timeouts[idx]))
+		record, err := rd.Read()
 		if err == nil {
 			n := copy(buf, record.RawSample)
 			return n, nil
 		}
 	}
 
-	return 0, err
+	// All readers timed out — return last error
+	return 0, fmt.Errorf("all ring buffers empty")
 }
 
 // Close releases all BPF resources.
@@ -278,15 +307,24 @@ func (r *RealBPF) Close() error {
 	for _, l := range r.ioLinks {
 		_ = l.Close()
 	}
+	for _, l := range r.gvlLinks {
+		_ = l.Close()
+	}
 	if r.reader != nil {
 		_ = r.reader.Close()
 	}
 	if r.ioReader != nil {
 		_ = r.ioReader.Close()
 	}
+	if r.gvlReader != nil {
+		_ = r.gvlReader.Close()
+	}
 	_ = r.objs.Close()
 	if r.ioObjs != nil {
 		_ = r.ioObjs.Close()
+	}
+	if r.gvlObjs != nil {
+		_ = r.gvlObjs.Close()
 	}
 	return nil
 }
