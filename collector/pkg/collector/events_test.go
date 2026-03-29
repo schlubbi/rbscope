@@ -518,3 +518,49 @@ func TestParseGVLWaitEvent_TooShort(t *testing.T) {
 		t.Error("expected error for short GVL event")
 	}
 }
+
+func TestParseGVLStateChangeEvent(t *testing.T) {
+	data := make([]byte, 32)
+	binary.LittleEndian.PutUint32(data[0:4], uint32(EventGVLState))
+	binary.LittleEndian.PutUint32(data[4:8], 1234)                      // pid
+	binary.LittleEndian.PutUint32(data[8:12], 5678)                     // tid
+	binary.LittleEndian.PutUint32(data[12:16], uint32(GVLStateStalled)) // gvl_state
+	binary.LittleEndian.PutUint64(data[16:24], 99_000_000)              // timestamp_ns
+	binary.LittleEndian.PutUint64(data[24:32], 0xdeadbeef)              // thread_value
+
+	evt, err := ParseEvent(data)
+	if err != nil {
+		t.Fatalf("ParseEvent failed: %v", err)
+	}
+
+	gvl, ok := evt.(*GVLStateChangeEvent)
+	if !ok {
+		t.Fatalf("expected *GVLStateChangeEvent, got %T", evt)
+	}
+
+	if gvl.PID != 1234 {
+		t.Errorf("PID: got %d, want 1234", gvl.PID)
+	}
+	if gvl.TID != 5678 {
+		t.Errorf("TID: got %d, want 5678", gvl.TID)
+	}
+	if gvl.GVLState != GVLStateStalled {
+		t.Errorf("GVLState: got %d, want %d", gvl.GVLState, GVLStateStalled)
+	}
+	if gvl.TimestampNs != 99_000_000 {
+		t.Errorf("TimestampNs: got %d, want 99000000", gvl.TimestampNs)
+	}
+	if gvl.ThreadValue != 0xdeadbeef {
+		t.Errorf("ThreadValue: got %x, want deadbeef", gvl.ThreadValue)
+	}
+}
+
+func TestParseGVLStateChangeEvent_TooShort(t *testing.T) {
+	data := make([]byte, 20) // too short for 32-byte event
+	binary.LittleEndian.PutUint32(data[0:4], uint32(EventGVLState))
+
+	_, err := ParseEvent(data)
+	if err == nil {
+		t.Error("expected error for short GVL state event")
+	}
+}

@@ -9,6 +9,20 @@ class TestController < ApplicationController
     render plain: "healthy"
   end
 
+  # GET /rbscope_status — diagnostics for rbscope state in this worker
+  def rbscope_status
+    if defined?(Rbscope)
+      render json: {
+        enabled: Rbscope.enabled?,
+        gvl_profiling: Rbscope.gvl_profiling?,
+        stats: Rbscope.sampling_stats,
+        pid: Process.pid
+      }
+    else
+      render json: { error: "rbscope not loaded" }
+    end
+  end
+
   # GET /fast — ~1ms baseline response
   def fast
     render plain: "ok"

@@ -100,8 +100,8 @@ func TestBuild_TopLevel(t *testing.T) {
 	capture := testCapture()
 	profile := Build(capture)
 
-	if profile.Meta.Version != 33 {
-		t.Errorf("version: got %d, want 33", profile.Meta.Version)
+	if profile.Meta.Version != 34 {
+		t.Errorf("version: got %d, want 34", profile.Meta.Version)
 	}
 	if profile.Meta.Product != "rbscope — test-app" {
 		t.Errorf("product: got %q", profile.Meta.Product)
@@ -109,8 +109,8 @@ func TestBuild_TopLevel(t *testing.T) {
 	if len(profile.Meta.Categories) != 12 {
 		t.Errorf("categories: got %d, want 12", len(profile.Meta.Categories))
 	}
-	if len(profile.Meta.MarkerSchema) != 5 {
-		t.Errorf("marker schemas: got %d, want 5", len(profile.Meta.MarkerSchema))
+	if len(profile.Meta.MarkerSchema) != 8 {
+		t.Errorf("marker schemas: got %d, want 8", len(profile.Meta.MarkerSchema))
 	}
 }
 
@@ -139,8 +139,9 @@ func TestBuild_Samples(t *testing.T) {
 	profile := Build(capture)
 
 	samples := profile.Threads[0].Samples
-	if len(samples.Data) != 2 {
-		t.Fatalf("samples.data length: got %d, want 2", len(samples.Data))
+	// 1 sample (weight=1) + 1 sample (weight=3, expanded to 3 entries) = 4
+	if len(samples.Data) != 4 {
+		t.Fatalf("samples.data length: got %d, want 4", len(samples.Data))
 	}
 
 	// First sample should have a stack reference (not nil)
@@ -176,9 +177,9 @@ func TestBuild_PerThreadTables(t *testing.T) {
 		t.Errorf("stack table: got %d entries, want >= 2", len(thread.StackTable.Data))
 	}
 
-	// First stack entry should have nil prefix (root)
-	if thread.StackTable.Data[0][0] != nil {
-		t.Errorf("stack[0] prefix: got %v, want nil", thread.StackTable.Data[0][0])
+	// First stack entry should have nil prefix (root) — tuple is [frame, prefix]
+	if thread.StackTable.Data[0][1] != nil {
+		t.Errorf("stack[0] prefix: got %v, want nil", thread.StackTable.Data[0][1])
 	}
 }
 

@@ -801,13 +801,8 @@ type IOEvent struct {
 	// Indices into frame_table. Shows the C call chain:
 	// e.g. read() ← trilogy_sock_read() ← trilogy_query()
 	NativeFrameIds []uint32 `protobuf:"varint,13,rep,packed,name=native_frame_ids,json=nativeFrameIds,proto3" json:"native_frame_ids,omitempty"`
-	// Ruby call stack captured at GVL SUSPENDED, just before this I/O.
-	// Indices into frame_table. Shows the Ruby code that initiated the I/O:
-	// e.g. PostsController#index → ActiveRecord → Trilogy::Client#query
-	// Combined with native_frame_ids, produces a unified call tree.
-	RubyContextFrameIds []uint32 `protobuf:"varint,14,rep,packed,name=ruby_context_frame_ids,json=rubyContextFrameIds,proto3" json:"ruby_context_frame_ids,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *IOEvent) Reset() {
@@ -927,13 +922,6 @@ func (x *IOEvent) GetRemotePort() uint32 {
 func (x *IOEvent) GetNativeFrameIds() []uint32 {
 	if x != nil {
 		return x.NativeFrameIds
-	}
-	return nil
-}
-
-func (x *IOEvent) GetRubyContextFrameIds() []uint32 {
-	if x != nil {
-		return x.RubyContextFrameIds
 	}
 	return nil
 }
@@ -1731,7 +1719,7 @@ const file_proto_rbscope_proto_rawDesc = "" +
 	"\ftimestamp_ns\x18\x01 \x01(\x04R\vtimestampNs\x12\x1b\n" +
 	"\tframe_ids\x18\x02 \x03(\rR\bframeIds\x127\n" +
 	"\fotel_context\x18\x03 \x01(\v2\x14.rbscope.OTelContextR\votelContext\x12\x16\n" +
-	"\x06weight\x18\x04 \x01(\rR\x06weight\"\x8e\x04\n" +
+	"\x06weight\x18\x04 \x01(\rR\x06weight\"\xd9\x03\n" +
 	"\aIOEvent\x12!\n" +
 	"\ftimestamp_ns\x18\x01 \x01(\x04R\vtimestampNs\x12\x1f\n" +
 	"\vsyscall_idx\x18\x02 \x01(\rR\n" +
@@ -1750,8 +1738,7 @@ const file_proto_rbscope_proto_rawDesc = "" +
 	"local_port\x18\v \x01(\rR\tlocalPort\x12\x1f\n" +
 	"\vremote_port\x18\f \x01(\rR\n" +
 	"remotePort\x12(\n" +
-	"\x10native_frame_ids\x18\r \x03(\rR\x0enativeFrameIds\x123\n" +
-	"\x16ruby_context_frame_ids\x18\x0e \x03(\rR\x13rubyContextFrameIds\"\xd0\x01\n" +
+	"\x10native_frame_ids\x18\r \x03(\rR\x0enativeFrameIds\"\xd0\x01\n" +
 	"\n" +
 	"SchedEvent\x12!\n" +
 	"\ftimestamp_ns\x18\x01 \x01(\x04R\vtimestampNs\x12\x1c\n" +

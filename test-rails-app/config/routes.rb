@@ -7,10 +7,14 @@ Rails.application.routes.draw do
   get "slow",      to: "test#slow"
   get "allocate",  to: "test#allocate"
   get "work",      to: "test#work"
+  get "rbscope_status", to: "test#rbscope_status"
 
   # CRUD resources — realistic Rails workload with DB queries
   resources :posts do
     resources :comments, only: [:index, :create, :destroy]
+    collection do
+      get :heavy
+    end
   end
 
   # Profile control

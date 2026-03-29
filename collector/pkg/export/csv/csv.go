@@ -185,27 +185,61 @@ func writeGVL(capture *pb.Capture, dir string) error {
 	defer w.Flush()
 
 	header := []string{
-		"timestamp_ns", "pid", "tid",
-		"wait_ns",
+		"start_ns", "end_ns", "pid", "tid",
+		"state", "duration_ns",
 	}
 	if err := w.Write(header); err != nil {
 		return err
 	}
 
 	for _, tl := range capture.Threads {
-		for _, gvl := range tl.GvlEvents {
-			row := []string{
-				strconv.FormatUint(gvl.TimestampNs, 10),
-				u32(capture.Header.Pid),
-				u32(tl.ThreadId),
-				strconv.FormatUint(gvl.WaitNs, 10),
+		// Prefer state intervals if available (new format)
+		if len(tl.GvlIntervals) > 0 {
+			for _, iv := range tl.GvlIntervals {
+				row := []string{
+					strconv.FormatUint(iv.StartNs, 10),
+					strconv.FormatUint(iv.EndNs, 10),
+					u32(capture.Header.Pid),
+					u32(tl.ThreadId),
+					gvlStateName(iv.State),
+					strconv.FormatUint(iv.EndNs-iv.StartNs, 10),
+				}
+				if err := w.Write(row); err != nil {
+					return err
+				}
 			}
-			if err := w.Write(row); err != nil {
-				return err
+		} else {
+			// Fallback: legacy GVL wait events
+			for _, gvl := range tl.GvlEvents {
+				startNs := gvl.TimestampNs - gvl.WaitNs
+				row := []string{
+					strconv.FormatUint(startNs, 10),
+					strconv.FormatUint(gvl.TimestampNs, 10),
+					u32(capture.Header.Pid),
+					u32(tl.ThreadId),
+					"stalled",
+					strconv.FormatUint(gvl.WaitNs, 10),
+				}
+				if err := w.Write(row); err != nil {
+					return err
+				}
 			}
 		}
 	}
 	return nil
+}
+
+func gvlStateName(s pb.GVLState) string {
+	switch s {
+	case pb.GVLState_GVL_STATE_RUNNING:
+		return "running"
+	case pb.GVLState_GVL_STATE_STALLED:
+		return "stalled"
+	case pb.GVLState_GVL_STATE_SUSPENDED:
+		return "suspended"
+	default:
+		return "unknown"
+	}
 }
 
 // --- Helpers ---

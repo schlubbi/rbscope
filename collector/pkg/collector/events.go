@@ -12,7 +12,9 @@ const (
 	EventRubyAlloc  EventType = 3
 	EventIO         EventType = 4
 	EventSched      EventType = 5
-	EventGVLWait    EventType = 6
+	EventGVLWait    EventType = 6 // deprecated: use EventGVLState
+	EventGVLState   EventType = 7
+	EventGVLStack   EventType = 8 // Ruby stack captured at GVL SUSPENDED
 )
 
 // EventType identifies the kind of event produced by the BPF programs.
@@ -85,6 +87,8 @@ type IOEvent struct {
 	RemoteAddr uint32 // IPv4, network byte order
 	// TCP performance stats
 	TCPStats *IOTCPStats // nil if not a TCP socket
+	// Native user-space stack at syscall time (from bpf_get_stack)
+	NativeStackIPs []uint64
 }
 
 // IOTCPStats holds TCP performance metrics captured from struct tcp_sock.
@@ -119,12 +123,39 @@ type SchedEvent struct {
 }
 
 // GVLWaitEvent captures a GVL wait duration.
+// Deprecated: use GVLStateChangeEvent for continuous state intervals.
 // Layout: event_type(4) + pid(4) + tid(4) + pad(4) + wait_ns(8) + timestamp_ns(8) + thread_value(8) = 40 bytes
 type GVLWaitEvent struct {
 	EventHeader
 	WaitNs      uint64 // how long the thread waited for the GVL
 	TimestampNs uint64 // when the thread acquired the GVL
 	ThreadValue uint64 // Ruby thread VALUE for cross-referencing
+}
+
+// GVL state constants matching the BPF-side and proto enum values.
+const (
+	GVLStateRunning   uint8 = 1
+	GVLStateStalled   uint8 = 2
+	GVLStateSuspended uint8 = 3
+)
+
+// GVLStateChangeEvent captures a raw GVL state transition from the BPF program.
+// Layout: event_type(4) + pid(4) + tid(4) + gvl_state(4) + timestamp_ns(8) + thread_value(8) = 32 bytes
+type GVLStateChangeEvent struct {
+	EventHeader
+	GVLState    uint8  // GVLStateRunning/Stalled/Suspended
+	TimestampNs uint64 // CLOCK_MONOTONIC from the gem
+	ThreadValue uint64 // Ruby thread VALUE
+}
+
+// GVLStackEvent carries the Ruby call stack captured at the moment a thread
+// releases the GVL (SUSPENDED). Used to correlate with I/O events on the
+// same TID to produce unified Ruby + native C call trees.
+// Layout: event_type(4) + pid(4) + tid(4) + stack_len(4) + timestamp_ns(8) + stack_data(variable)
+type GVLStackEvent struct {
+	EventHeader
+	TimestampNs uint64
+	StackData   []byte // serialized InlineStack (format v2)
 }
 
 // ParseEvent decodes raw bytes from the BPF ring buffer into a typed event.
@@ -151,6 +182,10 @@ func ParseEvent(data []byte) (any, error) {
 		return parseSchedEvent(hdr, data)
 	case EventGVLWait:
 		return parseGVLWaitEvent(data)
+	case EventGVLState:
+		return parseGVLStateChangeEvent(data)
+	case EventGVLStack:
+		return parseGVLStackEvent(data)
 	default:
 		return nil, fmt.Errorf("unknown event type: %d", eventType)
 	}
@@ -280,9 +315,10 @@ func parseRubySpan(hdr EventHeader, data []byte) (*RubySpanEvent, error) {
 	return ev, nil
 }
 
-// ioEventEnrichedSize is the total size of the enriched rbscope_io_event
-// from io_tracer.c: header(24) + io(24) + socket(16) + tcp(48) = 112 bytes
-const ioEventEnrichedSize = 112
+// ioEventEnrichedSize is the minimum size of the enriched rbscope_io_event
+// from io_tracer.c: header(24) + io(24) + socket(16) + tcp(48) + stack_hdr(8) = 120 bytes
+// The full event with 16 stack IPs is 120 + 16*8 = 248 bytes.
+const ioEventEnrichedSize = 120
 
 func parseIOEvent(hdr EventHeader, data []byte) (*IOEvent, error) {
 	// Enriched format from io_tracer.c: 104 bytes total
@@ -355,6 +391,20 @@ func parseIOEventEnriched(data []byte) (*IOEvent, error) {
 		// Only set if there's actual data (srtt_us > 0 indicates real stats)
 		if tcp.SrttUs > 0 || tcp.TotalRetrans > 0 || tcp.PacketsOut > 0 {
 			ev.TCPStats = tcp
+		}
+	}
+
+	// Native stack IPs from bpf_get_stack (offset 112)
+	// Layout: stack_len(4) + pad(4) + stack[16×8]
+	if len(data) >= 120 { // at least stack_len + pad
+		stackLen := binary.LittleEndian.Uint32(data[112:116])
+		// skip pad at 116:120
+		if stackLen > 0 && stackLen <= 16 && len(data) >= 120+int(stackLen)*8 {
+			ev.NativeStackIPs = make([]uint64, stackLen)
+			for i := uint32(0); i < stackLen; i++ {
+				off := 120 + i*8
+				ev.NativeStackIPs[i] = binary.LittleEndian.Uint64(data[off : off+8])
+			}
 		}
 	}
 
@@ -440,5 +490,47 @@ func parseGVLWaitEvent(data []byte) (*GVLWaitEvent, error) {
 		WaitNs:      binary.LittleEndian.Uint64(data[16:24]),
 		TimestampNs: binary.LittleEndian.Uint64(data[24:32]),
 		ThreadValue: binary.LittleEndian.Uint64(data[32:40]),
+	}, nil
+}
+
+// parseGVLStateChangeEvent parses a GVL state change event from the BPF ring buffer.
+// Layout: event_type(4) + pid(4) + tid(4) + gvl_state(4) + timestamp_ns(8) + thread_value(8) = 32 bytes
+func parseGVLStateChangeEvent(data []byte) (*GVLStateChangeEvent, error) {
+	if len(data) < 32 {
+		return nil, fmt.Errorf("GVL state event too short: %d bytes (need 32)", len(data))
+	}
+	return &GVLStateChangeEvent{
+		EventHeader: EventHeader{
+			Type: EventGVLState,
+			PID:  binary.LittleEndian.Uint32(data[4:8]),
+			TID:  binary.LittleEndian.Uint32(data[8:12]),
+		},
+		GVLState:    uint8(binary.LittleEndian.Uint32(data[12:16])), // #nosec G115 -- wire format, state fits in uint8
+		TimestampNs: binary.LittleEndian.Uint64(data[16:24]),
+		ThreadValue: binary.LittleEndian.Uint64(data[24:32]),
+	}, nil
+}
+
+// parseGVLStackEvent parses a GVL stack event from the BPF ring buffer.
+// Layout: event_type(4) + pid(4) + tid(4) + stack_len(4) + timestamp_ns(8) + stack_data(variable)
+func parseGVLStackEvent(data []byte) (*GVLStackEvent, error) {
+	const headerSize = 24 // 4+4+4+4+8
+	if len(data) < headerSize {
+		return nil, fmt.Errorf("GVL stack event too short: %d bytes (need %d)", len(data), headerSize)
+	}
+	stackLen := binary.LittleEndian.Uint32(data[12:16])
+	if int(stackLen) > len(data)-headerSize {
+		return nil, fmt.Errorf("GVL stack event stack_len %d exceeds data %d", stackLen, len(data)-headerSize)
+	}
+	stackData := make([]byte, stackLen)
+	copy(stackData, data[headerSize:headerSize+int(stackLen)])
+	return &GVLStackEvent{
+		EventHeader: EventHeader{
+			Type: EventGVLStack,
+			PID:  binary.LittleEndian.Uint32(data[4:8]),
+			TID:  binary.LittleEndian.Uint32(data[8:12]),
+		},
+		TimestampNs: binary.LittleEndian.Uint64(data[16:24]),
+		StackData:   stackData,
 	}, nil
 }

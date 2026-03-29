@@ -543,3 +543,71 @@ func TestBuilder_GVLEvents(t *testing.T) {
 		t.Errorf("second event timestamp: got %d", thread.GvlEvents[1].TimestampNs)
 	}
 }
+
+func TestBuilder_GVLStateIntervals(t *testing.T) {
+	b := NewBuilder("test", "host", 1234, 99)
+
+	// Simulate: thread starts RUNNING, suspends for I/O, stalls waiting for GVL, runs again
+	b.Ingest(&collector.GVLStateChangeEvent{
+		EventHeader: collector.EventHeader{Type: collector.EventGVLState, PID: 1234, TID: 100},
+		GVLState:    collector.GVLStateRunning,
+		TimestampNs: 1_000_000,
+		ThreadValue: 42,
+	})
+	b.Ingest(&collector.GVLStateChangeEvent{
+		EventHeader: collector.EventHeader{Type: collector.EventGVLState, PID: 1234, TID: 100},
+		GVLState:    collector.GVLStateSuspended,
+		TimestampNs: 5_000_000,
+		ThreadValue: 42,
+	})
+	b.Ingest(&collector.GVLStateChangeEvent{
+		EventHeader: collector.EventHeader{Type: collector.EventGVLState, PID: 1234, TID: 100},
+		GVLState:    collector.GVLStateStalled,
+		TimestampNs: 8_000_000,
+		ThreadValue: 42,
+	})
+	b.Ingest(&collector.GVLStateChangeEvent{
+		EventHeader: collector.EventHeader{Type: collector.EventGVLState, PID: 1234, TID: 100},
+		GVLState:    collector.GVLStateRunning,
+		TimestampNs: 9_000_000,
+		ThreadValue: 42,
+	})
+
+	capture := b.Build()
+
+	// Find thread 100
+	var thread *pb.ThreadTimeline
+	for _, tl := range capture.Threads {
+		if tl.ThreadId == 100 {
+			thread = tl
+			break
+		}
+	}
+	if thread == nil {
+		t.Fatal("thread 100 not found")
+	}
+
+	// Should have 4 state changes stored
+	if len(thread.GvlStateChanges) != 4 {
+		t.Fatalf("expected 4 GVL state changes, got %d", len(thread.GvlStateChanges))
+	}
+
+	// Should have computed intervals (at least 3: RUNNING, SUSPENDED, STALLED)
+	// The 4th (final RUNNING) depends on capture end time
+	if len(thread.GvlIntervals) < 3 {
+		t.Fatalf("expected at least 3 GVL intervals, got %d", len(thread.GvlIntervals))
+	}
+
+	// First interval should be RUNNING
+	if thread.GvlIntervals[0].State != pb.GVLState_GVL_STATE_RUNNING {
+		t.Errorf("first interval: got %v, want RUNNING", thread.GvlIntervals[0].State)
+	}
+	// Second should be SUSPENDED
+	if thread.GvlIntervals[1].State != pb.GVLState_GVL_STATE_SUSPENDED {
+		t.Errorf("second interval: got %v, want SUSPENDED", thread.GvlIntervals[1].State)
+	}
+	// Third should be STALLED
+	if thread.GvlIntervals[2].State != pb.GVLState_GVL_STATE_STALLED {
+		t.Errorf("third interval: got %v, want STALLED", thread.GvlIntervals[2].State)
+	}
+}

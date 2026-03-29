@@ -68,6 +68,14 @@ message ThreadTimeline {
   // Derived thread state timeline — built by the collector from the
   // combination of sched, I/O, GVL, and sample events.
   repeated ThreadStateInterval states = 10;
+
+  // GVL state changes — raw events from BPF gvl_tracer
+  repeated GVLStateChange gvl_state_changes = 11;
+
+  // GVL state intervals — continuous non-overlapping intervals computed
+  // from gvl_state_changes by the Go state machine. Powers the
+  // barber-pole visualization in Firefox Profiler.
+  repeated GVLStateInterval gvl_intervals = 12;
 }
 
 // ---- Events ----
@@ -102,6 +110,17 @@ message IOEvent {
   // Socket addresses (host byte order for ports)
   uint32 local_port = 11;
   uint32 remote_port = 12;
+
+  // Native call stack at syscall time (from bpf_get_stack).
+  // Indices into frame_table. Shows the C call chain:
+  // e.g. read() ← trilogy_sock_read() ← trilogy_query()
+  repeated uint32 native_frame_ids = 13;
+
+  // Ruby call stack captured at GVL SUSPENDED, just before this I/O.
+  // Indices into frame_table. Shows the Ruby code that initiated the I/O:
+  // e.g. PostsController#index → ActiveRecord → Trilogy::Client#query
+  // Combined with native_frame_ids, produces a unified call tree.
+  repeated uint32 ruby_context_frame_ids = 14;
 }
 
 // SchedEvent is an off-CPU period observed by BPF sched_tracer.
@@ -136,12 +155,37 @@ message SpanEvent {
   repeated uint32 frame_ids = 6;
 }
 
-// GVLEvent represents a GVL wait period (future — from GVL profiling TODO).
+// GVLEvent represents a GVL wait period (legacy — kept for backward compat).
+// Deprecated: Use GVLStateChange and GVLStateInterval instead.
 message GVLEvent {
   uint64 timestamp_ns = 1;
   uint64 wait_ns = 2;
   uint32 holder_thread_id = 3;   // which thread held the GVL
   uint32 holder_sample_idx = 4;  // what the holder was doing
+}
+
+// GVL state as observed from thread event hooks.
+enum GVLState {
+  GVL_STATE_UNKNOWN = 0;
+  GVL_STATE_RUNNING = 1;      // Thread holds GVL (from RESUMED event)
+  GVL_STATE_STALLED = 2;      // Thread waiting for GVL (from READY event)
+  GVL_STATE_SUSPENDED = 3;    // Thread released GVL voluntarily (from SUSPENDED event)
+}
+
+// GVLStateChange is a raw state transition from a BPF event.
+// Sorted by timestamp within each ThreadTimeline.
+message GVLStateChange {
+  uint64 timestamp_ns = 1;
+  GVLState state = 2;
+}
+
+// GVLStateInterval is a continuous time interval in a single GVL state.
+// Computed by the Go state machine from GVLStateChange events.
+// Within a thread, intervals are non-overlapping and contiguous.
+message GVLStateInterval {
+  uint64 start_ns = 1;
+  uint64 end_ns = 2;
+  GVLState state = 3;
 }
 
 // AllocationSample is a heap allocation event (future — from heap TODO).
