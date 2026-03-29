@@ -108,4 +108,30 @@ module Rbscope
   def self.gvl_profiling?
     Native.gvl_profiling_enabled?
   end
+
+  # Enable allocation tracking with the given sample interval.
+  #
+  # Hooks into Ruby's RUBY_INTERNAL_EVENT_NEWOBJ to capture allocation
+  # sites with full Ruby call stacks. The eBPF collector receives these
+  # as allocation events alongside CPU samples.
+  #
+  # @param sample_interval [Integer] Track every Nth allocation (default: 256)
+  # @return [Boolean] true if enabled successfully
+  def self.enable_allocation_tracking(sample_interval: 256)
+    Native.start_allocation_tracking(sample_interval)
+  end
+
+  # Stop allocation tracking.
+  #
+  # @return [Integer] number of sampled allocations
+  def self.stop_allocation_tracking
+    Native.stop_allocation_tracking
+  end
+
+  # Check if allocation tracking is active.
+  #
+  # @return [Boolean]
+  def self.allocation_tracking?
+    Native.allocation_tracking_enabled?
+  end
 end

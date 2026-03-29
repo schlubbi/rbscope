@@ -21,20 +21,11 @@ import (
 // Field tags must match the ELF symbol/section names produced by clang:
 //   - "events"              → BPF map name from SEC(".maps")
 //   - "handle_ruby_sample"  → C function name in SEC("uprobe/ruby_sample")
-type bpfObjects struct {
-	Events           *ebpf.Map     `ebpf:"events"`
-	HandleRubySample *ebpf.Program `ebpf:"handle_ruby_sample"`
-}
-
-func (o *bpfObjects) Close() error {
-	if o.Events != nil {
-		_ = o.Events.Close()
-	}
-	if o.HandleRubySample != nil {
-		_ = o.HandleRubySample.Close()
-	}
-	return nil
-}
+//
+// bpfObjects mirrors the struct that bpf2go generates from ruby_reader.c.
+// We use the generated rbscopeObjects directly but wrap it for backward
+// compatibility with the rest of the loader code.
+type bpfObjects = rbscopeObjects
 
 // RealBPF is the Linux eBPF-backed implementation of collector.BPFProgram.
 type RealBPF struct {
@@ -221,6 +212,16 @@ func (r *RealBPF) AttachPID(pid uint32) error {
 		return fmt.Errorf("attach uprobe pid %d: %w", pid, err)
 	}
 	r.links = append(r.links, l)
+
+	// Attach allocation tracking uprobe (optional — only fires if gem enables allocation tracking)
+	if r.objs.HandleRubyAlloc != nil {
+		al, err := ex.Uprobe("__rbscope_probe_ruby_alloc", r.objs.HandleRubyAlloc, &link.UprobeOptions{PID: int(pid)})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "rbscope: alloc uprobe attach for pid %d: %v\n", pid, err)
+		} else {
+			r.links = append(r.links, al)
+		}
+	}
 
 	// Attach GVL uprobe (if gvl_tracer is loaded)
 	if r.gvlObjs != nil {

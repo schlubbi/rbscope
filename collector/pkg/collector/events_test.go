@@ -564,3 +564,42 @@ func TestParseGVLStateChangeEvent_TooShort(t *testing.T) {
 		t.Error("expected error for short GVL state event")
 	}
 }
+
+func TestParseEvent_RubyAlloc(t *testing.T) {
+	// Build a minimal alloc event with metadata at fixed offset.
+	// Header: 40 bytes, then stack data, then native IPs at maxRubyStackSize,
+	// then alloc metadata at allocMetaOffset.
+	buf := make([]byte, allocMetaOffset+12+6)                       // 6 bytes for "String"
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(EventRubyAlloc)) // type
+	binary.LittleEndian.PutUint32(buf[4:8], 1234)                   // pid
+	binary.LittleEndian.PutUint32(buf[8:12], 5678)                  // tid
+	binary.LittleEndian.PutUint32(buf[12:16], 1)                    // weight
+	binary.LittleEndian.PutUint64(buf[16:24], 999000000)            // timestamp
+	binary.LittleEndian.PutUint64(buf[24:32], 42)                   // thread_id
+	binary.LittleEndian.PutUint32(buf[32:36], 0)                    // stack_data_len
+	binary.LittleEndian.PutUint32(buf[36:40], 0)                    // native_stack_len
+
+	// Alloc metadata at fixed offset
+	binary.LittleEndian.PutUint32(buf[allocMetaOffset:], 6)    // type_name_len
+	binary.LittleEndian.PutUint64(buf[allocMetaOffset+4:], 40) // alloc_size
+	copy(buf[allocMetaOffset+12:], "String")                   // type_name
+
+	event, err := ParseEvent(buf)
+	if err != nil {
+		t.Fatalf("ParseEvent: %v", err)
+	}
+
+	alloc, ok := event.(*RubyAllocEvent)
+	if !ok {
+		t.Fatalf("expected *RubyAllocEvent, got %T", event)
+	}
+	if alloc.ObjectType != "String" {
+		t.Errorf("ObjectType: got %q, want %q", alloc.ObjectType, "String")
+	}
+	if alloc.SizeBytes != 40 {
+		t.Errorf("SizeBytes: got %d, want 40", alloc.SizeBytes)
+	}
+	if alloc.PID != 1234 {
+		t.Errorf("PID: got %d, want 1234", alloc.PID)
+	}
+}

@@ -220,6 +220,7 @@ const (
 	catGC     = 9  // Garbage collection — brown
 	catOTel   = 10 // OTel spans — purple
 	catIdle   = 11 // Idle/waiting — grey
+	catAlloc  = 12 // Allocations — teal
 )
 
 // Export converts a Capture proto to Gecko JSON and writes it to path.
@@ -664,6 +665,21 @@ func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) MarkersTable {
 		})
 	}
 
+	// Allocation markers
+	for _, alloc := range tl.Allocations {
+		ms := tb.nsToMs(alloc.TimestampNs)
+		objType := lookupString(tb.capture.StringTable, alloc.ObjectTypeIdx)
+		nameIdx := tb.internString("Alloc")
+		data = append(data, []any{
+			nameIdx, ms, nil, MarkerPhaseInstant, catAlloc,
+			map[string]any{
+				"type":       "rbscope-alloc",
+				"objectType": objType,
+				"sizeBytes":  alloc.SizeBytes,
+			},
+		})
+	}
+
 	return MarkersTable{
 		Schema: MarkerTupleSchema{
 			Name: 0, StartTime: 1, EndTime: 2, Phase: 3, Category: 4, Data: 5,
@@ -824,6 +840,7 @@ func defaultCategories() []Category {
 		{Name: "GC", Color: "brown", Subcategories: []string{"GC"}},
 		{Name: "OTel", Color: "lightgreen", Subcategories: []string{"Span"}},
 		{Name: "Idle", Color: "grey", Subcategories: []string{"Idle"}},
+		{Name: "Alloc", Color: "darkgreen", Subcategories: []string{"Allocation"}},
 	}
 }
 
@@ -920,6 +937,17 @@ func defaultMarkerSchemas() []MarkerSchema {
 			ChartLabel:   "Suspended",
 			Data: []SchemaField{
 				{Key: "durationMs", Label: "Duration", Format: "duration"},
+			},
+		},
+		{
+			Name:         "rbscope-alloc",
+			Display:      []string{"marker-chart", "marker-table"},
+			TooltipLabel: "Alloc: {marker.data.objectType} ({marker.data.sizeBytes} bytes)",
+			TableLabel:   "{marker.data.objectType} ({marker.data.sizeBytes} bytes)",
+			ChartLabel:   "Alloc",
+			Data: []SchemaField{
+				{Key: "objectType", Label: "Type", Format: "string", Searchable: &searchable},
+				{Key: "sizeBytes", Label: "Size", Format: "bytes"},
 			},
 		},
 	}

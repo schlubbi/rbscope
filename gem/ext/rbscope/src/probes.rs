@@ -160,9 +160,10 @@ pub fn fire_ruby_span(
 
 /// Fire the ruby_alloc probe with allocation info and stack.
 pub fn fire_ruby_alloc(object_type: &str, size: u64, stack_data: &[u8]) {
-    if !PROBES_ENABLED.load(Ordering::Relaxed) {
-        return;
-    }
+    // No PROBES_ENABLED check — allocation tracking has its own
+    // ALLOC_TRACKING_ENABLED gate. The alloc probe should fire
+    // whenever allocation tracking is active, independent of the
+    // CPU sampler's probe state.
     __rbscope_probe_ruby_alloc(
         object_type.as_ptr(),
         object_type.len() as u32,
