@@ -139,6 +139,13 @@ func (b *Builder) Ingest(event any) {
 			HolderThreadId: 0, // Cross-thread correlation done in Build()
 		}
 		tb.gvlEvents = append(tb.gvlEvents, gvlEvent)
+
+	case *collector.GVLStateChangeEvent:
+		tb := b.thread(ev.TID)
+		tb.gvlStateChanges = append(tb.gvlStateChanges, &pb.GVLStateChange{
+			TimestampNs: ev.TimestampNs,
+			State:       pb.GVLState(ev.GVLState),
+		})
 	}
 }
 
@@ -198,14 +205,20 @@ func (b *Builder) Build() *pb.Capture {
 		// Derive thread state intervals (with idle classification)
 		states := deriveThreadStates(tb, b.idleClassifier)
 
+		// Compute GVL state intervals from raw state changes
+		captureEndNs := uint64(endTime.UnixNano())
+		gvlIntervals := computeGVLIntervals(tb.gvlStateChanges, captureEndNs)
+
 		tl := &pb.ThreadTimeline{
-			ThreadId:    tid,
-			Samples:     tb.samples,
-			IoEvents:    tb.ioEvents,
-			SchedEvents: tb.schedEvents,
-			GvlEvents:   tb.gvlEvents,
-			SpanEvents:  tb.spanEvents,
-			States:      states,
+			ThreadId:        tid,
+			Samples:         tb.samples,
+			IoEvents:        tb.ioEvents,
+			SchedEvents:     tb.schedEvents,
+			GvlEvents:       tb.gvlEvents,
+			SpanEvents:      tb.spanEvents,
+			States:          states,
+			GvlStateChanges: tb.gvlStateChanges,
+			GvlIntervals:    gvlIntervals,
 		}
 		threads = append(threads, tl)
 	}
@@ -252,12 +265,13 @@ func (b *Builder) thread(tid uint32) *threadBuilder {
 }
 
 type threadBuilder struct {
-	samples     []*pb.Sample
-	ioEvents    []*pb.IOEvent
-	schedEvents []*pb.SchedEvent
-	gvlEvents   []*pb.GVLEvent
-	spanEvents  []*pb.SpanEvent
-	rawIOEvents []*collector.IOEvent // kept for idle classification
+	samples         []*pb.Sample
+	ioEvents        []*pb.IOEvent
+	schedEvents     []*pb.SchedEvent
+	gvlEvents       []*pb.GVLEvent
+	gvlStateChanges []*pb.GVLStateChange
+	spanEvents      []*pb.SpanEvent
+	rawIOEvents     []*collector.IOEvent // kept for idle classification
 }
 
 func defaultCategories() []*pb.Category {

@@ -500,7 +500,7 @@ func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) MarkersTable {
 		})
 	}
 
-	// GVL wait markers
+	// GVL wait markers (legacy — from EventGVLWait=6)
 	for _, gvl := range tl.GvlEvents {
 		endMs := tb.nsToMs(gvl.TimestampNs)
 		startMs := endMs - float64(gvl.WaitNs)/1e6
@@ -514,6 +514,44 @@ func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) MarkersTable {
 			map[string]any{
 				"type":   "rbscope-gvl",
 				"waitMs": float64(gvl.WaitNs) / 1e6,
+			},
+		})
+	}
+
+	// GVL state interval markers — barber-pole visualization.
+	// Uses marker-chart display for continuous colored bars per thread.
+	for _, iv := range tl.GvlIntervals {
+		startMs := tb.nsToMs(iv.StartNs)
+		endMs := tb.nsToMs(iv.EndNs)
+		if endMs <= startMs {
+			continue // skip zero-width intervals
+		}
+
+		var name, schemaType string
+		var cat int
+		switch iv.State {
+		case pb.GVLState_GVL_STATE_RUNNING:
+			name = "GVL Running"
+			schemaType = "rbscope-gvl-running"
+			cat = catApp // green
+		case pb.GVLState_GVL_STATE_STALLED:
+			name = "GVL Stalled"
+			schemaType = "rbscope-gvl-stalled"
+			cat = catGVL // magenta
+		case pb.GVLState_GVL_STATE_SUSPENDED:
+			name = "GVL Suspended"
+			schemaType = "rbscope-gvl-suspended"
+			cat = catOther // grey
+		default:
+			continue
+		}
+
+		nameIdx := tb.internString(name)
+		data = append(data, []any{
+			nameIdx, startMs, endMs, MarkerPhaseInterval, cat,
+			map[string]any{
+				"type":       schemaType,
+				"durationMs": endMs - startMs,
 			},
 		})
 	}
@@ -783,6 +821,38 @@ func defaultMarkerSchemas() []MarkerSchema {
 			ChartLabel:   "{marker.data.state}",
 			Data: []SchemaField{
 				{Key: "state", Label: "State", Format: "string"},
+			},
+		},
+		// GVL barber-pole schemas — display: marker-chart only for
+		// continuous colored bars (Vernier-style thread state visualization)
+		{
+			Name:         "rbscope-gvl-running",
+			Display:      []string{"marker-chart"},
+			TooltipLabel: "GVL Running ({marker.data.durationMs}ms)",
+			TableLabel:   "GVL Running {marker.data.durationMs}ms",
+			ChartLabel:   "Running",
+			Data: []SchemaField{
+				{Key: "durationMs", Label: "Duration", Format: "duration"},
+			},
+		},
+		{
+			Name:         "rbscope-gvl-stalled",
+			Display:      []string{"marker-chart", "marker-table"},
+			TooltipLabel: "GVL Stalled — waiting for GVL ({marker.data.durationMs}ms)",
+			TableLabel:   "GVL Stalled {marker.data.durationMs}ms",
+			ChartLabel:   "Stalled",
+			Data: []SchemaField{
+				{Key: "durationMs", Label: "Duration", Format: "duration"},
+			},
+		},
+		{
+			Name:         "rbscope-gvl-suspended",
+			Display:      []string{"marker-chart"},
+			TooltipLabel: "GVL Suspended — thread released GVL ({marker.data.durationMs}ms)",
+			TableLabel:   "GVL Suspended {marker.data.durationMs}ms",
+			ChartLabel:   "Suspended",
+			Data: []SchemaField{
+				{Key: "durationMs", Label: "Duration", Format: "duration"},
 			},
 		},
 	}

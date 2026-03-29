@@ -12,7 +12,8 @@ const (
 	EventRubyAlloc  EventType = 3
 	EventIO         EventType = 4
 	EventSched      EventType = 5
-	EventGVLWait    EventType = 6
+	EventGVLWait    EventType = 6 // deprecated: use EventGVLState
+	EventGVLState   EventType = 7
 )
 
 // EventType identifies the kind of event produced by the BPF programs.
@@ -119,12 +120,29 @@ type SchedEvent struct {
 }
 
 // GVLWaitEvent captures a GVL wait duration.
+// Deprecated: use GVLStateChangeEvent for continuous state intervals.
 // Layout: event_type(4) + pid(4) + tid(4) + pad(4) + wait_ns(8) + timestamp_ns(8) + thread_value(8) = 40 bytes
 type GVLWaitEvent struct {
 	EventHeader
 	WaitNs      uint64 // how long the thread waited for the GVL
 	TimestampNs uint64 // when the thread acquired the GVL
 	ThreadValue uint64 // Ruby thread VALUE for cross-referencing
+}
+
+// GVL state constants matching the BPF-side and proto enum values.
+const (
+	GVLStateRunning   uint8 = 1
+	GVLStateStalled   uint8 = 2
+	GVLStateSuspended uint8 = 3
+)
+
+// GVLStateChangeEvent captures a raw GVL state transition from the BPF program.
+// Layout: event_type(4) + pid(4) + tid(4) + gvl_state(4) + timestamp_ns(8) + thread_value(8) = 32 bytes
+type GVLStateChangeEvent struct {
+	EventHeader
+	GVLState    uint8  // GVLStateRunning/Stalled/Suspended
+	TimestampNs uint64 // CLOCK_MONOTONIC from the gem
+	ThreadValue uint64 // Ruby thread VALUE
 }
 
 // ParseEvent decodes raw bytes from the BPF ring buffer into a typed event.
@@ -151,6 +169,8 @@ func ParseEvent(data []byte) (any, error) {
 		return parseSchedEvent(hdr, data)
 	case EventGVLWait:
 		return parseGVLWaitEvent(data)
+	case EventGVLState:
+		return parseGVLStateChangeEvent(data)
 	default:
 		return nil, fmt.Errorf("unknown event type: %d", eventType)
 	}
@@ -440,5 +460,23 @@ func parseGVLWaitEvent(data []byte) (*GVLWaitEvent, error) {
 		WaitNs:      binary.LittleEndian.Uint64(data[16:24]),
 		TimestampNs: binary.LittleEndian.Uint64(data[24:32]),
 		ThreadValue: binary.LittleEndian.Uint64(data[32:40]),
+	}, nil
+}
+
+// parseGVLStateChangeEvent parses a GVL state change event from the BPF ring buffer.
+// Layout: event_type(4) + pid(4) + tid(4) + gvl_state(4) + timestamp_ns(8) + thread_value(8) = 32 bytes
+func parseGVLStateChangeEvent(data []byte) (*GVLStateChangeEvent, error) {
+	if len(data) < 32 {
+		return nil, fmt.Errorf("GVL state event too short: %d bytes (need 32)", len(data))
+	}
+	return &GVLStateChangeEvent{
+		EventHeader: EventHeader{
+			Type: EventGVLState,
+			PID:  binary.LittleEndian.Uint32(data[4:8]),
+			TID:  binary.LittleEndian.Uint32(data[8:12]),
+		},
+		GVLState:    uint8(binary.LittleEndian.Uint32(data[12:16])),
+		TimestampNs: binary.LittleEndian.Uint64(data[16:24]),
+		ThreadValue: binary.LittleEndian.Uint64(data[24:32]),
 	}, nil
 }
