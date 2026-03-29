@@ -28,6 +28,7 @@ type Profile struct {
 	Processes    []any     `json:"processes"`
 	PausedRanges []any     `json:"pausedRanges"`
 	Counters     []Counter `json:"counters,omitempty"`
+	Sources      *Sources  `json:"sources,omitempty"`
 }
 
 // Meta contains profile metadata.
@@ -54,6 +55,21 @@ type SampleUnits struct {
 	Time           string `json:"time"`
 	EventDelay     string `json:"eventDelay"`
 	ThreadCPUDelta string `json:"threadCPUDelta"`
+}
+
+// Sources is the source table required by Gecko profile version 33+.
+type Sources struct {
+	Schema SourcesSchema `json:"schema"`
+	Data   []any         `json:"data"`
+}
+
+// SourcesSchema defines field positions in the sources table (v34 format).
+type SourcesSchema struct {
+	ID             int `json:"id"`
+	Filename       int `json:"filename"`
+	StartLine      int `json:"startLine"`
+	StartColumn    int `json:"startColumn"`
+	SourceMapURL   int `json:"sourceMapURL"`
 }
 
 // Category defines a profiler category with color.
@@ -249,7 +265,7 @@ func Build(capture *pb.Capture) *Profile {
 
 	return &Profile{
 		Meta: Meta{
-			Version:      33,
+			Version:      34,
 			Interval:     intervalMs,
 			StartTime:    startTimeMs,
 			ShutdownTime: nil,
@@ -268,6 +284,16 @@ func Build(capture *pb.Capture) *Profile {
 		Threads:      threads,
 		Processes:    []any{},
 		PausedRanges: []any{},
+		Sources: &Sources{
+			Schema: SourcesSchema{
+				ID:           0,
+				Filename:     1,
+				StartLine:    2,
+				StartColumn:  3,
+				SourceMapURL: 4,
+			},
+			Data: []any{},
+		},
 	}
 }
 
@@ -329,14 +355,19 @@ func (tb *threadBuilder) internFrame(rbFrameIdx uint32) int {
 	funcName := lookupString(tb.capture.StringTable, frame.FunctionNameIdx)
 	fileName := lookupString(tb.capture.StringTable, frame.FileNameIdx)
 
-	// Build label: "ClassName#method (file.rb:42)"
+	// Build location string for function identity. Firefox Profiler's
+	// extractFuncsAndResourcesFromFrameLocations parses "name (file:line)"
+	// and uses the line number in the func dedup key. To ensure all frames
+	// from the same function merge in the flame graph, we use line 0 in
+	// the location string for all frames. The actual callsite line goes
+	// into frameTable.line for detail views and source annotations.
 	label := funcName
-	if fileName != "" && frame.LineNumber > 0 {
-		label = fmt.Sprintf("%s (%s:%d)", funcName, fileName, frame.LineNumber)
-	} else if fileName != "" {
-		label = fmt.Sprintf("%s (%s)", funcName, fileName)
+	if fileName != "" {
+		label = fmt.Sprintf("%s (%s:0)", funcName, fileName)
 	}
 
+	// Frame dedup key includes line — different callsites are separate frames
+	// but share a function via the location string above.
 	key := fmt.Sprintf("%s:%d", label, frame.LineNumber)
 	if idx, ok := tb.frameKeys[key]; ok {
 		return idx
@@ -358,7 +389,7 @@ func (tb *threadBuilder) internFrame(rbFrameIdx uint32) int {
 }
 
 // internStack converts leaf-first frame IDs to a prefix-tree stack entry.
-// Stack tuple: [prefix, frame]  where prefix is null or a stack index.
+// Stack tuple: [frame, prefix]  where prefix is null or a stack index.
 func (tb *threadBuilder) internStack(frameIDs []uint32) int {
 	if len(frameIDs) == 0 {
 		return -1
@@ -382,7 +413,7 @@ func (tb *threadBuilder) internStack(frameIDs []uint32) int {
 		}
 
 		idx := len(tb.stackData)
-		tb.stackData = append(tb.stackData, []any{prefix, frameIdx})
+		tb.stackData = append(tb.stackData, []any{frameIdx, prefix})
 		tb.stackKeys[prefixKey] = idx
 		prefix = idx
 	}
@@ -424,7 +455,7 @@ func buildThread(capture *pb.Capture, tl *pb.ThreadTimeline, startTimeMs float64
 			Data: tb.frameData,
 		},
 		StackTable: StackTableData{
-			Schema: StackTupleSchema{Prefix: 0, Frame: 1},
+			Schema: StackTupleSchema{Frame: 0, Prefix: 1},
 			Data:   tb.stackData,
 		},
 		StringTable: tb.strings,
@@ -443,9 +474,23 @@ func buildSamples(tb *threadBuilder, tl *pb.ThreadTimeline) SamplesTable {
 
 		timeMs := tb.nsToMs(s.TimestampNs)
 
-		// For weighted samples, emit multiple entries or use eventDelay=0
-		data = append(data, []any{stackRef, timeMs, 0})
+		// Emit one entry per weight unit. The stack cache in the gem
+		// accumulates weight for consecutive identical stacks and sends
+		// a single probe event. We expand here so the call tree/flame
+		// graph correctly reflects the time spent.
+		w := int(s.Weight)
+		if w < 1 {
+			w = 1
+		}
+		for range w {
+			data = append(data, []any{stackRef, timeMs, 0})
+		}
 	}
+
+	// I/O events with RubyContextFrameIds are NOT added as synthetic samples.
+	// They would drown out the regular timer-based samples and produce
+	// misleading call trees (SUSPENDED stacks are the idle/accept context,
+	// not the application code context). I/O events appear as markers instead.
 
 	return SamplesTable{
 		Schema: SampleTupleSchema{Stack: 0, Time: 1, EventDelay: 2},
@@ -468,16 +513,36 @@ func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) MarkersTable {
 		fdInfo := lookupString(tb.capture.StringTable, io.FdInfoIdx)
 
 		nameIdx := tb.internString("I/O")
+		payload := map[string]any{
+			"type":      "rbscope-io",
+			"syscall":   syscall,
+			"fd":        io.Fd,
+			"fdInfo":    fdInfo,
+			"bytes":     io.Bytes,
+			"latencyMs": float64(io.LatencyNs) / 1e6,
+		}
+
+		// Add native call stack from bpf_get_stack (e.g. read ← trilogy_sock_read ← trilogy_query)
+		if len(io.NativeFrameIds) > 0 {
+			var stackStr string
+			for i, fid := range io.NativeFrameIds {
+				if int(fid) < len(tb.capture.FrameTable) {
+					f := tb.capture.FrameTable[fid]
+					name := lookupString(tb.capture.StringTable, f.FunctionNameIdx)
+					if i > 0 {
+						stackStr += " ← "
+					}
+					stackStr += name
+				}
+			}
+			if stackStr != "" {
+				payload["nativeStack"] = stackStr
+			}
+		}
+
 		data = append(data, []any{
 			nameIdx, startMs, endMs, MarkerPhaseInterval, catIO,
-			map[string]any{
-				"type":      "rbscope-io",
-				"syscall":   syscall,
-				"fd":        io.Fd,
-				"fdInfo":    fdInfo,
-				"bytes":     io.Bytes,
-				"latencyMs": float64(io.LatencyNs) / 1e6,
-			},
+			payload,
 		})
 	}
 
@@ -776,6 +841,7 @@ func defaultMarkerSchemas() []MarkerSchema {
 				{Key: "fdInfo", Label: "Target", Format: "string", Searchable: &searchable},
 				{Key: "bytes", Label: "Bytes", Format: "bytes"},
 				{Key: "latencyMs", Label: "Latency", Format: "duration"},
+				{Key: "nativeStack", Label: "C Stack", Format: "string", Searchable: &searchable},
 			},
 		},
 		{

@@ -20,5 +20,6 @@ after_worker_fork do |_server, worker|
   # Re-initialize rbscope sampling in the child process
   if defined?(Rbscope) && ENV["RBSCOPE"] == "1"
     Rbscope.start
+    Rbscope.enable_gvl_profiling
   end
 end

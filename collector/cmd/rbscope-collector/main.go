@@ -2,12 +2,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -235,10 +237,26 @@ func runCapture(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
+	// Also add sibling processes to the I/O tracer's target_pids map.
+	// Pitchfork forks worker processes that inherit the uprobe but have
+	// different PIDs. The I/O tracepoints need all PIDs in the filter.
+	attachSiblingPIDs(c, flagCapturePID, logger)
+
 	<-ctx.Done()
 
 	// For timeline-based formats, build the capture and export.
 	if tb != nil {
+		// Diagnostic: log GVL suspended stack counts
+		for tid, count := range tb.SuspendedStackCounts() {
+			logger.Info("gvl_stack events received", "tid", tid, "count", count)
+		}
+		// Diagnostic: log regular sample counts per thread
+		for tid, count := range tb.SampleCounts() {
+			if count > 0 {
+				logger.Info("regular samples", "tid", tid, "count", count)
+			}
+		}
+
 		capture := tb.Build()
 		switch flagCaptureFormat {
 		case "gecko":
@@ -270,6 +288,73 @@ func (e *timelineExporter) Export(_ context.Context, event any) error {
 
 func (e *timelineExporter) Flush(_ context.Context) error { return nil }
 func (e *timelineExporter) Close() error                  { return nil }
+
+// attachSiblingPIDs finds all processes that share the same parent as the
+// target PID and have rbscope.so loaded, then adds them to the I/O tracer's
+// target_pids map. This is needed because Pitchfork forks workers that
+// inherit the uprobe but the I/O tracepoints need explicit PID filtering.
+func attachSiblingPIDs(c *collector.Collector, targetPID uint32, logger *slog.Logger) {
+	// Read target's PPID
+	ppid := readPPID(targetPID)
+	if ppid == 0 {
+		return
+	}
+
+	// Scan /proc for siblings with the same parent
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		pid, err := strconv.ParseUint(e.Name(), 10, 32)
+		if err != nil || uint32(pid) == targetPID {
+			continue
+		}
+		if readPPID(uint32(pid)) != ppid {
+			continue
+		}
+		// Check if this sibling has rbscope.so mapped
+		if hasRbscopeLoaded(uint32(pid)) {
+			if err := c.AttachPID(uint32(pid)); err != nil {
+				logger.Debug("attach sibling", "pid", pid, "err", err)
+			} else {
+				logger.Info("attached sibling worker", "pid", pid)
+			}
+		}
+	}
+}
+
+func readPPID(pid uint32) uint32 {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "PPid:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				v, _ := strconv.ParseUint(fields[1], 10, 32)
+				return uint32(v)
+			}
+		}
+	}
+	return 0
+}
+
+func hasRbscopeLoaded(pid uint32) bool {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/maps", pid))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		if strings.Contains(scanner.Text(), "rbscope") {
+			return true
+		}
+	}
+	return false
+}
 
 func buildExporters(logger *slog.Logger) ([]collector.Exporter, error) {
 	names := strings.Split(flagExport, ",")

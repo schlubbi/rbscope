@@ -103,11 +103,15 @@ static __always_inline void emit_state(u32 pid, u32 tid, u32 state,
 SEC("uprobe/gvl_event")
 int handle_gvl_event(struct pt_regs *ctx) {
     u8  event_type   = (u8)PT_REGS_PARM1(ctx);
-    u32 tid          = (u32)PT_REGS_PARM2(ctx);
+    // Use host-namespace TID from bpf_get_current_pid_tgid() so that
+    // GVL events land on the same thread as ruby_reader samples.
+    // The gem passes namespace-relative gettid() as arg2 but we ignore it.
+    u64 pidtgid      = bpf_get_current_pid_tgid();
+    u32 tid          = (u32)pidtgid;
     u64 timestamp_ns = (u64)PT_REGS_PARM3(ctx);
     u64 thread_value = (u64)PT_REGS_PARM4(ctx);
 
-    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    u32 pid = pidtgid >> 32;
 
     // Map gem event types to GVL states
     u32 new_state;
@@ -170,6 +174,64 @@ int handle_gvl_event(struct pt_regs *ctx) {
     };
     bpf_map_update_elem(&gvl_thread_state, &key, &new_last, BPF_ANY);
 
+    return 0;
+}
+
+// --- GVL stack capture ---
+// Fired by __rbscope_probe_gvl_stack when a thread releases the GVL.
+// Same argument layout as ruby_sample:
+//   arg0: stack_ptr (pointer to serialized v2 inline stack)
+//   arg1: stack_len (bytes)
+//   arg2: thread_id (Ruby VALUE)
+//   arg3: timestamp_ns (wall clock)
+//   arg4: weight (unused, always 0)
+
+#define EVENT_GVL_STACK 8
+#define MAX_GVL_STACK_BYTES 4096
+
+// GVL stack event: header + inline stack data
+struct gvl_stack_event {
+    u32 event_type;     // EVENT_GVL_STACK = 8
+    u32 pid;
+    u32 tid;
+    u32 stack_len;
+    u64 timestamp_ns;
+    u8  stack_data[MAX_GVL_STACK_BYTES];
+};
+
+SEC("uprobe/gvl_stack")
+int handle_gvl_stack(struct pt_regs *ctx) {
+    u64 stack_ptr = PT_REGS_PARM1(ctx);
+    u32 stack_len = (u32)PT_REGS_PARM2(ctx);
+    u64 timestamp = PT_REGS_PARM4(ctx);
+
+    if (stack_len == 0 || stack_len > MAX_GVL_STACK_BYTES)
+        return 0;
+
+    u64 pidtgid = bpf_get_current_pid_tgid();
+    u32 tid = (u32)pidtgid;
+    u32 pid = pidtgid >> 32;
+
+    struct gvl_stack_event *event;
+    event = bpf_ringbuf_reserve(&gvl_events,
+                                sizeof(struct gvl_stack_event), 0);
+    if (!event)
+        return 0;
+
+    event->event_type = EVENT_GVL_STACK;
+    event->pid = pid;
+    event->tid = tid;
+    event->stack_len = stack_len;
+    event->timestamp_ns = timestamp;
+
+    // Read the serialized stack from user space
+    if (bpf_probe_read_user(event->stack_data, stack_len & (MAX_GVL_STACK_BYTES - 1),
+                            (void *)stack_ptr) < 0) {
+        bpf_ringbuf_discard(event, 0);
+        return 0;
+    }
+
+    bpf_ringbuf_submit(event, 0);
     return 0;
 }
 

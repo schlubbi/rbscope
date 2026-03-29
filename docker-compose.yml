@@ -61,6 +61,7 @@ services:
       - DATABASE_USER=root
       - DATABASE_PASSWORD=rbscope
       - RBSCOPE=1
+      - RUBY_YJIT_ENABLE=0
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
       - OTEL_SERVICE_NAME=rbscope-test-app
       - PYROSCOPE_SERVER_ADDRESS=http://pyroscope:4040

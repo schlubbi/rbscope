@@ -12,6 +12,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
+	"golang.org/x/sys/unix"
 	"github.com/schlubbi/rbscope/collector/pkg/collector"
 )
 
@@ -36,17 +37,18 @@ func (o *bpfObjects) Close() error {
 
 // RealBPF is the Linux eBPF-backed implementation of collector.BPFProgram.
 type RealBPF struct {
-	objPath    string
-	objs       bpfObjects
-	reader     *ringbuf.Reader
-	links      []link.Link
-	ioObjs     *iotracerObjects
-	ioReader   *ringbuf.Reader
-	ioLinks    []link.Link
-	gvlObjs    *gvltracerObjects
-	gvlReader  *ringbuf.Reader
-	gvlLinks   []link.Link
-	readToggle int // rotates reads across ring buffers
+	objPath       string
+	objs          bpfObjects
+	reader        *ringbuf.Reader
+	links         []link.Link
+	ioObjs        *iotracerObjects
+	ioReader      *ringbuf.Reader
+	ioLinks       []link.Link
+	gvlObjs       *gvltracerObjects
+	gvlReader     *ringbuf.Reader
+	gvlLinks      []link.Link
+	readToggle    int    // rotates reads across ring buffers
+	ktimeOffsetNs int64  // wallclock_ns - ktime_ns, add to ktime to get epoch
 }
 
 // Compile-time interface check.
@@ -98,6 +100,11 @@ func (r *RealBPF) Load() error {
 		// GVL tracing is optional — log but don't fail
 		fmt.Fprintf(os.Stderr, "rbscope: gvl_tracer load skipped: %v\n", err)
 	}
+
+	// Record the wall clock ↔ ktime offset for timestamp conversion.
+	// BPF programs use bpf_ktime_get_ns() (CLOCK_MONOTONIC) but we need
+	// epoch timestamps for correlation with the gem's wall clock events.
+	r.ktimeOffsetNs = time.Now().UnixNano() - readKtimeNs()
 
 	return nil
 }
@@ -172,10 +179,22 @@ func (r *RealBPF) loadGVLTracer() error {
 // than assuming a fixed install path. Also adds the PID to the io_tracer's
 // target_pids map for syscall filtering.
 func (r *RealBPF) AttachPID(pid uint32) error {
-	binPath, err := findRbscopeLibrary(pid)
+	// Add PID to io_tracer's target_pids map FIRST — even if the uprobe
+	// attach fails (e.g. for forked children that inherit the uprobe),
+	// we still want I/O tracing for this PID.
+	if r.ioObjs != nil {
+		val := uint8(1)
+		if err := r.ioObjs.TargetPids.Put(pid, val); err != nil {
+			fmt.Fprintf(os.Stderr, "rbscope: add pid %d to io target_pids: %v\n", pid, err)
+		}
+	}
+
+	containerPath, err := findRbscopeContainerPath(pid)
 	if err != nil {
 		return fmt.Errorf("locate rbscope library for pid %d: %w", pid, err)
 	}
+	binPath := fmt.Sprintf("/proc/%d/root%s", pid, containerPath)
+	fmt.Fprintf(os.Stderr, "rbscope: pid %d uprobe path: %s\n", pid, binPath)
 
 	ex, err := link.OpenExecutable(binPath)
 	if err != nil {
@@ -190,15 +209,6 @@ func (r *RealBPF) AttachPID(pid uint32) error {
 	}
 	r.links = append(r.links, l)
 
-	// Add PID to io_tracer's target_pids map (if io_tracer is loaded)
-	if r.ioObjs != nil {
-		val := uint8(1)
-		if err := r.ioObjs.TargetPids.Put(pid, val); err != nil {
-			// Non-fatal: io tracing just won't filter this PID
-			fmt.Fprintf(os.Stderr, "rbscope: add pid %d to io target_pids: %v\n", pid, err)
-		}
-	}
-
 	// Attach GVL uprobe (if gvl_tracer is loaded)
 	if r.gvlObjs != nil {
 		gl, err := ex.Uprobe("__rbscope_probe_gvl_event", r.gvlObjs.HandleGvlEvent, &link.UprobeOptions{PID: int(pid)})
@@ -207,15 +217,24 @@ func (r *RealBPF) AttachPID(pid uint32) error {
 		} else {
 			r.gvlLinks = append(r.gvlLinks, gl)
 		}
+
+		// Attach GVL stack capture uprobe — captures Ruby stack on SUSPENDED
+		gs, err := ex.Uprobe("__rbscope_probe_gvl_stack", r.gvlObjs.HandleGvlStack, &link.UprobeOptions{PID: int(pid)})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "rbscope: gvl_stack uprobe attach for pid %d: %v\n", pid, err)
+		} else {
+			r.gvlLinks = append(r.gvlLinks, gs)
+		}
 	}
 
 	return nil
 }
 
-// findRbscopeLibrary scans /proc/{pid}/maps for a memory-mapped shared object
-// containing "rbscope" in its path. This handles both gem-installed paths
-// (e.g. .../lib/rbscope/rbscope.bundle) and system paths (/usr/lib/librbscope.so).
-func findRbscopeLibrary(pid uint32) (string, error) {
+// findRbscopeContainerPath scans /proc/{pid}/maps for a memory-mapped shared
+// object containing "rbscope" in its path. Returns the in-container path
+// (e.g. /rbscope-gem/lib/rbscope/rbscope.so) which can be resolved inside
+// the target's mount namespace to get the correct inode for uprobe attachment.
+func findRbscopeContainerPath(pid uint32) (string, error) {
 	mapsPath := fmt.Sprintf("/proc/%d/maps", pid)
 	f, err := os.Open(mapsPath) // #nosec G304 -- path derived from PID, reads /proc
 	if err != nil {
@@ -226,8 +245,6 @@ func findRbscopeLibrary(pid uint32) (string, error) {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()
-		// /proc/pid/maps format: addr perms offset dev inode pathname
-		// We look for executable mappings (r-xp) containing "rbscope"
 		fields := strings.Fields(line)
 		if len(fields) < 6 {
 			continue
@@ -240,8 +257,7 @@ func findRbscopeLibrary(pid uint32) (string, error) {
 		}
 		if strings.Contains(pathname, "rbscope") &&
 			(strings.HasSuffix(pathname, ".so") || strings.HasSuffix(pathname, ".bundle")) {
-			// Return the path as seen from the host via /proc/{pid}/root
-			return fmt.Sprintf("/proc/%d/root%s", pid, pathname), nil
+			return pathname, nil
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -271,23 +287,31 @@ func (r *RealBPF) DetachPID(_ uint32) error {
 }
 
 // ReadRingBuffer reads a single record from the BPF ring buffers.
-// It rotates between the ruby_reader, io_tracer, and gvl_tracer ring buffers
-// with short poll timeouts so none starves.
+// Always checks the ruby reader first (highest value, lowest rate), then
+// rotates between io and gvl to avoid IO starvation of ruby samples.
 func (r *RealBPF) ReadRingBuffer(buf []byte) (int, error) {
-	// Rotate which reader we try first
-	r.readToggle = (r.readToggle + 1) % 3
-
-	// Try readers in rotation order
 	readers := []*ringbuf.Reader{r.reader, r.ioReader, r.gvlReader}
-	timeouts := []time.Duration{25 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond}
 
-	for i := 0; i < 3; i++ {
-		idx := (r.readToggle + i) % 3
-		rd := readers[idx]
+	// Always try ruby first with a short poll — ruby samples are highest priority
+	if r.reader != nil {
+		r.reader.SetDeadline(time.Now().Add(1 * time.Millisecond))
+		record, err := r.reader.Read()
+		if err == nil {
+			n := copy(buf, record.RawSample)
+			return n, nil
+		}
+	}
+
+	// Then rotate between io and gvl
+	r.readToggle = (r.readToggle + 1) % 2
+	secondaries := []*ringbuf.Reader{r.ioReader, r.gvlReader}
+	for i := 0; i < 2; i++ {
+		idx := (r.readToggle + i) % 2
+		rd := secondaries[idx]
 		if rd == nil {
 			continue
 		}
-		rd.SetDeadline(time.Now().Add(timeouts[idx]))
+		rd.SetDeadline(time.Now().Add(5 * time.Millisecond))
 		record, err := rd.Read()
 		if err == nil {
 			n := copy(buf, record.RawSample)
@@ -295,8 +319,46 @@ func (r *RealBPF) ReadRingBuffer(buf []byte) (int, error) {
 		}
 	}
 
-	// All readers timed out — return last error
+	// Nothing available — do a longer poll on ruby to avoid busy-spinning
+	if r.reader != nil {
+		r.reader.SetDeadline(time.Now().Add(15 * time.Millisecond))
+		record, err := r.reader.Read()
+		if err == nil {
+			n := copy(buf, record.RawSample)
+			return n, nil
+		}
+	}
+
+	// Check all remaining with minimal timeout
+	for _, rd := range readers {
+		if rd == nil {
+			continue
+		}
+		rd.SetDeadline(time.Now().Add(1 * time.Millisecond))
+		record, err := rd.Read()
+		if err == nil {
+			n := copy(buf, record.RawSample)
+			return n, nil
+		}
+	}
+
 	return 0, fmt.Errorf("all ring buffers empty")
+}
+
+// KtimeOffsetNs returns the offset to convert bpf_ktime_get_ns() timestamps
+// to wall clock (epoch) nanoseconds. Add this to any ktime value.
+func (r *RealBPF) KtimeOffsetNs() int64 {
+	return r.ktimeOffsetNs
+}
+
+// readKtimeNs reads the current CLOCK_MONOTONIC value in nanoseconds,
+// matching what bpf_ktime_get_ns() returns.
+func readKtimeNs() int64 {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		return 0
+	}
+	return ts.Sec*1e9 + ts.Nsec
 }
 
 // Close releases all BPF resources.

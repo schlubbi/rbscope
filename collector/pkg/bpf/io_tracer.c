@@ -17,6 +17,11 @@
 // Event type matches Go EventIO = 4
 #define EVENT_IO 4
 
+// bpf_get_stack flag — capture user-space stack frames
+#ifndef BPF_F_USER_STACK
+#define BPF_F_USER_STACK (1ULL << 8)
+#endif
+
 // I/O operation types (matches Go IoOp* constants)
 #define IO_OP_READ    1
 #define IO_OP_WRITE   2
@@ -60,6 +65,10 @@ struct {
 
 // ---- event ---------------------------------------------------------------
 
+// Maximum number of native stack IPs to capture per I/O event.
+// 16 frames is enough to see: read() ← trilogy_sock_read() ← trilogy_query()
+#define MAX_IO_STACK_DEPTH 16
+
 // rbscope_io_event is the enriched I/O event emitted to userspace.
 // Layout must match Go IOEvent parsing in events.go.
 struct rbscope_io_event {
@@ -93,6 +102,10 @@ struct rbscope_io_event {
     u32 _pad2;
     u64 bytes_sent;
     u64 bytes_received;
+    // Native user-space stack (captured at syscall exit)
+    u32 stack_len;        // number of valid IPs in stack[]
+    u32 _pad3;
+    u64 stack[MAX_IO_STACK_DEPTH]; // user-space instruction pointers
 };
 
 // ---- helpers --------------------------------------------------------------
@@ -123,7 +136,7 @@ static __always_inline void record_enter(u32 syscall_nr, u32 fd) {
     bpf_map_update_elem(&inflight, &tid, &entry, BPF_ANY);
 }
 
-static __always_inline void record_exit(long ret) {
+static __always_inline void record_exit(void *ctx, long ret) {
     u32 tid = (u32)bpf_get_current_pid_tgid();
     struct syscall_enter *entry = bpf_map_lookup_elem(&inflight, &tid);
     if (!entry)
@@ -180,6 +193,15 @@ static __always_inline void record_exit(long ret) {
         ev->bytes_received = tcp.bytes_received;
     }
 
+    // Capture user-space native stack at syscall exit.
+    // This gives us the C call chain: read() ← trilogy_sock_read() ← trilogy_query()
+    // bpf_get_stack returns bytes written (negative on error).
+    long stack_bytes = bpf_get_stack(ctx, ev->stack,
+                                     MAX_IO_STACK_DEPTH * sizeof(u64),
+                                     BPF_F_USER_STACK);
+    if (stack_bytes > 0)
+        ev->stack_len = (u32)(stack_bytes / sizeof(u64));
+
     bpf_ringbuf_submit(ev, 0);
     bpf_map_delete_elem(&inflight, &tid);
 }
@@ -196,7 +218,7 @@ int tp_sys_enter_read(struct trace_event_raw_sys_enter *ctx) {
 SEC("tp/syscalls/sys_exit_read")
 int tp_sys_exit_read(struct trace_event_raw_sys_exit *ctx) {
     if (!pid_allowed()) return 0;
-    record_exit(ctx->ret);
+    record_exit(ctx, ctx->ret);
     return 0;
 }
 
@@ -212,7 +234,7 @@ int tp_sys_enter_write(struct trace_event_raw_sys_enter *ctx) {
 SEC("tp/syscalls/sys_exit_write")
 int tp_sys_exit_write(struct trace_event_raw_sys_exit *ctx) {
     if (!pid_allowed()) return 0;
-    record_exit(ctx->ret);
+    record_exit(ctx, ctx->ret);
     return 0;
 }
 
@@ -228,7 +250,7 @@ int tp_sys_enter_sendto(struct trace_event_raw_sys_enter *ctx) {
 SEC("tp/syscalls/sys_exit_sendto")
 int tp_sys_exit_sendto(struct trace_event_raw_sys_exit *ctx) {
     if (!pid_allowed()) return 0;
-    record_exit(ctx->ret);
+    record_exit(ctx, ctx->ret);
     return 0;
 }
 
@@ -244,7 +266,7 @@ int tp_sys_enter_recvfrom(struct trace_event_raw_sys_enter *ctx) {
 SEC("tp/syscalls/sys_exit_recvfrom")
 int tp_sys_exit_recvfrom(struct trace_event_raw_sys_exit *ctx) {
     if (!pid_allowed()) return 0;
-    record_exit(ctx->ret);
+    record_exit(ctx, ctx->ret);
     return 0;
 }
 
@@ -260,7 +282,7 @@ int tp_sys_enter_connect(struct trace_event_raw_sys_enter *ctx) {
 SEC("tp/syscalls/sys_exit_connect")
 int tp_sys_exit_connect(struct trace_event_raw_sys_exit *ctx) {
     if (!pid_allowed()) return 0;
-    record_exit(ctx->ret);
+    record_exit(ctx, ctx->ret);
     return 0;
 }
 

@@ -110,6 +110,17 @@ message IOEvent {
   // Socket addresses (host byte order for ports)
   uint32 local_port = 11;
   uint32 remote_port = 12;
+
+  // Native call stack at syscall time (from bpf_get_stack).
+  // Indices into frame_table. Shows the C call chain:
+  // e.g. read() ← trilogy_sock_read() ← trilogy_query()
+  repeated uint32 native_frame_ids = 13;
+
+  // Ruby call stack captured at GVL SUSPENDED, just before this I/O.
+  // Indices into frame_table. Shows the Ruby code that initiated the I/O:
+  // e.g. PostsController#index → ActiveRecord → Trilogy::Client#query
+  // Combined with native_frame_ids, produces a unified call tree.
+  repeated uint32 ruby_context_frame_ids = 14;
 }
 
 // SchedEvent is an off-CPU period observed by BPF sched_tracer.

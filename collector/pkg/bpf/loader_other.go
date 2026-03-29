@@ -25,4 +25,5 @@ func (r *RealBPF) DetachPID(_ uint32) error { return fmt.Errorf("BPF not support
 func (r *RealBPF) ReadRingBuffer(_ []byte) (int, error) {
 	return 0, fmt.Errorf("BPF not supported on this platform")
 }
-func (r *RealBPF) Close() error { return nil }
+func (r *RealBPF) KtimeOffsetNs() int64 { return 0 }
+func (r *RealBPF) Close() error         { return nil }

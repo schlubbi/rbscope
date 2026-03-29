@@ -7,7 +7,10 @@
 package timeline
 
 import (
+	"fmt"
+	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/schlubbi/rbscope/collector/pkg/collector"
@@ -17,9 +20,11 @@ import (
 
 // Builder accumulates raw BPF events and produces a Capture proto.
 type Builder struct {
-	threads map[uint32]*threadBuilder // TID → builder
-	strings *stringTable
-	frames  *frameTable
+	threads         map[uint32]*threadBuilder            // TID → builder
+	threadNames     map[uint32]string                    // TID → name (cached at first sight)
+	suspendedStacks map[uint32][]*collector.GVLStackEvent // TID → time-sorted SUSPENDED stacks
+	strings         *stringTable
+	frames          *frameTable
 
 	startTime time.Time
 	pid       uint32
@@ -35,15 +40,17 @@ type Builder struct {
 func NewBuilder(service, hostname string, pid, frequencyHz uint32) *Builder {
 	st := newStringTable()
 	return &Builder{
-		threads:        make(map[uint32]*threadBuilder),
-		strings:        st,
-		frames:         newFrameTable(st),
-		startTime:      time.Now(),
-		pid:            pid,
-		service:        service,
-		hostname:       hostname,
-		frequency:      frequencyHz,
-		idleClassifier: NewIdleClassifier(),
+		threads:         make(map[uint32]*threadBuilder),
+		threadNames:     make(map[uint32]string),
+		suspendedStacks: make(map[uint32][]*collector.GVLStackEvent),
+		strings:         st,
+		frames:          newFrameTable(st),
+		startTime:       time.Now(),
+		pid:             pid,
+		service:         service,
+		hostname:        hostname,
+		frequency:       frequencyHz,
+		idleClassifier:  NewIdleClassifier(),
 	}
 }
 
@@ -55,9 +62,13 @@ func (b *Builder) SetResolver(r *symbols.Resolver) {
 }
 
 // Ingest processes a decoded BPF event, routing it to the correct thread.
+// Events from PIDs other than the target are silently dropped (handles
+// Ingest processes a decoded BPF event, routing it to the correct thread.
+// Events may come from forked children of the target PID (uprobe inheritance).
 func (b *Builder) Ingest(event any) {
 	switch ev := event.(type) {
 	case *collector.RubySampleEvent:
+		b.ensureThreadName(ev.TID, ev.PID)
 		tb := b.thread(ev.TID)
 		frames := collector.ParseInlineStack(ev.StackData)
 		frameIDs := make([]uint32, 0, len(frames)+len(ev.NativeStackIPs))
@@ -76,7 +87,7 @@ func (b *Builder) Ingest(event any) {
 		sample := &pb.Sample{
 			TimestampNs: ev.Timestamp,
 			FrameIds:    frameIDs,
-			Weight:      1,
+			Weight:      ev.Weight,
 		}
 		tb.samples = append(tb.samples, sample)
 
@@ -114,6 +125,12 @@ func (b *Builder) Ingest(event any) {
 				BytesReceived: ev.TCPStats.BytesReceived,
 			}
 		}
+		// Resolve native stack IPs from bpf_get_stack (syscall-time C stack)
+		if len(ev.NativeStackIPs) > 0 && b.resolver != nil {
+			ioEvent.NativeFrameIds = b.resolveNativeStack(ev.NativeStackIPs)
+		}
+		// Ruby context correlation deferred to Build() — GVL stack events
+		// arrive from a different ring buffer and may not be present yet.
 		tb.ioEvents = append(tb.ioEvents, ioEvent)
 		tb.rawIOEvents = append(tb.rawIOEvents, ev)
 
@@ -146,6 +163,78 @@ func (b *Builder) Ingest(event any) {
 			TimestampNs: ev.TimestampNs,
 			State:       pb.GVLState(ev.GVLState),
 		})
+
+	case *collector.GVLStackEvent:
+		// Store all Ruby stacks captured at GVL SUSPENDED for this TID.
+		// They're correlated with I/O events by timestamp during Build().
+		b.suspendedStacks[ev.TID] = append(b.suspendedStacks[ev.TID], ev)
+	}
+}
+
+// parseAndInternSuspendedStack parses a serialized InlineStack (format v2)
+// from a GVL SUSPENDED event and interns the frames into the capture's
+// frame table. Returns frame IDs in leaf-first order (same as samples).
+func (b *Builder) parseAndInternSuspendedStack(data []byte) []uint32 {
+	frames := collector.ParseInlineStack(data)
+	if len(frames) == 0 {
+		return nil
+	}
+	ids := make([]uint32, 0, len(frames))
+	for _, f := range frames {
+		id := b.frames.Intern(f.Label, f.Path, f.Line)
+		ids = append(ids, uint32(id))
+	}
+	return ids
+}
+
+// findSuspendedStack finds the most recent GVL SUSPENDED stack that fired
+// before the given timestamp. Uses binary search on the time-sorted list.
+// Returns nil if no stack was captured before that time.
+func findSuspendedStack(stacks []*collector.GVLStackEvent, ioTimestampNs uint64) *collector.GVLStackEvent {
+	if len(stacks) == 0 {
+		return nil
+	}
+	// Binary search: find the rightmost stack with timestamp <= ioTimestampNs
+	lo, hi := 0, len(stacks)-1
+	result := -1
+	for lo <= hi {
+		mid := lo + (hi-lo)/2
+		if stacks[mid].TimestampNs <= ioTimestampNs {
+			result = mid
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	if result < 0 {
+		return nil
+	}
+	return stacks[result]
+}
+
+// correlateIOWithSuspendedStacks matches each I/O event on a thread to
+// the Ruby stack captured at the most recent GVL SUSPENDED before the I/O.
+// This produces unified Ruby + native C call trees in the profiler.
+func (b *Builder) correlateIOWithSuspendedStacks(tid uint32, tb *threadBuilder) {
+	stacks, ok := b.suspendedStacks[tid]
+	if !ok || len(stacks) == 0 {
+		return
+	}
+
+	// Sort stacks by timestamp (ring buffer may deliver slightly out of order)
+	sort.Slice(stacks, func(i, j int) bool {
+		return stacks[i].TimestampNs < stacks[j].TimestampNs
+	})
+
+	for _, ioEvent := range tb.ioEvents {
+		ss := findSuspendedStack(stacks, ioEvent.TimestampNs)
+		if ss == nil {
+			continue
+		}
+		rubyFrameIDs := b.parseAndInternSuspendedStack(ss.StackData)
+		if len(rubyFrameIDs) > 0 {
+			ioEvent.RubyContextFrameIds = rubyFrameIDs
+		}
 	}
 }
 
@@ -175,6 +264,24 @@ func (b *Builder) resolveNativeStack(ips []uint64) []uint32 {
 	return frameIDs
 }
 
+// SuspendedStackCounts returns per-TID counts of GVL SUSPENDED stack events.
+func (b *Builder) SuspendedStackCounts() map[uint32]int {
+	counts := make(map[uint32]int, len(b.suspendedStacks))
+	for tid, stacks := range b.suspendedStacks {
+		counts[tid] = len(stacks)
+	}
+	return counts
+}
+
+// SampleCounts returns per-TID counts of regular Ruby samples.
+func (b *Builder) SampleCounts() map[uint32]int {
+	counts := make(map[uint32]int, len(b.threads))
+	for tid, tb := range b.threads {
+		counts[tid] = len(tb.samples)
+	}
+	return counts
+}
+
 // Build produces the final Capture with cross-references and thread states.
 func (b *Builder) Build() *pb.Capture {
 	endTime := time.Now()
@@ -199,6 +306,11 @@ func (b *Builder) Build() *pb.Capture {
 		// Cross-reference: IO → nearest sample
 		crossRefIOToSamples(tb)
 
+		// Correlate I/O events with GVL SUSPENDED Ruby stacks.
+		// Both are now sorted by timestamp, so we can match each I/O
+		// event to the most recent SUSPENDED stack on this TID.
+		b.correlateIOWithSuspendedStacks(tid, tb)
+
 		// Cross-reference: IO ↔ sched (with idle classification)
 		crossRefIOToSched(tb, b.idleClassifier)
 
@@ -211,6 +323,7 @@ func (b *Builder) Build() *pb.Capture {
 
 		tl := &pb.ThreadTimeline{
 			ThreadId:        tid,
+			ThreadNameIdx:   b.resolveThreadName(tid),
 			Samples:         tb.samples,
 			IoEvents:        tb.ioEvents,
 			SchedEvents:     tb.schedEvents,
@@ -250,6 +363,7 @@ func (b *Builder) Build() *pb.Capture {
 // Reset clears the builder for the next capture window.
 func (b *Builder) Reset() {
 	b.threads = make(map[uint32]*threadBuilder)
+	b.threadNames = make(map[uint32]string)
 	b.strings = newStringTable()
 	b.frames = newFrameTable(b.strings)
 	b.startTime = time.Now()
@@ -262,6 +376,83 @@ func (b *Builder) thread(tid uint32) *threadBuilder {
 		b.threads[tid] = tb
 	}
 	return tb
+}
+
+// ensureThreadName caches a thread name from /proc. Called during Ingest
+// while the thread is still alive. Tries both the target PID and the
+// event's actual PID (for forked workers).
+func (b *Builder) ensureThreadName(tid, eventPID uint32) {
+	if _, ok := b.threadNames[tid]; ok {
+		return
+	}
+
+	// Try as task of the target process
+	for _, pid := range []uint32{b.pid, eventPID} {
+		if pid == 0 {
+			continue
+		}
+		path := fmt.Sprintf("/proc/%d/task/%d/comm", pid, tid)
+		if data, err := os.ReadFile(path); err == nil {
+			if name := strings.TrimSpace(string(data)); name != "" {
+				b.threadNames[tid] = name
+				return
+			}
+		}
+	}
+
+	// Try as standalone process (main thread of forked worker)
+	path := fmt.Sprintf("/proc/%d/comm", tid)
+	if data, err := os.ReadFile(path); err == nil {
+		if name := strings.TrimSpace(string(data)); name != "" {
+			b.threadNames[tid] = name
+			return
+		}
+	}
+
+	// Scan NSpid for namespace TIDs
+	for _, pid := range []uint32{b.pid, eventPID} {
+		if pid == 0 {
+			continue
+		}
+		taskDir := fmt.Sprintf("/proc/%d/task", pid)
+		entries, err := os.ReadDir(taskDir)
+		if err != nil {
+			continue
+		}
+		tidStr := fmt.Sprintf("%d", tid)
+		for _, e := range entries {
+			statusPath := fmt.Sprintf("%s/%s/status", taskDir, e.Name())
+			data, err := os.ReadFile(statusPath)
+			if err != nil {
+				continue
+			}
+			for _, line := range strings.Split(string(data), "\n") {
+				if !strings.HasPrefix(line, "NSpid:") {
+					continue
+				}
+				fields := strings.Fields(line)
+				if len(fields) >= 2 && fields[len(fields)-1] == tidStr {
+					commPath := fmt.Sprintf("%s/%s/comm", taskDir, e.Name())
+					if commData, err := os.ReadFile(commPath); err == nil {
+						if name := strings.TrimSpace(string(commData)); name != "" {
+							b.threadNames[tid] = name
+							return
+						}
+					}
+				}
+				break
+			}
+		}
+	}
+}
+
+// resolveThreadName returns the interned string table index for a thread's name.
+// Uses the name cached during Ingest(), falls back to "thread-<tid>".
+func (b *Builder) resolveThreadName(tid uint32) uint32 {
+	if name, ok := b.threadNames[tid]; ok {
+		return uint32(b.strings.Intern(name))
+	}
+	return uint32(b.strings.Intern(fmt.Sprintf("thread-%d", tid)))
 }
 
 type threadBuilder struct {
