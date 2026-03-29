@@ -363,8 +363,17 @@ func buildExporters(logger *slog.Logger) ([]collector.Exporter, error) {
 	for _, name := range names {
 		switch strings.TrimSpace(name) {
 		case "pyroscope":
-			logger.Info("enabling pyroscope exporter", "url", flagPyroscopeURL)
-			exporters = append(exporters, export.NewPyroscopePushExporter(export.PyroscopePushConfig{
+			logger.Info("enabling pyroscope exporter (unified stacks)", "url", flagPyroscopeURL)
+			hostname, _ := os.Hostname()
+			tb := timeline.NewBuilder("rbscope", hostname, flagPID, uint32(flagFrequency)) //nolint:gosec // frequency is always small positive
+			if flagPID != 0 {
+				if resolver, err := symbols.NewResolver(flagPID); err == nil {
+					tb.SetResolver(resolver)
+					logger.Info("native stack resolution enabled", "pid", flagPID)
+				}
+			}
+			exporters = append(exporters, export.NewBuilderPyroscopeExporter(export.BuilderPyroscopeConfig{
+				Builder:    tb,
 				ServerURL:  flagPyroscopeURL,
 				AppName:    "rbscope.cpu",
 				FlushEvery: 10 * time.Second,
