@@ -75,7 +75,7 @@ module Rbscope
   # Return current sampling statistics.
   #
   # @return [Hash] with keys :frequency_hz, :avg_sample_ns, :sample_count,
-  #   :max_frequency_hz, :cache_hit_count
+  #   :max_frequency_hz, :cache_hit_count, :gvl_event_count
   def self.sampling_stats
     freq, avg_ns, count, max_freq, cache_hits = Native.sampling_stats
     {
@@ -83,7 +83,29 @@ module Rbscope
       avg_sample_ns: avg_ns,
       sample_count: count,
       max_frequency_hz: max_freq,
-      cache_hit_count: cache_hits
+      cache_hit_count: cache_hits,
+      gvl_event_count: Native.gvl_event_count
     }
+  end
+
+  # Enable GVL (Global VM Lock) profiling.
+  #
+  # Registers a thread event hook that fires USDT probes on GVL
+  # acquire/release events. The BPF collector measures wait duration
+  # and identifies which thread held the lock.
+  #
+  # Must be called from the main thread. Safe to call multiple times.
+  # Requires Ruby 3.2+.
+  #
+  # @return [Boolean] true if enabled successfully
+  def self.enable_gvl_profiling
+    Native.enable_gvl_profiling
+  end
+
+  # Check if GVL profiling is active.
+  #
+  # @return [Boolean]
+  def self.gvl_profiling?
+    Native.gvl_profiling_enabled?
   end
 end

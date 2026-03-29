@@ -496,3 +496,50 @@ func TestBuilderIOEventFileType(t *testing.T) {
 		t.Errorf("TcpStats should be nil for file, got %+v", ioev.TcpStats)
 	}
 }
+
+func TestBuilder_GVLEvents(t *testing.T) {
+	b := NewBuilder("test", "host", 1234, 99)
+
+	// Ingest GVL wait events
+	b.Ingest(&collector.GVLWaitEvent{
+		EventHeader: collector.EventHeader{Type: collector.EventGVLWait, PID: 1234, TID: 100},
+		WaitNs:      5_000_000,
+		TimestampNs: 2_000_000,
+		ThreadValue: 42,
+	})
+	b.Ingest(&collector.GVLWaitEvent{
+		EventHeader: collector.EventHeader{Type: collector.EventGVLWait, PID: 1234, TID: 100},
+		WaitNs:      3_000_000,
+		TimestampNs: 8_000_000,
+		ThreadValue: 42,
+	})
+
+	capture := b.Build()
+
+	// Find thread 100
+	var thread *pb.ThreadTimeline
+	for _, tl := range capture.Threads {
+		if tl.ThreadId == 100 {
+			thread = tl
+			break
+		}
+	}
+	if thread == nil {
+		t.Fatal("thread 100 not found")
+	}
+
+	if len(thread.GvlEvents) != 2 {
+		t.Fatalf("expected 2 GVL events, got %d", len(thread.GvlEvents))
+	}
+
+	// Should be sorted by timestamp
+	if thread.GvlEvents[0].TimestampNs != 2_000_000 {
+		t.Errorf("first event timestamp: got %d", thread.GvlEvents[0].TimestampNs)
+	}
+	if thread.GvlEvents[0].WaitNs != 5_000_000 {
+		t.Errorf("first event wait_ns: got %d", thread.GvlEvents[0].WaitNs)
+	}
+	if thread.GvlEvents[1].TimestampNs != 8_000_000 {
+		t.Errorf("second event timestamp: got %d", thread.GvlEvents[1].TimestampNs)
+	}
+}

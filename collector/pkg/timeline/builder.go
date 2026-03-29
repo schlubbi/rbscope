@@ -130,6 +130,15 @@ func (b *Builder) Ingest(event any) {
 		// For now, just record the raw event.
 		tb := b.thread(ev.TID)
 		_ = tb // placeholder for span correlation
+
+	case *collector.GVLWaitEvent:
+		tb := b.thread(ev.TID)
+		gvlEvent := &pb.GVLEvent{
+			TimestampNs:    ev.TimestampNs,
+			WaitNs:         ev.WaitNs,
+			HolderThreadId: 0, // Cross-thread correlation done in Build()
+		}
+		tb.gvlEvents = append(tb.gvlEvents, gvlEvent)
 	}
 }
 
@@ -176,6 +185,9 @@ func (b *Builder) Build() *pb.Capture {
 		sort.Slice(tb.schedEvents, func(i, j int) bool {
 			return tb.schedEvents[i].TimestampNs < tb.schedEvents[j].TimestampNs
 		})
+		sort.Slice(tb.gvlEvents, func(i, j int) bool {
+			return tb.gvlEvents[i].TimestampNs < tb.gvlEvents[j].TimestampNs
+		})
 
 		// Cross-reference: IO → nearest sample
 		crossRefIOToSamples(tb)
@@ -191,6 +203,7 @@ func (b *Builder) Build() *pb.Capture {
 			Samples:     tb.samples,
 			IoEvents:    tb.ioEvents,
 			SchedEvents: tb.schedEvents,
+			GvlEvents:   tb.gvlEvents,
 			SpanEvents:  tb.spanEvents,
 			States:      states,
 		}
@@ -242,6 +255,7 @@ type threadBuilder struct {
 	samples     []*pb.Sample
 	ioEvents    []*pb.IOEvent
 	schedEvents []*pb.SchedEvent
+	gvlEvents   []*pb.GVLEvent
 	spanEvents  []*pb.SpanEvent
 	rawIOEvents []*collector.IOEvent // kept for idle classification
 }

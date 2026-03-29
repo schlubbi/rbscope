@@ -471,3 +471,50 @@ func TestParseEvent_RubySampleNoNativeStack(t *testing.T) {
 		t.Errorf("expected no native IPs, got %d", len(sample.NativeStackIPs))
 	}
 }
+
+func TestParseGVLWaitEvent(t *testing.T) {
+	data := make([]byte, 40)
+	binary.LittleEndian.PutUint32(data[0:4], uint32(EventGVLWait))
+	binary.LittleEndian.PutUint32(data[4:8], 1234)   // pid
+	binary.LittleEndian.PutUint32(data[8:12], 5678)   // tid
+	binary.LittleEndian.PutUint32(data[12:16], 0)      // pad
+	binary.LittleEndian.PutUint64(data[16:24], 5_000_000) // wait_ns = 5ms
+	binary.LittleEndian.PutUint64(data[24:32], 99_000_000) // timestamp_ns
+	binary.LittleEndian.PutUint64(data[32:40], 0xdeadbeef) // thread_value
+
+	evt, err := ParseEvent(data)
+	if err != nil {
+		t.Fatalf("ParseEvent failed: %v", err)
+	}
+
+	gvl, ok := evt.(*GVLWaitEvent)
+	if !ok {
+		t.Fatalf("expected *GVLWaitEvent, got %T", evt)
+	}
+
+	if gvl.PID != 1234 {
+		t.Errorf("PID: got %d, want 1234", gvl.PID)
+	}
+	if gvl.TID != 5678 {
+		t.Errorf("TID: got %d, want 5678", gvl.TID)
+	}
+	if gvl.WaitNs != 5_000_000 {
+		t.Errorf("WaitNs: got %d, want 5000000", gvl.WaitNs)
+	}
+	if gvl.TimestampNs != 99_000_000 {
+		t.Errorf("TimestampNs: got %d, want 99000000", gvl.TimestampNs)
+	}
+	if gvl.ThreadValue != 0xdeadbeef {
+		t.Errorf("ThreadValue: got %x, want deadbeef", gvl.ThreadValue)
+	}
+}
+
+func TestParseGVLWaitEvent_TooShort(t *testing.T) {
+	data := make([]byte, 20) // too short for 40-byte event
+	binary.LittleEndian.PutUint32(data[0:4], uint32(EventGVLWait))
+
+	_, err := ParseEvent(data)
+	if err == nil {
+		t.Error("expected error for short GVL event")
+	}
+}

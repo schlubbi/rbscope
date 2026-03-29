@@ -62,6 +62,17 @@ extern "C" {
     // Use Ruby's own string accessor — bypasses rb-sys struct layout
     // which is broken on Ruby 4.0 (reads len field as embedded string data).
     fn rb_string_value_ptr(val_ptr: *mut rb_sys::VALUE) -> *const std::os::raw::c_char;
+
+    // Thread event hook API (Ruby 3.2+) for GVL profiling.
+    fn rb_internal_thread_add_event_hook(
+        func: unsafe extern "C" fn(
+            event: rb_sys::rb_event_flag_t,
+            event_data: *const rb_sys::rb_internal_thread_event_data_t,
+            user_data: *mut std::ffi::c_void,
+        ),
+        events: rb_sys::rb_event_flag_t,
+        data: *mut std::ffi::c_void,
+    ) -> *mut std::ffi::c_void; // rb_internal_thread_event_hook_t*
 }
 
 /// Maximum number of Ruby frames to capture per sample.
@@ -108,6 +119,11 @@ static LAST_STACK_HASH: AtomicU64 = AtomicU64::new(0);
 static CACHED_WEIGHT: AtomicU32 = AtomicU32::new(0);
 /// Number of samples skipped via cache hits (observable).
 static CACHE_HIT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Whether GVL profiling is enabled (hook registered).
+static GVL_PROFILING_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Count of GVL events fired (observable).
+static GVL_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 struct SamplerState {
     thread_handle: Option<thread::JoinHandle<()>>,
@@ -424,6 +440,91 @@ pub fn register_postponed_job() {
         )
     };
     POSTPONED_JOB_HANDLE.store(handle, Ordering::SeqCst);
+}
+
+// ---------------------------------------------------------------------------
+// GVL event hook (Ruby 3.2+)
+// ---------------------------------------------------------------------------
+
+/// GVL thread event hook callback.
+///
+/// CRITICAL SAFETY CONSTRAINTS:
+/// - READY fires WITHOUT the GVL held — must NOT call any Ruby API
+/// - RESUMED fires just after GVL acquisition
+/// - SUSPENDED fires just before GVL release
+/// - Only reads registers/atomics and fires the USDT probe
+///
+/// The BPF collector handles all the intelligence (wait duration
+/// computation, holder identification, cross-thread correlation).
+unsafe extern "C" fn gvl_event_callback(
+    event: rb_sys::rb_event_flag_t,
+    _event_data: *const rb_sys::rb_internal_thread_event_data_t,
+    _user_data: *mut std::ffi::c_void,
+) {
+    // Map Ruby event flags to our probe event types
+    let event_type = match event as u32 {
+        2 => probes::GVL_EVENT_READY,     // RUBY_INTERNAL_THREAD_EVENT_READY
+        4 => probes::GVL_EVENT_RESUMED,   // RUBY_INTERNAL_THREAD_EVENT_RESUMED
+        8 => probes::GVL_EVENT_SUSPENDED, // RUBY_INTERNAL_THREAD_EVENT_SUSPENDED
+        _ => return, // ignore STARTED/EXITED
+    };
+
+    // Get native thread ID and timestamp — no Ruby API calls needed
+    let tid = libc::gettid() as u32;
+
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+    let timestamp_ns = (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64);
+
+    // Thread VALUE — safe to read from event_data even without GVL
+    // (it's a pointer to a struct with a single VALUE field, and
+    // VALUE is just a usize/pointer that doesn't need GVL to read)
+    let thread_value = if !_event_data.is_null() {
+        (*_event_data).thread as u64
+    } else {
+        0
+    };
+
+    probes::fire_gvl_event(event_type, tid, timestamp_ns, thread_value);
+    GVL_EVENT_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Register the GVL event hook. Must be called from Ruby main thread.
+/// Safe to call multiple times — only registers once.
+pub fn enable_gvl_profiling() -> bool {
+    if GVL_PROFILING_ENABLED.load(Ordering::Relaxed) {
+        return true; // already enabled
+    }
+
+    // Register for READY (wants GVL), RESUMED (got GVL), SUSPENDED (released GVL)
+    let events: rb_sys::rb_event_flag_t =
+        (rb_sys::RUBY_INTERNAL_THREAD_EVENT_READY
+            | rb_sys::RUBY_INTERNAL_THREAD_EVENT_RESUMED
+            | rb_sys::RUBY_INTERNAL_THREAD_EVENT_SUSPENDED) as rb_sys::rb_event_flag_t;
+
+    unsafe {
+        let hook = rb_internal_thread_add_event_hook(
+            gvl_event_callback,
+            events,
+            std::ptr::null_mut(),
+        );
+        if hook.is_null() {
+            return false;
+        }
+    }
+
+    GVL_PROFILING_ENABLED.store(true, Ordering::Relaxed);
+    true
+}
+
+/// Check if GVL profiling is enabled.
+pub fn gvl_profiling_enabled() -> bool {
+    GVL_PROFILING_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Get the count of GVL events fired.
+pub fn gvl_event_count() -> u64 {
+    GVL_EVENT_COUNT.load(Ordering::Relaxed)
 }
 
 /// Check if we're in a forked child that inherited stale state.

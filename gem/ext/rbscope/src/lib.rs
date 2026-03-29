@@ -60,6 +60,9 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     native.define_singleton_method("set_overhead_target", function!(sampler::set_overhead_target, 1))?;
     native.define_singleton_method("set_dynamic_rate", function!(sampler::set_dynamic_rate, 1))?;
     native.define_singleton_method("sampling_stats", function!(sampler::sampling_stats, 0))?;
+    native.define_singleton_method("enable_gvl_profiling", function!(sampler::enable_gvl_profiling, 0))?;
+    native.define_singleton_method("gvl_profiling_enabled?", function!(sampler::gvl_profiling_enabled, 0))?;
+    native.define_singleton_method("gvl_event_count", function!(sampler::gvl_event_count, 0))?;
 
     // Register the postponed job with the Ruby VM. This must happen on
     // the main thread during init — the handle is used later by the

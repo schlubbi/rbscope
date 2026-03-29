@@ -500,6 +500,24 @@ func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) MarkersTable {
 		})
 	}
 
+	// GVL wait markers
+	for _, gvl := range tl.GvlEvents {
+		endMs := tb.nsToMs(gvl.TimestampNs)
+		startMs := endMs - float64(gvl.WaitNs)/1e6
+		if startMs < 0 {
+			startMs = 0
+		}
+
+		nameIdx := tb.internString("GVL Wait")
+		data = append(data, []any{
+			nameIdx, startMs, endMs, MarkerPhaseInterval, catGVL,
+			map[string]any{
+				"type":   "rbscope-gvl",
+				"waitMs": float64(gvl.WaitNs) / 1e6,
+			},
+		})
+	}
+
 	// Span event markers
 	for _, span := range tl.SpanEvents {
 		startMs := tb.nsToMs(span.StartNs)
@@ -731,6 +749,16 @@ func defaultMarkerSchemas() []MarkerSchema {
 			Data: []SchemaField{
 				{Key: "offCpuMs", Label: "Duration", Format: "duration"},
 				{Key: "reason", Label: "Reason", Format: "string"},
+			},
+		},
+		{
+			Name:         "rbscope-gvl",
+			Display:      []string{"marker-chart", "marker-table", "timeline-overview"},
+			TooltipLabel: "GVL Wait: {marker.data.waitMs}ms",
+			TableLabel:   "GVL Wait {marker.data.waitMs}ms",
+			ChartLabel:   "GVL",
+			Data: []SchemaField{
+				{Key: "waitMs", Label: "Wait Duration", Format: "duration"},
 			},
 		},
 		{

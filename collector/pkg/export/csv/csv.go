@@ -34,6 +34,9 @@ func Export(capture *pb.Capture, dir string) error {
 	if err := writeSched(capture, dir); err != nil {
 		return fmt.Errorf("write sched csv: %w", err)
 	}
+	if err := writeGVL(capture, dir); err != nil {
+		return fmt.Errorf("write gvl csv: %w", err)
+	}
 
 	return nil
 }
@@ -161,6 +164,41 @@ func writeSched(capture *pb.Capture, dir string) error {
 				u32(tl.ThreadId),
 				strconv.FormatUint(sched.OffCpuNs, 10),
 				sched.Reason.String(),
+			}
+			if err := w.Write(row); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func writeGVL(capture *pb.Capture, dir string) error {
+	path := filepath.Join(dir, "rbscope_gvl.csv")
+	f, err := os.Create(path) // #nosec G304
+	if err != nil {
+		return err
+	}
+	defer f.Close() //nolint:errcheck
+
+	w := csv.NewWriter(f)
+	defer w.Flush()
+
+	header := []string{
+		"timestamp_ns", "pid", "tid",
+		"wait_ns",
+	}
+	if err := w.Write(header); err != nil {
+		return err
+	}
+
+	for _, tl := range capture.Threads {
+		for _, gvl := range tl.GvlEvents {
+			row := []string{
+				strconv.FormatUint(gvl.TimestampNs, 10),
+				u32(capture.Header.Pid),
+				u32(tl.ThreadId),
+				strconv.FormatUint(gvl.WaitNs, 10),
 			}
 			if err := w.Write(row); err != nil {
 				return err

@@ -12,6 +12,7 @@ const (
 	EventRubyAlloc  EventType = 3
 	EventIO         EventType = 4
 	EventSched      EventType = 5
+	EventGVLWait    EventType = 6
 )
 
 // EventType identifies the kind of event produced by the BPF programs.
@@ -117,6 +118,15 @@ type SchedEvent struct {
 	RunqLatNs uint64
 }
 
+// GVLWaitEvent captures a GVL wait duration.
+// Layout: event_type(4) + pid(4) + tid(4) + pad(4) + wait_ns(8) + timestamp_ns(8) + thread_value(8) = 40 bytes
+type GVLWaitEvent struct {
+	EventHeader
+	WaitNs      uint64 // how long the thread waited for the GVL
+	TimestampNs uint64 // when the thread acquired the GVL
+	ThreadValue uint64 // Ruby thread VALUE for cross-referencing
+}
+
 // ParseEvent decodes raw bytes from the BPF ring buffer into a typed event.
 // It returns one of: *RubySampleEvent, *RubySpanEvent, *IOEvent, *SchedEvent.
 func ParseEvent(data []byte) (any, error) {
@@ -139,6 +149,8 @@ func ParseEvent(data []byte) (any, error) {
 	case EventSched:
 		hdr := parseHeader(data)
 		return parseSchedEvent(hdr, data)
+	case EventGVLWait:
+		return parseGVLWaitEvent(data)
 	default:
 		return nil, fmt.Errorf("unknown event type: %d", eventType)
 	}
@@ -411,4 +423,22 @@ func IoOpName(op uint32) string {
 func formatIPv4(addr uint32) string {
 	return fmt.Sprintf("%d.%d.%d.%d",
 		addr&0xff, (addr>>8)&0xff, (addr>>16)&0xff, (addr>>24)&0xff)
+}
+
+// parseGVLWaitEvent parses a GVL wait event from the BPF ring buffer.
+// Layout: event_type(4) + pid(4) + tid(4) + pad(4) + wait_ns(8) + timestamp_ns(8) + thread_value(8) = 40 bytes
+func parseGVLWaitEvent(data []byte) (*GVLWaitEvent, error) {
+	if len(data) < 40 {
+		return nil, fmt.Errorf("GVL event too short: %d bytes (need 40)", len(data))
+	}
+	return &GVLWaitEvent{
+		EventHeader: EventHeader{
+			Type: EventGVLWait,
+			PID:  binary.LittleEndian.Uint32(data[4:8]),
+			TID:  binary.LittleEndian.Uint32(data[8:12]),
+		},
+		WaitNs:      binary.LittleEndian.Uint64(data[16:24]),
+		TimestampNs: binary.LittleEndian.Uint64(data[24:32]),
+		ThreadValue: binary.LittleEndian.Uint64(data[32:40]),
+	}, nil
 }
