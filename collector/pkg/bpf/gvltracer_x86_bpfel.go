@@ -78,6 +78,7 @@ type gvltracerProgramSpecs struct {
 type gvltracerMapSpecs struct {
 	GvlDropCount   *ebpf.MapSpec `ebpf:"gvl_drop_count"`
 	GvlEvents      *ebpf.MapSpec `ebpf:"gvl_events"`
+	GvlStackEvents *ebpf.MapSpec `ebpf:"gvl_stack_events"`
 	GvlThreadState *ebpf.MapSpec `ebpf:"gvl_thread_state"`
 }
 
@@ -109,6 +110,7 @@ func (o *gvltracerObjects) Close() error {
 type gvltracerMaps struct {
 	GvlDropCount   *ebpf.Map `ebpf:"gvl_drop_count"`
 	GvlEvents      *ebpf.Map `ebpf:"gvl_events"`
+	GvlStackEvents *ebpf.Map `ebpf:"gvl_stack_events"`
 	GvlThreadState *ebpf.Map `ebpf:"gvl_thread_state"`
 }
 
@@ -116,6 +118,7 @@ func (m *gvltracerMaps) Close() error {
 	return _GvltracerClose(
 		m.GvlDropCount,
 		m.GvlEvents,
+		m.GvlStackEvents,
 		m.GvlThreadState,
 	)
 }

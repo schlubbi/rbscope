@@ -38,19 +38,19 @@ func (o *bpfObjects) Close() error {
 
 // RealBPF is the Linux eBPF-backed implementation of collector.BPFProgram.
 type RealBPF struct {
-	objPath       string
-	objs          bpfObjects
-	reader        *ringbuf.Reader
-	links         []link.Link
-	ioObjs        *iotracerObjects
-	ioReader      *ringbuf.Reader
-	ioLinks       []link.Link
-	gvlObjs       *gvltracerObjects
-	gvlReader     *ringbuf.Reader
+	objPath        string
+	objs           bpfObjects
+	reader         *ringbuf.Reader
+	links          []link.Link
+	ioObjs         *iotracerObjects
+	ioReader       *ringbuf.Reader
+	ioLinks        []link.Link
+	gvlObjs        *gvltracerObjects
+	gvlReader      *ringbuf.Reader
 	gvlStackReader *ringbuf.Reader // separate ring buffer for large GVL stack events
-	gvlLinks      []link.Link
-	readToggle    int   // rotates reads across ring buffers
-	ktimeOffsetNs int64 // wallclock_ns - ktime_ns, add to ktime to get epoch
+	gvlLinks       []link.Link
+	readToggle     int   // rotates reads across ring buffers
+	ktimeOffsetNs  int64 // wallclock_ns - ktime_ns, add to ktime to get epoch
 }
 
 // Compile-time interface check.
@@ -177,7 +177,7 @@ func (r *RealBPF) loadGVLTracer() error {
 	// from being starved by the high volume of small state change events.
 	stackRd, err := ringbuf.NewReader(gvlObjs.GvlStackEvents)
 	if err != nil {
-		rd.Close() //nolint:errcheck
+		rd.Close()      //nolint:errcheck
 		gvlObjs.Close() //nolint:errcheck
 		r.gvlObjs = nil
 		return fmt.Errorf("open gvl stack ring buffer: %w", err)
@@ -269,7 +269,7 @@ func findRbscopeContainerPath(pid uint32) (string, error) {
 			continue
 		}
 		base := filepath.Base(pathname)
-		if (base == "rbscope.so" || base == "rbscope.bundle") {
+		if base == "rbscope.so" || base == "rbscope.bundle" {
 			return pathname, nil
 		}
 	}

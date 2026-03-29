@@ -216,15 +216,16 @@ func findSuspendedStack(stacks []*collector.GVLStackEvent, ioTimestampNs uint64)
 			hi = mid - 1
 		}
 	}
-	if result < 0 {
+	if result < 0 || result >= len(stacks) {
 		return nil
 	}
+	s := stacks[result] // #nosec G602 -- result bounds checked above
 	// Check temporal proximity — reject if too far from the I/O event.
-	gap := ioTimestampNs - stacks[result].TimestampNs
+	gap := ioTimestampNs - s.TimestampNs
 	if gap > suspendedStackMaxGapNs {
 		return nil
 	}
-	return stacks[result]
+	return s
 }
 
 // correlateIOWithSuspendedStacks matches each I/O event on a thread to
