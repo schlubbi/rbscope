@@ -86,6 +86,7 @@ message Sample {
   repeated uint32 frame_ids = 2;  // indices into Capture.frame_table, leaf first
   OTelContext otel_context = 3;   // trace/span active at sample time (optional)
   uint32 weight = 4;              // for dynamic sampling rate (default 1)
+  bool is_io_sample = 5;          // true for synthetic samples from I/O events
 }
 
 // IOEvent is an I/O operation observed by BPF io_tracer.

@@ -444,6 +444,7 @@ func TestCategorizeFrame(t *testing.T) {
 
 		// cfunc
 		{"<cfunc>", catCfunc, "cfunc"},
+		{"(unknown)", catCfunc, "cfunc (unknown)"},
 
 		// Native
 		{"libtrilogy.so", catNative, "native .so"},
@@ -459,4 +460,110 @@ func TestCategorizeFrame(t *testing.T) {
 			t.Errorf("%s (%q): got category %d, want %d", tt.desc, tt.path, cat, tt.wantCat)
 		}
 	}
+}
+
+func TestBuild_IOSamplesInFlameGraph(t *testing.T) {
+	// Build a Capture with I/O synthetic samples (IsIoSample=true)
+	capture := &pb.Capture{
+		Header: &pb.CaptureHeader{
+			Version:           2,
+			ServiceName:       "io-test",
+			Hostname:          "host",
+			Pid:               42,
+			StartTimeNs:       1_000_000_000_000,
+			EndTimeNs:         1_001_000_000_000,
+			SampleFrequencyHz: 99,
+		},
+		StringTable: []string{
+			"",                    // 0
+			"worker",              // 1
+			"Trilogy#query",       // 2
+			"lib/trilogy.rb",      // 3
+			"rb_trilogy_query",    // 4
+			"/usr/lib/trilogy.so", // 5
+			"write",               // 6
+			"/usr/lib/libc.so.6",  // 7
+		},
+		FrameTable: []*pb.StackFrame{
+			{FunctionNameIdx: 2, FileNameIdx: 3, LineNumber: 20}, // 0: Trilogy#query (Ruby)
+			{FunctionNameIdx: 4, FileNameIdx: 5, LineNumber: 0},  // 1: rb_trilogy_query (native)
+			{FunctionNameIdx: 6, FileNameIdx: 7, LineNumber: 0},  // 2: write (native)
+		},
+		Threads: []*pb.ThreadTimeline{
+			{
+				ThreadId:      100,
+				ThreadNameIdx: 1,
+				Samples: []*pb.Sample{
+					{
+						// Regular timer sample
+						TimestampNs: 1_000_010_000_000,
+						FrameIds:    []uint32{0}, // Trilogy#query
+						Weight:      1,
+					},
+					{
+						// Synthetic I/O sample: write → rb_trilogy_query → Trilogy#query
+						TimestampNs: 1_000_015_000_000,
+						FrameIds:    []uint32{2, 1, 0}, // leaf-first: write, rb_trilogy_query, Trilogy#query
+						Weight:      1,
+						IsIoSample:  true,
+					},
+				},
+			},
+		},
+	}
+
+	profile := Build(capture)
+
+	if len(profile.Threads) != 1 {
+		t.Fatalf("expected 1 thread, got %d", len(profile.Threads))
+	}
+
+	thread := profile.Threads[0]
+
+	// Should have 2 samples total
+	if len(thread.Samples.Data) != 2 {
+		t.Fatalf("expected 2 samples, got %d", len(thread.Samples.Data))
+	}
+
+	// Both should have non-nil stack references
+	for i, s := range thread.Samples.Data {
+		if s[0] == nil {
+			t.Errorf("sample[%d] has nil stack", i)
+		}
+	}
+
+	// Verify the I/O sample creates a deeper stack than the regular sample
+	regularStackIdx := thread.Samples.Data[0][0].(int)
+	ioStackIdx := thread.Samples.Data[1][0].(int)
+
+	// Count stack depth for each
+	regularDepth := stackDepth(thread.StackTable.Data, regularStackIdx)
+	ioDepth := stackDepth(thread.StackTable.Data, ioStackIdx)
+
+	if ioDepth <= regularDepth {
+		t.Errorf("I/O sample stack depth (%d) should be deeper than regular (%d)", ioDepth, regularDepth)
+	}
+
+	// I/O sample should have native frames categorized correctly
+	// The leaf frame (write from libc.so.6) should be catNative
+	leafStackEntry := thread.StackTable.Data[ioStackIdx]
+	leafFrameIdx := leafStackEntry[0].(int)
+	leafFrame := thread.FrameTable.Data[leafFrameIdx]
+	leafCat := leafFrame[6].(int) // category field
+	if leafCat != catNative {
+		t.Errorf("I/O leaf frame category: got %d, want %d (catNative)", leafCat, catNative)
+	}
+}
+
+func stackDepth(stackData [][]any, idx int) int {
+	depth := 0
+	for idx >= 0 && idx < len(stackData) {
+		depth++
+		entry := stackData[idx]
+		if entry[1] == nil {
+			break
+		}
+		idx = entry[1].(int)
+	}
+	return depth
 }

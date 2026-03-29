@@ -1,6 +1,10 @@
 package timeline
 
-import pb "github.com/schlubbi/rbscope/collector/pkg/proto/rbscopepb"
+import (
+	"strings"
+
+	pb "github.com/schlubbi/rbscope/collector/pkg/proto/rbscopepb"
+)
 
 // stringTable deduplicates strings and returns indices into a shared table.
 // Index 0 is always the empty string (protobuf convention).
@@ -75,4 +79,35 @@ func (ft *frameTable) Intern(funcName, fileName string, line uint32) uint32 {
 // Table returns the frame table slice.
 func (ft *frameTable) Table() []*pb.StackFrame {
 	return ft.table
+}
+
+// IsNative returns true if the frame at the given index looks like a
+// native C/system library frame (e.g., .so, .dylib, [vdso]) rather
+// than a Ruby source file. Uses the file path heuristic.
+func (ft *frameTable) IsNative(idx uint32) bool {
+	if int(idx) >= len(ft.table) {
+		return false
+	}
+	f := ft.table[idx]
+	path := ft.strings.Lookup(f.FileNameIdx)
+	return isNativePath(path)
+}
+
+// Lookup returns the string at the given index, or "" if out of range.
+func (st *stringTable) Lookup(idx uint32) string {
+	if int(idx) >= len(st.table) {
+		return ""
+	}
+	return st.table[idx]
+}
+
+// isNativePath returns true if the file path looks like a native library.
+func isNativePath(path string) bool {
+	if path == "" {
+		return false
+	}
+	return strings.HasSuffix(path, ".so") ||
+		strings.Contains(path, ".so.") ||
+		strings.HasSuffix(path, ".dylib") ||
+		strings.HasPrefix(path, "[")
 }

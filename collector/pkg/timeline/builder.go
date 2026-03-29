@@ -187,9 +187,19 @@ func (b *Builder) parseAndInternSuspendedStack(data []byte) []uint32 {
 	return ids
 }
 
+// suspendedStackMaxGapNs is the maximum time gap between a GVL SUSPENDED
+// stack and an I/O event for them to be considered from the same operation.
+// This must be wide enough to cover the full I/O wait: SUSPENDED fires at
+// GVL release (start of wait), while the io_tracer read/write fires at
+// syscall completion (end of wait). For a 5ms database query, the gap is
+// ~5ms; for a slow query or remote database, it could be 50-100ms.
+// The isPlausibleIOContext check prevents false matches.
+const suspendedStackMaxGapNs = 100_000_000 // 100ms
+
 // findSuspendedStack finds the most recent GVL SUSPENDED stack that fired
 // before the given timestamp. Uses binary search on the time-sorted list.
-// Returns nil if no stack was captured before that time.
+// Returns nil if no stack was captured before that time or if the nearest
+// stack is too far away (> suspendedStackMaxGapNs).
 func findSuspendedStack(stacks []*collector.GVLStackEvent, ioTimestampNs uint64) *collector.GVLStackEvent {
 	if len(stacks) == 0 {
 		return nil
@@ -206,10 +216,16 @@ func findSuspendedStack(stacks []*collector.GVLStackEvent, ioTimestampNs uint64)
 			hi = mid - 1
 		}
 	}
-	if result < 0 {
+	if result < 0 || result >= len(stacks) {
 		return nil
 	}
-	return stacks[result]
+	s := stacks[result] // #nosec G602 -- result bounds checked above
+	// Check temporal proximity — reject if too far from the I/O event.
+	gap := ioTimestampNs - s.TimestampNs
+	if gap > suspendedStackMaxGapNs {
+		return nil
+	}
+	return s
 }
 
 // correlateIOWithSuspendedStacks matches each I/O event on a thread to
@@ -239,8 +255,14 @@ func (b *Builder) correlateIOWithSuspendedStacks(tid uint32, tb *threadBuilder) 
 }
 
 // resolveNativeStack resolves native instruction pointers from bpf_get_stack
-// into frame table indices. Filters out Ruby VM internals (libruby.so) to
-// keep only C extension and system library frames.
+// into frame table indices. Filters out:
+//   - Ruby VM internals (libruby.so) — we have Ruby-level frames from the gem
+//   - rbscope's own probe functions (__rbscope_probe_*)
+//   - JIT anonymous regions ([anon:Ruby:rb_jit_reserve_addr_space])
+//   - Empty/anonymous frames
+//
+// Keeps C extension frames (libtrilogy, pitchfork_http.so, etc.) and
+// syscall entry points (read, write, etc. from libc).
 //
 // Native IPs from bpf_get_stack are in leaf-first order (innermost frame
 // first), which matches our frame_ids convention.
@@ -248,20 +270,231 @@ func (b *Builder) resolveNativeStack(ips []uint64) []uint32 {
 	var frameIDs []uint32
 	for _, ip := range ips {
 		funcName, libPath, isRubyVM := b.resolver.ResolveFunc(ip)
-		// Skip Ruby VM internals — we already have Ruby-level frames
-		// from the gem. We only want C extension frames (libtrilogy,
-		// libnokogiri, etc.) and system library frames (libc, libpthread).
-		if isRubyVM {
-			continue
-		}
-		// Skip empty/anonymous frames
-		if funcName == "" {
+		if shouldFilterNativeFrame(funcName, libPath, isRubyVM) {
 			continue
 		}
 		fid := b.frames.Intern(funcName, libPath, 0)
 		frameIDs = append(frameIDs, fid)
 	}
 	return frameIDs
+}
+
+// shouldFilterNativeFrame returns true if a resolved native frame should
+// be excluded from the profile output.
+func shouldFilterNativeFrame(funcName, libPath string, isRubyVM bool) bool {
+	// Ruby VM internals — we already have Ruby-level frames from the gem
+	if isRubyVM {
+		return true
+	}
+	// Empty/unresolved frames
+	if funcName == "" {
+		return true
+	}
+	// rbscope's own USDT probe functions
+	if strings.HasPrefix(funcName, "__rbscope_probe_") {
+		return true
+	}
+	// JIT-compiled Ruby code — anonymous memory regions from the JIT compiler.
+	// These show as "[anon:Ruby:rb_jit_reserve_addr_space]+0x..." and are the
+	// native representation of JIT'd Ruby methods. Filter for now; JIT frame
+	// resolution is a future feature.
+	if strings.Contains(libPath, "[anon:") || strings.Contains(funcName, "[anon:") {
+		return true
+	}
+	// Process startup frames (ld-linux, _start) — noise at bottom of stack
+	if funcName == "_start" || strings.HasPrefix(funcName, "_dl_") {
+		return true
+	}
+	return false
+}
+
+// ioSampleMaxGapNs is the maximum time gap between an I/O event and a
+// Ruby sample for them to be considered correlated. If the nearest Ruby
+// sample is older than this, we skip synthesis (the Ruby context is stale).
+const ioSampleMaxGapNs = 50_000_000 // 50ms
+
+// synthesizeIOSamples creates synthetic flame graph samples from I/O events.
+// Each I/O event that has a Ruby context (from GVL SUSPENDED correlation
+// or nearest timer sample) AND native frames (from bpf_get_stack at syscall
+// time) becomes a sample showing the unified call path:
+//
+//	PostsController#index → AR::exec_query → Trilogy#query   (Ruby context)
+//	  → rb_trilogy_query → trilogy_query_send → write         (native I/O stack)
+//
+// This is rbscope's unique capability: no other Ruby profiler can show
+// the full Ruby → C extension → syscall call path in a single flame chart.
+//
+// The Ruby context comes from the most recent GVL SUSPENDED stack or
+// nearest timer sample. For accuracy, we reject contexts that are clearly
+// from idle or unrelated I/O operations (e.g., SUSPENDED at IO#readpartial
+// used for a Trilogy MySQL I/O event).
+func (b *Builder) synthesizeIOSamples(tb *threadBuilder) {
+	for _, ioEvent := range tb.ioEvents {
+		// Need native frames to show something useful beyond what
+		// regular timer samples already provide.
+		if len(ioEvent.NativeFrameIds) == 0 {
+			continue
+		}
+
+		// Get Ruby context: prefer SUSPENDED stack (captured at GVL
+		// release, closest to the I/O), fall back to nearest timer sample.
+		rubyFrameIDs := ioEvent.RubyContextFrameIds
+		if len(rubyFrameIDs) > 0 && !b.isPlausibleIOContext(rubyFrameIDs, ioEvent.NativeFrameIds) {
+			// SUSPENDED stack is from a different operation — discard it.
+			rubyFrameIDs = nil
+		}
+
+		if len(rubyFrameIDs) == 0 {
+			// Fallback: use the nearest timer sample's Ruby frames.
+			sampleIdx := int(ioEvent.NearestSampleIdx)
+			if sampleIdx < len(tb.samples) {
+				sample := tb.samples[sampleIdx]
+				// Check temporal proximity — skip if too far apart.
+				var gap uint64
+				if sample.TimestampNs > ioEvent.TimestampNs {
+					gap = sample.TimestampNs - ioEvent.TimestampNs
+				} else {
+					gap = ioEvent.TimestampNs - sample.TimestampNs
+				}
+				if gap <= ioSampleMaxGapNs {
+					candidate := extractRubyFrameIDs(sample.FrameIds, b.frames)
+					if b.isPlausibleIOContext(candidate, ioEvent.NativeFrameIds) {
+						rubyFrameIDs = candidate
+					}
+				}
+			}
+		}
+
+		if len(rubyFrameIDs) == 0 {
+			continue
+		}
+
+		// Build unified stack: Ruby frames (leaf-first) + native I/O frames (leaf-first).
+		// The native frames from io_tracer are already leaf-first (syscall at [0]).
+		//
+		// In the flame graph this renders as:
+		//   root: <main> → bundler → pitchfork → Rails → Controller → AR → Trilogy#query
+		//   leaf: rb_trilogy_query → trilogy_query_send → write
+		unified := make([]uint32, 0, len(rubyFrameIDs)+len(ioEvent.NativeFrameIds))
+		unified = append(unified, ioEvent.NativeFrameIds...)
+		unified = append(unified, rubyFrameIDs...)
+
+		// Add as a synthetic sample with weight=1 (each I/O event
+		// represents one occurrence, not a timed sample).
+		tb.samples = append(tb.samples, &pb.Sample{
+			TimestampNs: ioEvent.TimestampNs,
+			FrameIds:    unified,
+			Weight:      1,
+			IsIoSample:  true,
+		})
+	}
+
+	// Re-sort samples since we appended synthetic ones at the end.
+	sort.Slice(tb.samples, func(i, j int) bool {
+		return tb.samples[i].TimestampNs < tb.samples[j].TimestampNs
+	})
+}
+
+// isPlausibleIOContext checks whether a Ruby stack is a plausible context
+// for an I/O event. Rejects idle stacks and stacks where the leaf frame
+// is a generic I/O cfunc that doesn't match the native call chain.
+//
+// For example, if the native stack is from Trilogy (rb_trilogy_query →
+// trilogy_query_send → write), a Ruby context with Trilogy::Client#query
+// is plausible. But a context with IO#readpartial (from HTTP parsing) is
+// from a different I/O operation and should be rejected.
+func (b *Builder) isPlausibleIOContext(rubyFrameIDs, nativeFrameIDs []uint32) bool {
+	if len(rubyFrameIDs) == 0 {
+		return false
+	}
+
+	// Check the leaf frame of the Ruby context.
+	leafFID := rubyFrameIDs[0]
+	if int(leafFID) >= len(b.frames.table) {
+		return false
+	}
+	leaf := b.frames.table[leafFID]
+	leafName := b.strings.Lookup(leaf.FunctionNameIdx)
+
+	// Reject idle frames — these are from accept()/epoll_wait() loops
+	if isIdleFrame(leafName) {
+		return false
+	}
+
+	// Reject generic I/O cfuncs that are likely from a different operation.
+	// These fire when Pitchfork does HTTP I/O, but the I/O event might be
+	// from MySQL, file, or pipe I/O.
+	if isGenericIOCfunc(leafName) {
+		// Exception: if the native stack also has generic I/O (no C extension
+		// frames), the generic Ruby cfunc IS the right context.
+		if !hasExtensionFrames(nativeFrameIDs, b.frames) {
+			return true // e.g., plain IO#write → write() from libc
+		}
+		return false
+	}
+
+	return true
+}
+
+// isIdleFrame returns true if the frame name indicates an idle/waiting state.
+func isIdleFrame(name string) bool {
+	return strings.Contains(name, "get_readers") ||
+		strings.Contains(name, "IO.select") ||
+		strings.Contains(name, "Kernel#sleep") ||
+		strings.Contains(name, "Thread#join") ||
+		strings.Contains(name, "ConditionVariable#wait")
+}
+
+// isGenericIOCfunc returns true if the frame is a generic Ruby I/O method
+// that doesn't tell us which C extension is doing the I/O.
+func isGenericIOCfunc(name string) bool {
+	return name == "IO#readpartial" ||
+		name == "IO#read" ||
+		name == "IO#write" ||
+		name == "IO#read_nonblock" ||
+		name == "IO#write_nonblock" ||
+		name == "IO#sysread" ||
+		name == "IO#syswrite" ||
+		name == "IO#close" ||
+		name == "IO.select"
+}
+
+// hasExtensionFrames checks whether the native frame list contains frames
+// from a C extension (not just libc/system libraries).
+func hasExtensionFrames(nativeFrameIDs []uint32, ft *frameTable) bool {
+	for _, fid := range nativeFrameIDs {
+		if int(fid) >= len(ft.table) {
+			continue
+		}
+		f := ft.table[fid]
+		path := ft.strings.Lookup(f.FileNameIdx)
+		// Skip libc, libpthread, ld-linux — system libraries
+		if strings.Contains(path, "libc.so") ||
+			strings.Contains(path, "libpthread") ||
+			strings.Contains(path, "ld-linux") ||
+			strings.Contains(path, "libm.so") {
+			continue
+		}
+		// Any other .so is a C extension
+		if strings.HasSuffix(path, ".so") || strings.Contains(path, ".so.") {
+			return true
+		}
+	}
+	return false
+}
+
+// extractRubyFrameIDs returns only the Ruby-level frame IDs from a sample's
+// frame_ids list, excluding any native frames that were appended by
+// resolveNativeStack during ingestion.
+func extractRubyFrameIDs(frameIDs []uint32, ft *frameTable) []uint32 {
+	var ruby []uint32
+	for _, fid := range frameIDs {
+		if ft.IsNative(fid) {
+			continue
+		}
+		ruby = append(ruby, fid)
+	}
+	return ruby
 }
 
 // SuspendedStackCounts returns per-TID counts of GVL SUSPENDED stack events.
@@ -310,6 +543,12 @@ func (b *Builder) Build() *pb.Capture {
 		// Both are now sorted by timestamp, so we can match each I/O
 		// event to the most recent SUSPENDED stack on this TID.
 		b.correlateIOWithSuspendedStacks(tid, tb)
+
+		// Synthesize I/O samples for the flame graph. Each I/O event
+		// with a Ruby context (from SUSPENDED stack or nearest sample)
+		// and native frames becomes a sample showing the full call path:
+		// Ruby code → C extension → syscall.
+		b.synthesizeIOSamples(tb)
 
 		// Cross-reference: IO ↔ sched (with idle classification)
 		crossRefIOToSched(tb, b.idleClassifier)

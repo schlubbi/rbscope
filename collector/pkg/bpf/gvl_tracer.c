@@ -68,6 +68,17 @@ struct {
     __uint(max_entries, 1 << 22);
 } gvl_events SEC(".maps");
 
+// Separate ring buffer for GVL stack events (8MB).
+// Stack events are large (~4KB each) and would be starved by the high
+// volume of small state events (32 bytes) if sharing the same buffer.
+// With 5+ threads in a Pitchfork worker (main + OTel batch processors),
+// the state event volume causes bpf_ringbuf_reserve to fail for large
+// stack events, silently dropping all SUSPENDED stacks.
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 1 << 23); // 8MB — holds ~2000 stack events
+} gvl_stack_events SEC(".maps");
+
 // Drop counter — incremented when bpf_ringbuf_reserve fails
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -187,7 +198,7 @@ int handle_gvl_event(struct pt_regs *ctx) {
 //   arg4: weight (unused, always 0)
 
 #define EVENT_GVL_STACK 8
-#define MAX_GVL_STACK_BYTES 4096
+#define MAX_GVL_STACK_BYTES 16384
 
 // GVL stack event: header + inline stack data
 struct gvl_stack_event {
@@ -213,7 +224,7 @@ int handle_gvl_stack(struct pt_regs *ctx) {
     u32 pid = pidtgid >> 32;
 
     struct gvl_stack_event *event;
-    event = bpf_ringbuf_reserve(&gvl_events,
+    event = bpf_ringbuf_reserve(&gvl_stack_events,
                                 sizeof(struct gvl_stack_event), 0);
     if (!event)
         return 0;

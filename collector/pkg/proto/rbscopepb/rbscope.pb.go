@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v7.34.1
-// source: proto/rbscope.proto
+// source: rbscope.proto
 
 package rbscopepb
 
@@ -63,11 +63,11 @@ func (x OffCPUReason) String() string {
 }
 
 func (OffCPUReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_rbscope_proto_enumTypes[0].Descriptor()
+	return file_rbscope_proto_enumTypes[0].Descriptor()
 }
 
 func (OffCPUReason) Type() protoreflect.EnumType {
-	return &file_proto_rbscope_proto_enumTypes[0]
+	return &file_rbscope_proto_enumTypes[0]
 }
 
 func (x OffCPUReason) Number() protoreflect.EnumNumber {
@@ -76,7 +76,7 @@ func (x OffCPUReason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use OffCPUReason.Descriptor instead.
 func (OffCPUReason) EnumDescriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{0}
+	return file_rbscope_proto_rawDescGZIP(), []int{0}
 }
 
 // GVL state as observed from thread event hooks.
@@ -116,11 +116,11 @@ func (x GVLState) String() string {
 }
 
 func (GVLState) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_rbscope_proto_enumTypes[1].Descriptor()
+	return file_rbscope_proto_enumTypes[1].Descriptor()
 }
 
 func (GVLState) Type() protoreflect.EnumType {
-	return &file_proto_rbscope_proto_enumTypes[1]
+	return &file_rbscope_proto_enumTypes[1]
 }
 
 func (x GVLState) Number() protoreflect.EnumNumber {
@@ -129,7 +129,7 @@ func (x GVLState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use GVLState.Descriptor instead.
 func (GVLState) EnumDescriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{1}
+	return file_rbscope_proto_rawDescGZIP(), []int{1}
 }
 
 type ThreadState int32
@@ -186,11 +186,11 @@ func (x ThreadState) String() string {
 }
 
 func (ThreadState) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_rbscope_proto_enumTypes[2].Descriptor()
+	return file_rbscope_proto_enumTypes[2].Descriptor()
 }
 
 func (ThreadState) Type() protoreflect.EnumType {
-	return &file_proto_rbscope_proto_enumTypes[2]
+	return &file_rbscope_proto_enumTypes[2]
 }
 
 func (x ThreadState) Number() protoreflect.EnumNumber {
@@ -199,7 +199,7 @@ func (x ThreadState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ThreadState.Descriptor instead.
 func (ThreadState) EnumDescriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{2}
+	return file_rbscope_proto_rawDescGZIP(), []int{2}
 }
 
 // FdType classifies what a file descriptor backs.
@@ -245,11 +245,11 @@ func (x FdType) String() string {
 }
 
 func (FdType) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_rbscope_proto_enumTypes[3].Descriptor()
+	return file_rbscope_proto_enumTypes[3].Descriptor()
 }
 
 func (FdType) Type() protoreflect.EnumType {
-	return &file_proto_rbscope_proto_enumTypes[3]
+	return &file_rbscope_proto_enumTypes[3]
 }
 
 func (x FdType) Number() protoreflect.EnumNumber {
@@ -258,7 +258,7 @@ func (x FdType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use FdType.Descriptor instead.
 func (FdType) EnumDescriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{3}
+	return file_rbscope_proto_rawDescGZIP(), []int{3}
 }
 
 // StackFrame is a single frame in a call stack.
@@ -296,11 +296,11 @@ func (x FrameType) String() string {
 }
 
 func (FrameType) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_rbscope_proto_enumTypes[4].Descriptor()
+	return file_rbscope_proto_enumTypes[4].Descriptor()
 }
 
 func (FrameType) Type() protoreflect.EnumType {
-	return &file_proto_rbscope_proto_enumTypes[4]
+	return &file_rbscope_proto_enumTypes[4]
 }
 
 func (x FrameType) Number() protoreflect.EnumNumber {
@@ -309,7 +309,7 @@ func (x FrameType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use FrameType.Descriptor instead.
 func (FrameType) EnumDescriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{4}
+	return file_rbscope_proto_rawDescGZIP(), []int{4}
 }
 
 // Capture is rbscope's canonical internal data model. A single capture
@@ -334,7 +334,7 @@ type Capture struct {
 
 func (x *Capture) Reset() {
 	*x = Capture{}
-	mi := &file_proto_rbscope_proto_msgTypes[0]
+	mi := &file_rbscope_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -346,7 +346,7 @@ func (x *Capture) String() string {
 func (*Capture) ProtoMessage() {}
 
 func (x *Capture) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[0]
+	mi := &file_rbscope_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -359,7 +359,7 @@ func (x *Capture) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Capture.ProtoReflect.Descriptor instead.
 func (*Capture) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{0}
+	return file_rbscope_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Capture) GetHeader() *CaptureHeader {
@@ -414,7 +414,7 @@ type CaptureHeader struct {
 
 func (x *CaptureHeader) Reset() {
 	*x = CaptureHeader{}
-	mi := &file_proto_rbscope_proto_msgTypes[1]
+	mi := &file_rbscope_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -426,7 +426,7 @@ func (x *CaptureHeader) String() string {
 func (*CaptureHeader) ProtoMessage() {}
 
 func (x *CaptureHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[1]
+	mi := &file_rbscope_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -439,7 +439,7 @@ func (x *CaptureHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CaptureHeader.ProtoReflect.Descriptor instead.
 func (*CaptureHeader) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{1}
+	return file_rbscope_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *CaptureHeader) GetVersion() uint32 {
@@ -516,7 +516,7 @@ type Category struct {
 
 func (x *Category) Reset() {
 	*x = Category{}
-	mi := &file_proto_rbscope_proto_msgTypes[2]
+	mi := &file_rbscope_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -528,7 +528,7 @@ func (x *Category) String() string {
 func (*Category) ProtoMessage() {}
 
 func (x *Category) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[2]
+	mi := &file_rbscope_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -541,7 +541,7 @@ func (x *Category) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Category.ProtoReflect.Descriptor instead.
 func (*Category) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{2}
+	return file_rbscope_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Category) GetId() uint32 {
@@ -597,7 +597,7 @@ type ThreadTimeline struct {
 
 func (x *ThreadTimeline) Reset() {
 	*x = ThreadTimeline{}
-	mi := &file_proto_rbscope_proto_msgTypes[3]
+	mi := &file_rbscope_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -609,7 +609,7 @@ func (x *ThreadTimeline) String() string {
 func (*ThreadTimeline) ProtoMessage() {}
 
 func (x *ThreadTimeline) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[3]
+	mi := &file_rbscope_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -622,7 +622,7 @@ func (x *ThreadTimeline) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ThreadTimeline.ProtoReflect.Descriptor instead.
 func (*ThreadTimeline) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{3}
+	return file_rbscope_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ThreadTimeline) GetThreadId() uint32 {
@@ -716,13 +716,14 @@ type Sample struct {
 	FrameIds      []uint32               `protobuf:"varint,2,rep,packed,name=frame_ids,json=frameIds,proto3" json:"frame_ids,omitempty"`  // indices into Capture.frame_table, leaf first
 	OtelContext   *OTelContext           `protobuf:"bytes,3,opt,name=otel_context,json=otelContext,proto3" json:"otel_context,omitempty"` // trace/span active at sample time (optional)
 	Weight        uint32                 `protobuf:"varint,4,opt,name=weight,proto3" json:"weight,omitempty"`                             // for dynamic sampling rate (default 1)
+	IsIoSample    bool                   `protobuf:"varint,5,opt,name=is_io_sample,json=isIoSample,proto3" json:"is_io_sample,omitempty"` // true for synthetic samples from I/O events
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Sample) Reset() {
 	*x = Sample{}
-	mi := &file_proto_rbscope_proto_msgTypes[4]
+	mi := &file_rbscope_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -734,7 +735,7 @@ func (x *Sample) String() string {
 func (*Sample) ProtoMessage() {}
 
 func (x *Sample) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[4]
+	mi := &file_rbscope_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -747,7 +748,7 @@ func (x *Sample) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Sample.ProtoReflect.Descriptor instead.
 func (*Sample) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{4}
+	return file_rbscope_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Sample) GetTimestampNs() uint64 {
@@ -776,6 +777,13 @@ func (x *Sample) GetWeight() uint32 {
 		return x.Weight
 	}
 	return 0
+}
+
+func (x *Sample) GetIsIoSample() bool {
+	if x != nil {
+		return x.IsIoSample
+	}
+	return false
 }
 
 // IOEvent is an I/O operation observed by BPF io_tracer.
@@ -812,7 +820,7 @@ type IOEvent struct {
 
 func (x *IOEvent) Reset() {
 	*x = IOEvent{}
-	mi := &file_proto_rbscope_proto_msgTypes[5]
+	mi := &file_rbscope_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -824,7 +832,7 @@ func (x *IOEvent) String() string {
 func (*IOEvent) ProtoMessage() {}
 
 func (x *IOEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[5]
+	mi := &file_rbscope_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -837,7 +845,7 @@ func (x *IOEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IOEvent.ProtoReflect.Descriptor instead.
 func (*IOEvent) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{5}
+	return file_rbscope_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *IOEvent) GetTimestampNs() uint64 {
@@ -954,7 +962,7 @@ type SchedEvent struct {
 
 func (x *SchedEvent) Reset() {
 	*x = SchedEvent{}
-	mi := &file_proto_rbscope_proto_msgTypes[6]
+	mi := &file_rbscope_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -966,7 +974,7 @@ func (x *SchedEvent) String() string {
 func (*SchedEvent) ProtoMessage() {}
 
 func (x *SchedEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[6]
+	mi := &file_rbscope_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -979,7 +987,7 @@ func (x *SchedEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedEvent.ProtoReflect.Descriptor instead.
 func (*SchedEvent) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{6}
+	return file_rbscope_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *SchedEvent) GetTimestampNs() uint64 {
@@ -1032,7 +1040,7 @@ type SpanEvent struct {
 
 func (x *SpanEvent) Reset() {
 	*x = SpanEvent{}
-	mi := &file_proto_rbscope_proto_msgTypes[7]
+	mi := &file_rbscope_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1044,7 +1052,7 @@ func (x *SpanEvent) String() string {
 func (*SpanEvent) ProtoMessage() {}
 
 func (x *SpanEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[7]
+	mi := &file_rbscope_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1057,7 +1065,7 @@ func (x *SpanEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpanEvent.ProtoReflect.Descriptor instead.
 func (*SpanEvent) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{7}
+	return file_rbscope_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *SpanEvent) GetStartNs() uint64 {
@@ -1116,7 +1124,7 @@ type GVLEvent struct {
 
 func (x *GVLEvent) Reset() {
 	*x = GVLEvent{}
-	mi := &file_proto_rbscope_proto_msgTypes[8]
+	mi := &file_rbscope_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1128,7 +1136,7 @@ func (x *GVLEvent) String() string {
 func (*GVLEvent) ProtoMessage() {}
 
 func (x *GVLEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[8]
+	mi := &file_rbscope_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1141,7 +1149,7 @@ func (x *GVLEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GVLEvent.ProtoReflect.Descriptor instead.
 func (*GVLEvent) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{8}
+	return file_rbscope_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GVLEvent) GetTimestampNs() uint64 {
@@ -1184,7 +1192,7 @@ type GVLStateChange struct {
 
 func (x *GVLStateChange) Reset() {
 	*x = GVLStateChange{}
-	mi := &file_proto_rbscope_proto_msgTypes[9]
+	mi := &file_rbscope_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1196,7 +1204,7 @@ func (x *GVLStateChange) String() string {
 func (*GVLStateChange) ProtoMessage() {}
 
 func (x *GVLStateChange) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[9]
+	mi := &file_rbscope_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1209,7 +1217,7 @@ func (x *GVLStateChange) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GVLStateChange.ProtoReflect.Descriptor instead.
 func (*GVLStateChange) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{9}
+	return file_rbscope_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GVLStateChange) GetTimestampNs() uint64 {
@@ -1240,7 +1248,7 @@ type GVLStateInterval struct {
 
 func (x *GVLStateInterval) Reset() {
 	*x = GVLStateInterval{}
-	mi := &file_proto_rbscope_proto_msgTypes[10]
+	mi := &file_rbscope_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1252,7 +1260,7 @@ func (x *GVLStateInterval) String() string {
 func (*GVLStateInterval) ProtoMessage() {}
 
 func (x *GVLStateInterval) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[10]
+	mi := &file_rbscope_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1265,7 +1273,7 @@ func (x *GVLStateInterval) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GVLStateInterval.ProtoReflect.Descriptor instead.
 func (*GVLStateInterval) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{10}
+	return file_rbscope_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GVLStateInterval) GetStartNs() uint64 {
@@ -1302,7 +1310,7 @@ type AllocationSample struct {
 
 func (x *AllocationSample) Reset() {
 	*x = AllocationSample{}
-	mi := &file_proto_rbscope_proto_msgTypes[11]
+	mi := &file_rbscope_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1314,7 +1322,7 @@ func (x *AllocationSample) String() string {
 func (*AllocationSample) ProtoMessage() {}
 
 func (x *AllocationSample) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[11]
+	mi := &file_rbscope_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1327,7 +1335,7 @@ func (x *AllocationSample) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AllocationSample.ProtoReflect.Descriptor instead.
 func (*AllocationSample) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{11}
+	return file_rbscope_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *AllocationSample) GetTimestampNs() uint64 {
@@ -1372,7 +1380,7 @@ type ThreadStateInterval struct {
 
 func (x *ThreadStateInterval) Reset() {
 	*x = ThreadStateInterval{}
-	mi := &file_proto_rbscope_proto_msgTypes[12]
+	mi := &file_rbscope_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1384,7 +1392,7 @@ func (x *ThreadStateInterval) String() string {
 func (*ThreadStateInterval) ProtoMessage() {}
 
 func (x *ThreadStateInterval) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[12]
+	mi := &file_rbscope_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1397,7 +1405,7 @@ func (x *ThreadStateInterval) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ThreadStateInterval.ProtoReflect.Descriptor instead.
 func (*ThreadStateInterval) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{12}
+	return file_rbscope_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ThreadStateInterval) GetStartNs() uint64 {
@@ -1447,7 +1455,7 @@ type TcpStats struct {
 
 func (x *TcpStats) Reset() {
 	*x = TcpStats{}
-	mi := &file_proto_rbscope_proto_msgTypes[13]
+	mi := &file_rbscope_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1459,7 +1467,7 @@ func (x *TcpStats) String() string {
 func (*TcpStats) ProtoMessage() {}
 
 func (x *TcpStats) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[13]
+	mi := &file_rbscope_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1472,7 +1480,7 @@ func (x *TcpStats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TcpStats.ProtoReflect.Descriptor instead.
 func (*TcpStats) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{13}
+	return file_rbscope_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *TcpStats) GetSrttUs() uint32 {
@@ -1551,7 +1559,7 @@ type StackFrame struct {
 
 func (x *StackFrame) Reset() {
 	*x = StackFrame{}
-	mi := &file_proto_rbscope_proto_msgTypes[14]
+	mi := &file_rbscope_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1563,7 +1571,7 @@ func (x *StackFrame) String() string {
 func (*StackFrame) ProtoMessage() {}
 
 func (x *StackFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[14]
+	mi := &file_rbscope_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1576,7 +1584,7 @@ func (x *StackFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StackFrame.ProtoReflect.Descriptor instead.
 func (*StackFrame) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{14}
+	return file_rbscope_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *StackFrame) GetFunctionNameIdx() uint32 {
@@ -1627,7 +1635,7 @@ type OTelContext struct {
 
 func (x *OTelContext) Reset() {
 	*x = OTelContext{}
-	mi := &file_proto_rbscope_proto_msgTypes[15]
+	mi := &file_rbscope_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1639,7 +1647,7 @@ func (x *OTelContext) String() string {
 func (*OTelContext) ProtoMessage() {}
 
 func (x *OTelContext) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_rbscope_proto_msgTypes[15]
+	mi := &file_rbscope_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1652,7 +1660,7 @@ func (x *OTelContext) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OTelContext.ProtoReflect.Descriptor instead.
 func (*OTelContext) Descriptor() ([]byte, []int) {
-	return file_proto_rbscope_proto_rawDescGZIP(), []int{15}
+	return file_rbscope_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *OTelContext) GetTraceId() []byte {
@@ -1683,11 +1691,11 @@ func (x *OTelContext) GetOperationIdx() uint32 {
 	return 0
 }
 
-var File_proto_rbscope_proto protoreflect.FileDescriptor
+var File_rbscope_proto protoreflect.FileDescriptor
 
-const file_proto_rbscope_proto_rawDesc = "" +
+const file_rbscope_proto_rawDesc = "" +
 	"\n" +
-	"\x13proto/rbscope.proto\x12\arbscope\"\xf8\x01\n" +
+	"\rrbscope.proto\x12\arbscope\"\xf8\x01\n" +
 	"\aCapture\x12.\n" +
 	"\x06header\x18\x01 \x01(\v2\x16.rbscope.CaptureHeaderR\x06header\x12!\n" +
 	"\fstring_table\x18\x02 \x03(\tR\vstringTable\x124\n" +
@@ -1726,12 +1734,14 @@ const file_proto_rbscope_proto_rawDesc = "" +
 	"\x06states\x18\n" +
 	" \x03(\v2\x1c.rbscope.ThreadStateIntervalR\x06states\x12C\n" +
 	"\x11gvl_state_changes\x18\v \x03(\v2\x17.rbscope.GVLStateChangeR\x0fgvlStateChanges\x12>\n" +
-	"\rgvl_intervals\x18\f \x03(\v2\x19.rbscope.GVLStateIntervalR\fgvlIntervals\"\x99\x01\n" +
+	"\rgvl_intervals\x18\f \x03(\v2\x19.rbscope.GVLStateIntervalR\fgvlIntervals\"\xbb\x01\n" +
 	"\x06Sample\x12!\n" +
 	"\ftimestamp_ns\x18\x01 \x01(\x04R\vtimestampNs\x12\x1b\n" +
 	"\tframe_ids\x18\x02 \x03(\rR\bframeIds\x127\n" +
 	"\fotel_context\x18\x03 \x01(\v2\x14.rbscope.OTelContextR\votelContext\x12\x16\n" +
-	"\x06weight\x18\x04 \x01(\rR\x06weight\"\x8e\x04\n" +
+	"\x06weight\x18\x04 \x01(\rR\x06weight\x12 \n" +
+	"\fis_io_sample\x18\x05 \x01(\bR\n" +
+	"isIoSample\"\x8e\x04\n" +
 	"\aIOEvent\x12!\n" +
 	"\ftimestamp_ns\x18\x01 \x01(\x04R\vtimestampNs\x12\x1f\n" +
 	"\vsyscall_idx\x18\x02 \x01(\rR\n" +
@@ -1858,20 +1868,20 @@ const file_proto_rbscope_proto_rawDesc = "" +
 	"\x10FRAME_TYPE_CFUNC\x10\x02B;Z9github.com/schlubbi/rbscope/collector/pkg/proto/rbscopepbb\x06proto3"
 
 var (
-	file_proto_rbscope_proto_rawDescOnce sync.Once
-	file_proto_rbscope_proto_rawDescData []byte
+	file_rbscope_proto_rawDescOnce sync.Once
+	file_rbscope_proto_rawDescData []byte
 )
 
-func file_proto_rbscope_proto_rawDescGZIP() []byte {
-	file_proto_rbscope_proto_rawDescOnce.Do(func() {
-		file_proto_rbscope_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_rbscope_proto_rawDesc), len(file_proto_rbscope_proto_rawDesc)))
+func file_rbscope_proto_rawDescGZIP() []byte {
+	file_rbscope_proto_rawDescOnce.Do(func() {
+		file_rbscope_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_rbscope_proto_rawDesc), len(file_rbscope_proto_rawDesc)))
 	})
-	return file_proto_rbscope_proto_rawDescData
+	return file_rbscope_proto_rawDescData
 }
 
-var file_proto_rbscope_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_proto_rbscope_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
-var file_proto_rbscope_proto_goTypes = []any{
+var file_rbscope_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
+var file_rbscope_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_rbscope_proto_goTypes = []any{
 	(OffCPUReason)(0),           // 0: rbscope.OffCPUReason
 	(GVLState)(0),               // 1: rbscope.GVLState
 	(ThreadState)(0),            // 2: rbscope.ThreadState
@@ -1894,7 +1904,7 @@ var file_proto_rbscope_proto_goTypes = []any{
 	(*StackFrame)(nil),          // 19: rbscope.StackFrame
 	(*OTelContext)(nil),         // 20: rbscope.OTelContext
 }
-var file_proto_rbscope_proto_depIdxs = []int32{
+var file_rbscope_proto_depIdxs = []int32{
 	6,  // 0: rbscope.Capture.header:type_name -> rbscope.CaptureHeader
 	19, // 1: rbscope.Capture.frame_table:type_name -> rbscope.StackFrame
 	8,  // 2: rbscope.Capture.threads:type_name -> rbscope.ThreadTimeline
@@ -1924,27 +1934,27 @@ var file_proto_rbscope_proto_depIdxs = []int32{
 	0,  // [0:22] is the sub-list for field type_name
 }
 
-func init() { file_proto_rbscope_proto_init() }
-func file_proto_rbscope_proto_init() {
-	if File_proto_rbscope_proto != nil {
+func init() { file_rbscope_proto_init() }
+func file_rbscope_proto_init() {
+	if File_rbscope_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_rbscope_proto_rawDesc), len(file_proto_rbscope_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rbscope_proto_rawDesc), len(file_rbscope_proto_rawDesc)),
 			NumEnums:      5,
 			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_proto_rbscope_proto_goTypes,
-		DependencyIndexes: file_proto_rbscope_proto_depIdxs,
-		EnumInfos:         file_proto_rbscope_proto_enumTypes,
-		MessageInfos:      file_proto_rbscope_proto_msgTypes,
+		GoTypes:           file_rbscope_proto_goTypes,
+		DependencyIndexes: file_rbscope_proto_depIdxs,
+		EnumInfos:         file_rbscope_proto_enumTypes,
+		MessageInfos:      file_rbscope_proto_msgTypes,
 	}.Build()
-	File_proto_rbscope_proto = out.File
-	file_proto_rbscope_proto_goTypes = nil
-	file_proto_rbscope_proto_depIdxs = nil
+	File_rbscope_proto = out.File
+	file_rbscope_proto_goTypes = nil
+	file_rbscope_proto_depIdxs = nil
 }

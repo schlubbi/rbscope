@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -37,18 +38,19 @@ func (o *bpfObjects) Close() error {
 
 // RealBPF is the Linux eBPF-backed implementation of collector.BPFProgram.
 type RealBPF struct {
-	objPath       string
-	objs          bpfObjects
-	reader        *ringbuf.Reader
-	links         []link.Link
-	ioObjs        *iotracerObjects
-	ioReader      *ringbuf.Reader
-	ioLinks       []link.Link
-	gvlObjs       *gvltracerObjects
-	gvlReader     *ringbuf.Reader
-	gvlLinks      []link.Link
-	readToggle    int   // rotates reads across ring buffers
-	ktimeOffsetNs int64 // wallclock_ns - ktime_ns, add to ktime to get epoch
+	objPath        string
+	objs           bpfObjects
+	reader         *ringbuf.Reader
+	links          []link.Link
+	ioObjs         *iotracerObjects
+	ioReader       *ringbuf.Reader
+	ioLinks        []link.Link
+	gvlObjs        *gvltracerObjects
+	gvlReader      *ringbuf.Reader
+	gvlStackReader *ringbuf.Reader // separate ring buffer for large GVL stack events
+	gvlLinks       []link.Link
+	readToggle     int   // rotates reads across ring buffers
+	ktimeOffsetNs  int64 // wallclock_ns - ktime_ns, add to ktime to get epoch
 }
 
 // Compile-time interface check.
@@ -171,6 +173,17 @@ func (r *RealBPF) loadGVLTracer() error {
 	}
 	r.gvlReader = rd
 
+	// Separate ring buffer for GVL stack events — keeps large stack events
+	// from being starved by the high volume of small state change events.
+	stackRd, err := ringbuf.NewReader(gvlObjs.GvlStackEvents)
+	if err != nil {
+		rd.Close()      //nolint:errcheck
+		gvlObjs.Close() //nolint:errcheck
+		r.gvlObjs = nil
+		return fmt.Errorf("open gvl stack ring buffer: %w", err)
+	}
+	r.gvlStackReader = stackRd
+
 	return nil
 }
 
@@ -255,8 +268,8 @@ func findRbscopeContainerPath(pid uint32) (string, error) {
 		if !strings.Contains(perms, "x") {
 			continue
 		}
-		if strings.Contains(pathname, "rbscope") &&
-			(strings.HasSuffix(pathname, ".so") || strings.HasSuffix(pathname, ".bundle")) {
+		base := filepath.Base(pathname)
+		if base == "rbscope.so" || base == "rbscope.bundle" {
 			return pathname, nil
 		}
 	}
@@ -290,8 +303,6 @@ func (r *RealBPF) DetachPID(_ uint32) error {
 // Always checks the ruby reader first (highest value, lowest rate), then
 // rotates between io and gvl to avoid IO starvation of ruby samples.
 func (r *RealBPF) ReadRingBuffer(buf []byte) (int, error) {
-	readers := []*ringbuf.Reader{r.reader, r.ioReader, r.gvlReader}
-
 	// Always try ruby first with a short poll — ruby samples are highest priority
 	if r.reader != nil {
 		r.reader.SetDeadline(time.Now().Add(1 * time.Millisecond))
@@ -302,11 +313,11 @@ func (r *RealBPF) ReadRingBuffer(buf []byte) (int, error) {
 		}
 	}
 
-	// Then rotate between io and gvl
-	r.readToggle = (r.readToggle + 1) % 2
-	secondaries := []*ringbuf.Reader{r.ioReader, r.gvlReader}
-	for i := 0; i < 2; i++ {
-		idx := (r.readToggle + i) % 2
+	// Then rotate between io, gvl, and gvl-stacks
+	r.readToggle = (r.readToggle + 1) % 3
+	secondaries := []*ringbuf.Reader{r.ioReader, r.gvlReader, r.gvlStackReader}
+	for i := 0; i < 3; i++ {
+		idx := (r.readToggle + i) % 3
 		rd := secondaries[idx]
 		if rd == nil {
 			continue
@@ -330,7 +341,7 @@ func (r *RealBPF) ReadRingBuffer(buf []byte) (int, error) {
 	}
 
 	// Check all remaining with minimal timeout
-	for _, rd := range readers {
+	for _, rd := range []*ringbuf.Reader{r.reader, r.ioReader, r.gvlReader, r.gvlStackReader} {
 		if rd == nil {
 			continue
 		}
@@ -380,6 +391,9 @@ func (r *RealBPF) Close() error {
 	}
 	if r.gvlReader != nil {
 		_ = r.gvlReader.Close()
+	}
+	if r.gvlStackReader != nil {
+		_ = r.gvlStackReader.Close()
 	}
 	_ = r.objs.Close()
 	if r.ioObjs != nil {

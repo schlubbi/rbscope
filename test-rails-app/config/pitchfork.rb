@@ -18,7 +18,7 @@ after_worker_fork do |_server, worker|
   ActiveRecord::Base.establish_connection if defined?(ActiveRecord::Base)
 
   # Re-initialize rbscope sampling in the child process
-  if defined?(Rbscope) && ENV["RBSCOPE"] == "1"
+  if defined?(Rbscope) && ENV["RBSCOPE_ENABLE"] == "1"
     Rbscope.start
     Rbscope.enable_gvl_profiling
   end
