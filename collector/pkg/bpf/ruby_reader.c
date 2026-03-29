@@ -17,7 +17,7 @@
 #include <bpf/bpf_core_read.h>
 
 // Maximum stack size we'll read from userspace (bytes).
-#define MAX_STACK_SIZE 4096
+#define MAX_STACK_SIZE 16384
 
 // Maximum native stack depth (IPs). bpf_get_stack supports up to 127.
 // We use 64 to keep event size reasonable (~512 bytes for native stack).

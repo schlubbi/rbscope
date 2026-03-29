@@ -189,11 +189,12 @@ func (b *Builder) parseAndInternSuspendedStack(data []byte) []uint32 {
 
 // suspendedStackMaxGapNs is the maximum time gap between a GVL SUSPENDED
 // stack and an I/O event for them to be considered from the same operation.
-// Trilogy queries on localhost complete in <1ms, so the SUSPENDED stack
-// from the same operation would be within a few ms. A larger gap means
-// the SUSPENDED stack is from a different I/O operation (e.g., HTTP
-// parsing vs MySQL query) and shouldn't be used.
-const suspendedStackMaxGapNs = 5_000_000 // 5ms
+// This must be wide enough to cover the full I/O wait: SUSPENDED fires at
+// GVL release (start of wait), while the io_tracer read/write fires at
+// syscall completion (end of wait). For a 5ms database query, the gap is
+// ~5ms; for a slow query or remote database, it could be 50-100ms.
+// The isPlausibleIOContext check prevents false matches.
+const suspendedStackMaxGapNs = 100_000_000 // 100ms
 
 // findSuspendedStack finds the most recent GVL SUSPENDED stack that fired
 // before the given timestamp. Uses binary search on the time-sorted list.

@@ -89,7 +89,7 @@ extern "C" {
 const MAX_FRAMES: usize = 512;
 
 /// Maximum serialized stack size (must fit in BPF ring buffer event).
-const MAX_STACK_BYTES: usize = 4096;
+const MAX_STACK_BYTES: usize = 16384;
 
 /// Minimum sleep interval (100µs = max ~10kHz).
 const MIN_INTERVAL_NS: u64 = 100_000;

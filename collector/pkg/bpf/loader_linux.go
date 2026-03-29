@@ -47,6 +47,7 @@ type RealBPF struct {
 	ioLinks       []link.Link
 	gvlObjs       *gvltracerObjects
 	gvlReader     *ringbuf.Reader
+	gvlStackReader *ringbuf.Reader // separate ring buffer for large GVL stack events
 	gvlLinks      []link.Link
 	readToggle    int   // rotates reads across ring buffers
 	ktimeOffsetNs int64 // wallclock_ns - ktime_ns, add to ktime to get epoch
@@ -171,6 +172,17 @@ func (r *RealBPF) loadGVLTracer() error {
 		return fmt.Errorf("open gvl ring buffer: %w", err)
 	}
 	r.gvlReader = rd
+
+	// Separate ring buffer for GVL stack events — keeps large stack events
+	// from being starved by the high volume of small state change events.
+	stackRd, err := ringbuf.NewReader(gvlObjs.GvlStackEvents)
+	if err != nil {
+		rd.Close() //nolint:errcheck
+		gvlObjs.Close() //nolint:errcheck
+		r.gvlObjs = nil
+		return fmt.Errorf("open gvl stack ring buffer: %w", err)
+	}
+	r.gvlStackReader = stackRd
 
 	return nil
 }
@@ -301,11 +313,11 @@ func (r *RealBPF) ReadRingBuffer(buf []byte) (int, error) {
 		}
 	}
 
-	// Then rotate between io and gvl
-	r.readToggle = (r.readToggle + 1) % 2
-	secondaries := []*ringbuf.Reader{r.ioReader, r.gvlReader}
-	for i := 0; i < 2; i++ {
-		idx := (r.readToggle + i) % 2
+	// Then rotate between io, gvl, and gvl-stacks
+	r.readToggle = (r.readToggle + 1) % 3
+	secondaries := []*ringbuf.Reader{r.ioReader, r.gvlReader, r.gvlStackReader}
+	for i := 0; i < 3; i++ {
+		idx := (r.readToggle + i) % 3
 		rd := secondaries[idx]
 		if rd == nil {
 			continue
@@ -329,7 +341,7 @@ func (r *RealBPF) ReadRingBuffer(buf []byte) (int, error) {
 	}
 
 	// Check all remaining with minimal timeout
-	for _, rd := range []*ringbuf.Reader{r.reader, r.ioReader, r.gvlReader} {
+	for _, rd := range []*ringbuf.Reader{r.reader, r.ioReader, r.gvlReader, r.gvlStackReader} {
 		if rd == nil {
 			continue
 		}
@@ -379,6 +391,9 @@ func (r *RealBPF) Close() error {
 	}
 	if r.gvlReader != nil {
 		_ = r.gvlReader.Close()
+	}
+	if r.gvlStackReader != nil {
+		_ = r.gvlStackReader.Close()
 	}
 	_ = r.objs.Close()
 	if r.ioObjs != nil {
