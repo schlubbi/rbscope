@@ -208,6 +208,57 @@ func (FdType) EnumDescriptor() ([]byte, []int) {
 	return file_rbscope_proto_rawDescGZIP(), []int{2}
 }
 
+// StackFrame is a single frame in a call stack.
+// FrameType distinguishes Ruby-level frames from native C frames.
+type FrameType int32
+
+const (
+	FrameType_FRAME_TYPE_RUBY   FrameType = 0 // Ruby-level frame (from gem's rb_profile_thread_frames)
+	FrameType_FRAME_TYPE_NATIVE FrameType = 1 // Native C/C++ frame (from BPF bpf_get_stack)
+	FrameType_FRAME_TYPE_CFUNC  FrameType = 2 // Ruby C extension function (boundary between Ruby and native)
+)
+
+// Enum value maps for FrameType.
+var (
+	FrameType_name = map[int32]string{
+		0: "FRAME_TYPE_RUBY",
+		1: "FRAME_TYPE_NATIVE",
+		2: "FRAME_TYPE_CFUNC",
+	}
+	FrameType_value = map[string]int32{
+		"FRAME_TYPE_RUBY":   0,
+		"FRAME_TYPE_NATIVE": 1,
+		"FRAME_TYPE_CFUNC":  2,
+	}
+)
+
+func (x FrameType) Enum() *FrameType {
+	p := new(FrameType)
+	*p = x
+	return p
+}
+
+func (x FrameType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FrameType) Descriptor() protoreflect.EnumDescriptor {
+	return file_rbscope_proto_enumTypes[3].Descriptor()
+}
+
+func (FrameType) Type() protoreflect.EnumType {
+	return &file_rbscope_proto_enumTypes[3]
+}
+
+func (x FrameType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FrameType.Descriptor instead.
+func (FrameType) EnumDescriptor() ([]byte, []int) {
+	return file_rbscope_proto_rawDescGZIP(), []int{3}
+}
+
 // Capture is rbscope's canonical internal data model. A single capture
 // represents one flush window (typically 10s) of profiling data for one
 // process, organized as per-thread timelines with cross-referenced events.
@@ -1273,12 +1324,13 @@ func (x *TcpStats) GetBytesReceived() uint64 {
 	return 0
 }
 
-// StackFrame is a single frame in a call stack.
 type StackFrame struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	FunctionNameIdx uint32                 `protobuf:"varint,1,opt,name=function_name_idx,json=functionNameIdx,proto3" json:"function_name_idx,omitempty"` // index into string_table
 	FileNameIdx     uint32                 `protobuf:"varint,2,opt,name=file_name_idx,json=fileNameIdx,proto3" json:"file_name_idx,omitempty"`             // index into string_table
 	LineNumber      uint32                 `protobuf:"varint,3,opt,name=line_number,json=lineNumber,proto3" json:"line_number,omitempty"`
+	FrameType       FrameType              `protobuf:"varint,4,opt,name=frame_type,json=frameType,proto3,enum=rbscope.FrameType" json:"frame_type,omitempty"` // Ruby, native, or cfunc
+	Address         uint64                 `protobuf:"varint,5,opt,name=address,proto3" json:"address,omitempty"`                                             // raw instruction pointer (native frames only)
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -1330,6 +1382,20 @@ func (x *StackFrame) GetFileNameIdx() uint32 {
 func (x *StackFrame) GetLineNumber() uint32 {
 	if x != nil {
 		return x.LineNumber
+	}
+	return 0
+}
+
+func (x *StackFrame) GetFrameType() FrameType {
+	if x != nil {
+		return x.FrameType
+	}
+	return FrameType_FRAME_TYPE_RUBY
+}
+
+func (x *StackFrame) GetAddress() uint64 {
+	if x != nil {
+		return x.Address
 	}
 	return 0
 }
@@ -1512,13 +1578,16 @@ const file_rbscope_proto_rawDesc = "" +
 	"\arcv_wnd\x18\a \x01(\rR\x06rcvWnd\x12\x1d\n" +
 	"\n" +
 	"bytes_sent\x18\b \x01(\x04R\tbytesSent\x12%\n" +
-	"\x0ebytes_received\x18\t \x01(\x04R\rbytesReceived\"}\n" +
+	"\x0ebytes_received\x18\t \x01(\x04R\rbytesReceived\"\xca\x01\n" +
 	"\n" +
 	"StackFrame\x12*\n" +
 	"\x11function_name_idx\x18\x01 \x01(\rR\x0ffunctionNameIdx\x12\"\n" +
 	"\rfile_name_idx\x18\x02 \x01(\rR\vfileNameIdx\x12\x1f\n" +
 	"\vline_number\x18\x03 \x01(\rR\n" +
-	"lineNumber\"\x87\x01\n" +
+	"lineNumber\x121\n" +
+	"\n" +
+	"frame_type\x18\x04 \x01(\x0e2\x12.rbscope.FrameTypeR\tframeType\x12\x18\n" +
+	"\aaddress\x18\x05 \x01(\x04R\aaddress\"\x87\x01\n" +
 	"\vOTelContext\x12\x19\n" +
 	"\btrace_id\x18\x01 \x01(\fR\atraceId\x12\x17\n" +
 	"\aspan_id\x18\x02 \x01(\fR\x06spanId\x12\x1f\n" +
@@ -1552,7 +1621,11 @@ const file_rbscope_proto_rawDesc = "" +
 	"\n" +
 	"\x06FD_UDP\x10\x03\x12\v\n" +
 	"\aFD_UNIX\x10\x04\x12\v\n" +
-	"\aFD_PIPE\x10\x05B;Z9github.com/schlubbi/rbscope/collector/pkg/proto/rbscopepbb\x06proto3"
+	"\aFD_PIPE\x10\x05*M\n" +
+	"\tFrameType\x12\x13\n" +
+	"\x0fFRAME_TYPE_RUBY\x10\x00\x12\x15\n" +
+	"\x11FRAME_TYPE_NATIVE\x10\x01\x12\x14\n" +
+	"\x10FRAME_TYPE_CFUNC\x10\x02B;Z9github.com/schlubbi/rbscope/collector/pkg/proto/rbscopepbb\x06proto3"
 
 var (
 	file_rbscope_proto_rawDescOnce sync.Once
@@ -1566,50 +1639,52 @@ func file_rbscope_proto_rawDescGZIP() []byte {
 	return file_rbscope_proto_rawDescData
 }
 
-var file_rbscope_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_rbscope_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
 var file_rbscope_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_rbscope_proto_goTypes = []any{
 	(OffCPUReason)(0),           // 0: rbscope.OffCPUReason
 	(ThreadState)(0),            // 1: rbscope.ThreadState
 	(FdType)(0),                 // 2: rbscope.FdType
-	(*Capture)(nil),             // 3: rbscope.Capture
-	(*CaptureHeader)(nil),       // 4: rbscope.CaptureHeader
-	(*Category)(nil),            // 5: rbscope.Category
-	(*ThreadTimeline)(nil),      // 6: rbscope.ThreadTimeline
-	(*Sample)(nil),              // 7: rbscope.Sample
-	(*IOEvent)(nil),             // 8: rbscope.IOEvent
-	(*SchedEvent)(nil),          // 9: rbscope.SchedEvent
-	(*SpanEvent)(nil),           // 10: rbscope.SpanEvent
-	(*GVLEvent)(nil),            // 11: rbscope.GVLEvent
-	(*AllocationSample)(nil),    // 12: rbscope.AllocationSample
-	(*ThreadStateInterval)(nil), // 13: rbscope.ThreadStateInterval
-	(*TcpStats)(nil),            // 14: rbscope.TcpStats
-	(*StackFrame)(nil),          // 15: rbscope.StackFrame
-	(*OTelContext)(nil),         // 16: rbscope.OTelContext
+	(FrameType)(0),              // 3: rbscope.FrameType
+	(*Capture)(nil),             // 4: rbscope.Capture
+	(*CaptureHeader)(nil),       // 5: rbscope.CaptureHeader
+	(*Category)(nil),            // 6: rbscope.Category
+	(*ThreadTimeline)(nil),      // 7: rbscope.ThreadTimeline
+	(*Sample)(nil),              // 8: rbscope.Sample
+	(*IOEvent)(nil),             // 9: rbscope.IOEvent
+	(*SchedEvent)(nil),          // 10: rbscope.SchedEvent
+	(*SpanEvent)(nil),           // 11: rbscope.SpanEvent
+	(*GVLEvent)(nil),            // 12: rbscope.GVLEvent
+	(*AllocationSample)(nil),    // 13: rbscope.AllocationSample
+	(*ThreadStateInterval)(nil), // 14: rbscope.ThreadStateInterval
+	(*TcpStats)(nil),            // 15: rbscope.TcpStats
+	(*StackFrame)(nil),          // 16: rbscope.StackFrame
+	(*OTelContext)(nil),         // 17: rbscope.OTelContext
 }
 var file_rbscope_proto_depIdxs = []int32{
-	4,  // 0: rbscope.Capture.header:type_name -> rbscope.CaptureHeader
-	15, // 1: rbscope.Capture.frame_table:type_name -> rbscope.StackFrame
-	6,  // 2: rbscope.Capture.threads:type_name -> rbscope.ThreadTimeline
-	5,  // 3: rbscope.Capture.categories:type_name -> rbscope.Category
-	7,  // 4: rbscope.ThreadTimeline.samples:type_name -> rbscope.Sample
-	8,  // 5: rbscope.ThreadTimeline.io_events:type_name -> rbscope.IOEvent
-	9,  // 6: rbscope.ThreadTimeline.sched_events:type_name -> rbscope.SchedEvent
-	10, // 7: rbscope.ThreadTimeline.span_events:type_name -> rbscope.SpanEvent
-	11, // 8: rbscope.ThreadTimeline.gvl_events:type_name -> rbscope.GVLEvent
-	12, // 9: rbscope.ThreadTimeline.allocations:type_name -> rbscope.AllocationSample
-	13, // 10: rbscope.ThreadTimeline.states:type_name -> rbscope.ThreadStateInterval
-	16, // 11: rbscope.Sample.otel_context:type_name -> rbscope.OTelContext
-	14, // 12: rbscope.IOEvent.tcp_stats:type_name -> rbscope.TcpStats
+	5,  // 0: rbscope.Capture.header:type_name -> rbscope.CaptureHeader
+	16, // 1: rbscope.Capture.frame_table:type_name -> rbscope.StackFrame
+	7,  // 2: rbscope.Capture.threads:type_name -> rbscope.ThreadTimeline
+	6,  // 3: rbscope.Capture.categories:type_name -> rbscope.Category
+	8,  // 4: rbscope.ThreadTimeline.samples:type_name -> rbscope.Sample
+	9,  // 5: rbscope.ThreadTimeline.io_events:type_name -> rbscope.IOEvent
+	10, // 6: rbscope.ThreadTimeline.sched_events:type_name -> rbscope.SchedEvent
+	11, // 7: rbscope.ThreadTimeline.span_events:type_name -> rbscope.SpanEvent
+	12, // 8: rbscope.ThreadTimeline.gvl_events:type_name -> rbscope.GVLEvent
+	13, // 9: rbscope.ThreadTimeline.allocations:type_name -> rbscope.AllocationSample
+	14, // 10: rbscope.ThreadTimeline.states:type_name -> rbscope.ThreadStateInterval
+	17, // 11: rbscope.Sample.otel_context:type_name -> rbscope.OTelContext
+	15, // 12: rbscope.IOEvent.tcp_stats:type_name -> rbscope.TcpStats
 	2,  // 13: rbscope.IOEvent.fd_type:type_name -> rbscope.FdType
 	0,  // 14: rbscope.SchedEvent.reason:type_name -> rbscope.OffCPUReason
-	16, // 15: rbscope.SpanEvent.otel_context:type_name -> rbscope.OTelContext
+	17, // 15: rbscope.SpanEvent.otel_context:type_name -> rbscope.OTelContext
 	1,  // 16: rbscope.ThreadStateInterval.state:type_name -> rbscope.ThreadState
-	17, // [17:17] is the sub-list for method output_type
-	17, // [17:17] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	3,  // 17: rbscope.StackFrame.frame_type:type_name -> rbscope.FrameType
+	18, // [18:18] is the sub-list for method output_type
+	18, // [18:18] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_rbscope_proto_init() }
@@ -1622,7 +1697,7 @@ func file_rbscope_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rbscope_proto_rawDesc), len(file_rbscope_proto_rawDesc)),
-			NumEnums:      3,
+			NumEnums:      4,
 			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   0,
