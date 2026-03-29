@@ -101,12 +101,55 @@ jobs:
           sudo timeout 10 ./rbscope-collector capture \
             --pid=$RUBY_PID \
             --duration=5s \
-            --output=/tmp/capture.pb \
+            --format=gecko \
+            --output=/tmp/capture.json \
             || true  # timeout returns 124, that's fine
-          ls -la /tmp/capture.pb
-          echo "Capture file size: $(stat -c%s /tmp/capture.pb) bytes"
-          test -s /tmp/capture.pb || { echo "FAIL: capture file is empty"; exit 1; }
+          ls -la /tmp/capture.json
+          echo "Capture file size: $(stat -c%s /tmp/capture.json) bytes"
+          test -s /tmp/capture.json || { echo "FAIL: capture file is empty"; exit 1; }
           echo "✅ Capture succeeded"
+
+      - name: E2E — verify capture content
+        run: |
+          # Capture was written by sudo — make readable
+          sudo chmod 644 /tmp/capture.json
+          # Parse the Gecko JSON capture and verify it contains actual data
+          python3 << 'PYEOF'
+          import json, sys
+
+          with open("/tmp/capture.json") as f:
+              p = json.load(f)
+
+          threads = p.get("threads", [])
+          meta = p.get("meta", {})
+          print(f"Product:     {meta.get('product', '?')}")
+          print(f"Threads:     {len(threads)}")
+          print(f"Categories:  {len(meta.get('categories', []))}")
+
+          total_samples = 0
+          total_markers = 0
+          for t in threads:
+              total_samples += len(t.get("samples", {}).get("data", []))
+              total_markers += len(t.get("markers", {}).get("data", []))
+
+          print(f"Samples:     {total_samples}")
+          print(f"Markers:     {total_markers}")
+
+          if len(threads) == 0:
+              print("FAIL: no threads in capture", file=sys.stderr)
+              sys.exit(1)
+          if total_samples == 0:
+              print("FAIL: no samples in capture", file=sys.stderr)
+              sys.exit(1)
+
+          # Check at least one thread has a non-empty stringTable
+          has_strings = any(len(t.get("stringTable", [])) > 5 for t in threads)
+          if not has_strings:
+              print("FAIL: no thread has meaningful string table", file=sys.stderr)
+              sys.exit(1)
+
+          print("✅ Capture content verified")
+          PYEOF
 
       - name: E2E — collector live run with Pyroscope push
         working-directory: collector

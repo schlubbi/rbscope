@@ -111,6 +111,57 @@ func TestSchedtracerBPFLoad(t *testing.T) {
 	}
 }
 
+// TestGvltracerBPFLoad verifies the GVL tracer BPF program loads and both
+// ring buffer maps are created correctly — gvl_events for state changes
+// and gvl_stack_events for SUSPENDED stack captures.
+func TestGvltracerBPFLoad(t *testing.T) {
+	spec := loadSpec(t, "gvltracer")
+
+	coll, err := ebpf.NewCollection(spec)
+	if err != nil {
+		t.Fatalf("failed to load gvltracer BPF collection: %v", err)
+	}
+	defer coll.Close()
+
+	// Verify the state change ring buffer
+	gvlEvents := coll.Maps["gvl_events"]
+	if gvlEvents == nil {
+		t.Fatal("expected 'gvl_events' ring buffer map")
+	}
+	info, err := gvlEvents.Info()
+	if err != nil {
+		t.Fatalf("gvl_events info: %v", err)
+	}
+	if info.Type != ebpf.RingBuf {
+		t.Fatalf("gvl_events: expected RingBuf, got %v", info.Type)
+	}
+	t.Logf("gvl_events: type=%v ✓", info.Type)
+
+	// Verify the separate stack event ring buffer (split from gvl_events
+	// to prevent high-volume 32-byte state events from starving large
+	// ~16KB stack event reservations).
+	gvlStackEvents := coll.Maps["gvl_stack_events"]
+	if gvlStackEvents == nil {
+		t.Fatal("expected 'gvl_stack_events' ring buffer map")
+	}
+	stackInfo, err := gvlStackEvents.Info()
+	if err != nil {
+		t.Fatalf("gvl_stack_events info: %v", err)
+	}
+	if stackInfo.Type != ebpf.RingBuf {
+		t.Fatalf("gvl_stack_events: expected RingBuf, got %v", stackInfo.Type)
+	}
+	t.Logf("gvl_stack_events: type=%v ✓", stackInfo.Type)
+
+	if len(coll.Programs) == 0 {
+		t.Fatal("gvltracer collection has no programs")
+	}
+	for name, prog := range coll.Programs {
+		progInfo, _ := prog.Info()
+		t.Logf("  %s: type=%v ✓", name, progInfo.Type)
+	}
+}
+
 // TestSchedtracerAttachSelf verifies the scheduler tracer can attach to
 // the current process and the kernel begins producing events.
 func TestSchedtracerAttachSelf(t *testing.T) {
