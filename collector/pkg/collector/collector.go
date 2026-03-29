@@ -194,9 +194,9 @@ func (c *Collector) eventLoop(ctx context.Context) {
 		ktimeOffset := c.bpf.KtimeOffsetNs()
 		switch ev := event.(type) {
 		case *IOEvent:
-			ev.Timestamp = uint64(int64(ev.Timestamp) + ktimeOffset)
+			ev.Timestamp = uint64(int64(ev.Timestamp) + ktimeOffset) // #nosec G115 -- ktime conversion
 		case *SchedEvent:
-			ev.Timestamp = uint64(int64(ev.Timestamp) + ktimeOffset)
+			ev.Timestamp = uint64(int64(ev.Timestamp) + ktimeOffset) // #nosec G115 -- ktime conversion
 		}
 
 		// Auto-register PIDs for I/O tracing: when a ruby sample arrives

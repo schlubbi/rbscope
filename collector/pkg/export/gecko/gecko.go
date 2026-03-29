@@ -65,11 +65,11 @@ type Sources struct {
 
 // SourcesSchema defines field positions in the sources table (v34 format).
 type SourcesSchema struct {
-	ID             int `json:"id"`
-	Filename       int `json:"filename"`
-	StartLine      int `json:"startLine"`
-	StartColumn    int `json:"startColumn"`
-	SourceMapURL   int `json:"sourceMapURL"`
+	ID           int `json:"id"`
+	Filename     int `json:"filename"`
+	StartLine    int `json:"startLine"`
+	StartColumn  int `json:"startColumn"`
+	SourceMapURL int `json:"sourceMapURL"`
 }
 
 // Category defines a profiler category with color.

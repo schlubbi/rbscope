@@ -12,8 +12,8 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
-	"golang.org/x/sys/unix"
 	"github.com/schlubbi/rbscope/collector/pkg/collector"
+	"golang.org/x/sys/unix"
 )
 
 // bpfObjects mirrors the struct that bpf2go generates from ruby_reader.c.
@@ -47,8 +47,8 @@ type RealBPF struct {
 	gvlObjs       *gvltracerObjects
 	gvlReader     *ringbuf.Reader
 	gvlLinks      []link.Link
-	readToggle    int    // rotates reads across ring buffers
-	ktimeOffsetNs int64  // wallclock_ns - ktime_ns, add to ktime to get epoch
+	readToggle    int   // rotates reads across ring buffers
+	ktimeOffsetNs int64 // wallclock_ns - ktime_ns, add to ktime to get epoch
 }
 
 // Compile-time interface check.

@@ -505,7 +505,7 @@ func parseGVLStateChangeEvent(data []byte) (*GVLStateChangeEvent, error) {
 			PID:  binary.LittleEndian.Uint32(data[4:8]),
 			TID:  binary.LittleEndian.Uint32(data[8:12]),
 		},
-		GVLState:    uint8(binary.LittleEndian.Uint32(data[12:16])),
+		GVLState:    uint8(binary.LittleEndian.Uint32(data[12:16])), // #nosec G115 -- wire format, state fits in uint8
 		TimestampNs: binary.LittleEndian.Uint64(data[16:24]),
 		ThreadValue: binary.LittleEndian.Uint64(data[24:32]),
 	}, nil

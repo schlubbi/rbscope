@@ -74,10 +74,10 @@ func (s *SimBPF) ReadRingBuffer(buf []byte) (int, error) {
 	}
 }
 
-// Close stops event generation and releases resources.
 // KtimeOffsetNs returns 0 for SimBPF since simulated events already use wall clock.
 func (s *SimBPF) KtimeOffsetNs() int64 { return 0 }
 
+// Close stops event generation and releases resources.
 func (s *SimBPF) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

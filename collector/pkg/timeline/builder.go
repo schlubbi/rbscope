@@ -20,8 +20,8 @@ import (
 
 // Builder accumulates raw BPF events and produces a Capture proto.
 type Builder struct {
-	threads         map[uint32]*threadBuilder            // TID → builder
-	threadNames     map[uint32]string                    // TID → name (cached at first sight)
+	threads         map[uint32]*threadBuilder             // TID → builder
+	threadNames     map[uint32]string                     // TID → name (cached at first sight)
 	suspendedStacks map[uint32][]*collector.GVLStackEvent // TID → time-sorted SUSPENDED stacks
 	strings         *stringTable
 	frames          *frameTable
@@ -182,7 +182,7 @@ func (b *Builder) parseAndInternSuspendedStack(data []byte) []uint32 {
 	ids := make([]uint32, 0, len(frames))
 	for _, f := range frames {
 		id := b.frames.Intern(f.Label, f.Path, f.Line)
-		ids = append(ids, uint32(id))
+		ids = append(ids, id)
 	}
 	return ids
 }
@@ -392,7 +392,7 @@ func (b *Builder) ensureThreadName(tid, eventPID uint32) {
 			continue
 		}
 		path := fmt.Sprintf("/proc/%d/task/%d/comm", pid, tid)
-		if data, err := os.ReadFile(path); err == nil {
+		if data, err := os.ReadFile(path); err == nil { // #nosec G304 -- path derived from PID, reads /proc
 			if name := strings.TrimSpace(string(data)); name != "" {
 				b.threadNames[tid] = name
 				return
@@ -402,7 +402,7 @@ func (b *Builder) ensureThreadName(tid, eventPID uint32) {
 
 	// Try as standalone process (main thread of forked worker)
 	path := fmt.Sprintf("/proc/%d/comm", tid)
-	if data, err := os.ReadFile(path); err == nil {
+	if data, err := os.ReadFile(path); err == nil { // #nosec G304 -- path derived from PID, reads /proc
 		if name := strings.TrimSpace(string(data)); name != "" {
 			b.threadNames[tid] = name
 			return
@@ -422,7 +422,7 @@ func (b *Builder) ensureThreadName(tid, eventPID uint32) {
 		tidStr := fmt.Sprintf("%d", tid)
 		for _, e := range entries {
 			statusPath := fmt.Sprintf("%s/%s/status", taskDir, e.Name())
-			data, err := os.ReadFile(statusPath)
+			data, err := os.ReadFile(statusPath) // #nosec G304 -- path derived from PID, reads /proc
 			if err != nil {
 				continue
 			}
@@ -433,7 +433,7 @@ func (b *Builder) ensureThreadName(tid, eventPID uint32) {
 				fields := strings.Fields(line)
 				if len(fields) >= 2 && fields[len(fields)-1] == tidStr {
 					commPath := fmt.Sprintf("%s/%s/comm", taskDir, e.Name())
-					if commData, err := os.ReadFile(commPath); err == nil {
+					if commData, err := os.ReadFile(commPath); err == nil { // #nosec G304 -- path derived from PID, reads /proc
 						if name := strings.TrimSpace(string(commData)); name != "" {
 							b.threadNames[tid] = name
 							return
@@ -450,9 +450,9 @@ func (b *Builder) ensureThreadName(tid, eventPID uint32) {
 // Uses the name cached during Ingest(), falls back to "thread-<tid>".
 func (b *Builder) resolveThreadName(tid uint32) uint32 {
 	if name, ok := b.threadNames[tid]; ok {
-		return uint32(b.strings.Intern(name))
+		return b.strings.Intern(name)
 	}
-	return uint32(b.strings.Intern(fmt.Sprintf("thread-%d", tid)))
+	return b.strings.Intern(fmt.Sprintf("thread-%d", tid))
 }
 
 type threadBuilder struct {
