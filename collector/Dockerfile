@@ -1,7 +1,7 @@
 # Multi-stage build for rbscope-collector
 # Produces a minimal static binary with no runtime dependencies
 
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.26-bookworm AS builder
 
 WORKDIR /build
 

@@ -20,6 +20,8 @@ import (
 	"github.com/schlubbi/rbscope/collector/pkg/collector"
 	"github.com/schlubbi/rbscope/collector/pkg/discovery"
 	"github.com/schlubbi/rbscope/collector/pkg/export"
+	"github.com/schlubbi/rbscope/collector/pkg/export/gecko"
+	"github.com/schlubbi/rbscope/collector/pkg/timeline"
 )
 
 // run flags
@@ -41,6 +43,7 @@ var (
 	flagCaptureDuration time.Duration
 	flagCaptureOutput   string
 	flagCaptureBPFObj   string
+	flagCaptureFormat   string
 )
 
 func main() {
@@ -88,6 +91,7 @@ func captureCmd() *cobra.Command {
 	f.Uint32Var(&flagCapturePID, "pid", 0, "Target PID (required)")
 	f.DurationVar(&flagCaptureDuration, "duration", 10*time.Second, "Capture duration")
 	f.StringVar(&flagCaptureOutput, "output", "capture.pb", "Output file path")
+	f.StringVar(&flagCaptureFormat, "format", "pb", "Output format: pb (protobuf) or gecko (Firefox Profiler JSON)")
 	f.StringVar(&flagCaptureBPFObj, "bpf-obj", "", "Path to compiled BPF ELF object")
 	_ = cmd.MarkFlagRequired("pid")
 
@@ -175,15 +179,29 @@ func runCollector(_ *cobra.Command, _ []string) error {
 func runCapture(_ *cobra.Command, _ []string) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	fe, err := export.NewFileExporter(flagCaptureOutput)
-	if err != nil {
-		return err
+	var exporters []collector.Exporter
+	var tb *timeline.Builder
+
+	switch flagCaptureFormat {
+	case "gecko":
+		// Gecko format: accumulate into timeline builder, export at end.
+		hostname, _ := os.Hostname()
+		tb = timeline.NewBuilder("capture", hostname, flagCapturePID, 99)
+		exporters = append(exporters, &timelineExporter{builder: tb})
+	case "pb":
+		fe, err := export.NewFileExporter(flagCaptureOutput)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = fe.Close() }()
+		exporters = append(exporters, fe)
+	default:
+		return fmt.Errorf("unknown format: %q (use pb or gecko)", flagCaptureFormat)
 	}
-	defer func() { _ = fe.Close() }()
 
 	cfg := collector.Config{
 		FrequencyHz: 99, // higher frequency for captures
-		Exporters:   []collector.Exporter{fe},
+		Exporters:   exporters,
 		Logger:      logger,
 	}
 
@@ -209,9 +227,32 @@ func runCapture(_ *cobra.Command, _ []string) error {
 	}
 
 	<-ctx.Done()
+
+	// For gecko format, build the capture and export.
+	if tb != nil {
+		capture := tb.Build()
+		if err := gecko.Export(capture, flagCaptureOutput); err != nil {
+			return fmt.Errorf("export gecko profile: %w", err)
+		}
+		logger.Info("gecko profile exported", "output", flagCaptureOutput)
+	}
+
 	logger.Info("capture complete", "output", flagCaptureOutput, "duration", flagCaptureDuration)
 	return nil
 }
+
+// timelineExporter routes events to a timeline.Builder.
+type timelineExporter struct {
+	builder *timeline.Builder
+}
+
+func (e *timelineExporter) Export(_ context.Context, event any) error {
+	e.builder.Ingest(event)
+	return nil
+}
+
+func (e *timelineExporter) Flush(_ context.Context) error { return nil }
+func (e *timelineExporter) Close() error                  { return nil }
 
 func buildExporters(logger *slog.Logger) ([]collector.Exporter, error) {
 	names := strings.Split(flagExport, ",")
