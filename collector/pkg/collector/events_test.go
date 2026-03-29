@@ -475,10 +475,10 @@ func TestParseEvent_RubySampleNoNativeStack(t *testing.T) {
 func TestParseGVLWaitEvent(t *testing.T) {
 	data := make([]byte, 40)
 	binary.LittleEndian.PutUint32(data[0:4], uint32(EventGVLWait))
-	binary.LittleEndian.PutUint32(data[4:8], 1234)   // pid
-	binary.LittleEndian.PutUint32(data[8:12], 5678)   // tid
-	binary.LittleEndian.PutUint32(data[12:16], 0)      // pad
-	binary.LittleEndian.PutUint64(data[16:24], 5_000_000) // wait_ns = 5ms
+	binary.LittleEndian.PutUint32(data[4:8], 1234)         // pid
+	binary.LittleEndian.PutUint32(data[8:12], 5678)        // tid
+	binary.LittleEndian.PutUint32(data[12:16], 0)          // pad
+	binary.LittleEndian.PutUint64(data[16:24], 5_000_000)  // wait_ns = 5ms
 	binary.LittleEndian.PutUint64(data[24:32], 99_000_000) // timestamp_ns
 	binary.LittleEndian.PutUint64(data[32:40], 0xdeadbeef) // thread_value
 

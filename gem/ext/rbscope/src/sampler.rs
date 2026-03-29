@@ -462,7 +462,7 @@ unsafe extern "C" fn gvl_event_callback(
     _user_data: *mut std::ffi::c_void,
 ) {
     // Map Ruby event flags to our probe event types
-    let event_type = match event as u32 {
+    let event_type = match event {
         2 => probes::GVL_EVENT_READY,     // RUBY_INTERNAL_THREAD_EVENT_READY
         4 => probes::GVL_EVENT_RESUMED,   // RUBY_INTERNAL_THREAD_EVENT_RESUMED
         8 => probes::GVL_EVENT_SUSPENDED, // RUBY_INTERNAL_THREAD_EVENT_SUSPENDED
@@ -470,20 +470,26 @@ unsafe extern "C" fn gvl_event_callback(
     };
 
     // Get native thread ID and timestamp — no Ruby API calls needed
+    #[allow(clippy::unnecessary_cast)]
     let tid = libc::gettid() as u32;
 
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+    #[allow(clippy::unnecessary_cast)]
     let timestamp_ns = (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64);
 
     // Thread VALUE — safe to read from event_data even without GVL
     // (it's a pointer to a struct with a single VALUE field, and
     // VALUE is just a usize/pointer that doesn't need GVL to read)
+    // Under miri, the type is opaque (c_void) so we skip this.
+    #[cfg(not(miri))]
     let thread_value = if !_event_data.is_null() {
         (*_event_data).thread as u64
     } else {
         0
     };
+    #[cfg(miri)]
+    let thread_value: u64 = 0;
 
     probes::fire_gvl_event(event_type, tid, timestamp_ns, thread_value);
     GVL_EVENT_COUNT.fetch_add(1, Ordering::Relaxed);
