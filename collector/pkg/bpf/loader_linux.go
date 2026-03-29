@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -255,8 +256,8 @@ func findRbscopeContainerPath(pid uint32) (string, error) {
 		if !strings.Contains(perms, "x") {
 			continue
 		}
-		if strings.Contains(pathname, "rbscope") &&
-			(strings.HasSuffix(pathname, ".so") || strings.HasSuffix(pathname, ".bundle")) {
+		base := filepath.Base(pathname)
+		if (base == "rbscope.so" || base == "rbscope.bundle") {
 			return pathname, nil
 		}
 	}
@@ -290,8 +291,6 @@ func (r *RealBPF) DetachPID(_ uint32) error {
 // Always checks the ruby reader first (highest value, lowest rate), then
 // rotates between io and gvl to avoid IO starvation of ruby samples.
 func (r *RealBPF) ReadRingBuffer(buf []byte) (int, error) {
-	readers := []*ringbuf.Reader{r.reader, r.ioReader, r.gvlReader}
-
 	// Always try ruby first with a short poll — ruby samples are highest priority
 	if r.reader != nil {
 		r.reader.SetDeadline(time.Now().Add(1 * time.Millisecond))
@@ -330,7 +329,7 @@ func (r *RealBPF) ReadRingBuffer(buf []byte) (int, error) {
 	}
 
 	// Check all remaining with minimal timeout
-	for _, rd := range readers {
+	for _, rd := range []*ringbuf.Reader{r.reader, r.ioReader, r.gvlReader} {
 		if rd == nil {
 			continue
 		}

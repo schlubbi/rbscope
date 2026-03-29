@@ -27,3 +27,4 @@ gem/pkg/
 
 # Bundle
 gem/.bundle/
+test-rails-app/vendor/
