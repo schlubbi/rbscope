@@ -611,3 +611,217 @@ func TestBuilder_GVLStateIntervals(t *testing.T) {
 		t.Errorf("third interval: got %v, want STALLED", thread.GvlIntervals[2].State)
 	}
 }
+
+func TestShouldFilterNativeFrame(t *testing.T) {
+	tests := []struct {
+		funcName string
+		libPath  string
+		isRubyVM bool
+		want     bool
+		reason   string
+	}{
+		{"rb_funcall", "/usr/lib/libruby.so", true, true, "Ruby VM frame"},
+		{"", "/usr/lib/libc.so", false, true, "empty function name"},
+		{"__rbscope_probe_ruby_sample", "/rbscope/gem/lib/rbscope.so", false, true, "rbscope probe"},
+		{"__rbscope_probe_gvl_stack", "/rbscope/gem/lib/rbscope.so", false, true, "rbscope GVL probe"},
+		{"[anon:Ruby:rb_jit_reserve_addr_space]+0x1234", "[anon:Ruby:rb_jit_reserve_addr_space]", false, true, "JIT region (libPath)"},
+		{"0x12345", "[anon:Ruby:rb_jit_reserve_addr_space]", false, true, "JIT region addr"},
+		{"_start", "", false, true, "process _start"},
+		{"_dl_relocate_object", "/usr/lib/ld-linux.so", false, true, "dynamic linker"},
+		{"trilogy_query_send", "/usr/lib/trilogy.so", false, false, "C extension function"},
+		{"read", "/usr/lib/libc.so.6", false, false, "libc syscall wrapper"},
+		{"__libc_start_main", "/usr/lib/libc.so.6", false, false, "libc main"},
+		{"rb_trilogy_query", "/usr/lib/trilogy.so", false, false, "C extension entry"},
+		{"get_readers", "/gems/pitchfork_http.so", false, false, "C extension function"},
+	}
+
+	for _, tt := range tests {
+		got := shouldFilterNativeFrame(tt.funcName, tt.libPath, tt.isRubyVM)
+		if got != tt.want {
+			t.Errorf("shouldFilterNativeFrame(%q, %q, %v) = %v, want %v (%s)",
+				tt.funcName, tt.libPath, tt.isRubyVM, got, tt.want, tt.reason)
+		}
+	}
+}
+
+func TestSynthesizeIOSamples(t *testing.T) {
+	b := NewBuilder("test", "host", 1000, 99)
+
+	// Create some Ruby frames in the frame table
+	rubyFrame1 := b.frames.Intern("PostsController#index", "app/controllers/posts_controller.rb", 10)
+	rubyFrame2 := b.frames.Intern("Trilogy#query", "lib/trilogy.rb", 20)
+	// Create native frames (from I/O event)
+	nativeFrame1 := b.frames.Intern("rb_trilogy_query", "/usr/lib/trilogy.so", 0)
+	nativeFrame2 := b.frames.Intern("write", "/usr/lib/libc.so.6", 0)
+
+	tb := &threadBuilder{}
+
+	// Add a regular Ruby sample (timer-based)
+	tb.samples = []*pb.Sample{
+		{
+			TimestampNs: 1_000_000_000,
+			FrameIds:    []uint32{rubyFrame2, rubyFrame1}, // leaf-first
+			Weight:      1,
+		},
+	}
+
+	// Add an I/O event with native frames and Ruby context
+	tb.ioEvents = []*pb.IOEvent{
+		{
+			TimestampNs:         1_000_500_000,                        // 500µs after sample
+			NativeFrameIds:      []uint32{nativeFrame2, nativeFrame1}, // write → rb_trilogy_query (leaf-first)
+			RubyContextFrameIds: []uint32{rubyFrame2, rubyFrame1},     // Trilogy#query → PostsController#index
+			NearestSampleIdx:    0,
+		},
+	}
+
+	b.synthesizeIOSamples(tb)
+
+	// Should now have 2 samples: original + synthetic I/O
+	if len(tb.samples) != 2 {
+		t.Fatalf("expected 2 samples, got %d", len(tb.samples))
+	}
+
+	// Find the synthetic sample
+	var ioSample *pb.Sample
+	for _, s := range tb.samples {
+		if s.IsIoSample {
+			ioSample = s
+			break
+		}
+	}
+	if ioSample == nil {
+		t.Fatal("no I/O sample found")
+	}
+
+	// Synthetic sample should have native + Ruby frames (leaf-first order):
+	// [write, rb_trilogy_query, Trilogy#query, PostsController#index]
+	expectedFrames := []uint32{nativeFrame2, nativeFrame1, rubyFrame2, rubyFrame1}
+	if len(ioSample.FrameIds) != len(expectedFrames) {
+		t.Fatalf("I/O sample frame count: got %d, want %d", len(ioSample.FrameIds), len(expectedFrames))
+	}
+	for i, got := range ioSample.FrameIds {
+		if got != expectedFrames[i] {
+			t.Errorf("frame[%d]: got %d, want %d", i, got, expectedFrames[i])
+		}
+	}
+	if ioSample.Weight != 1 {
+		t.Errorf("weight: got %d, want 1", ioSample.Weight)
+	}
+}
+
+func TestSynthesizeIOSamples_FallbackToNearestSample(t *testing.T) {
+	b := NewBuilder("test", "host", 1000, 99)
+
+	rubyFrame := b.frames.Intern("Controller#action", "app/controllers/test.rb", 5)
+	nativeFrame := b.frames.Intern("read", "/usr/lib/libc.so.6", 0)
+
+	tb := &threadBuilder{}
+	tb.samples = []*pb.Sample{
+		{
+			TimestampNs: 1_000_000_000,
+			FrameIds:    []uint32{rubyFrame}, // only Ruby frames (no native appended)
+			Weight:      1,
+		},
+	}
+	tb.ioEvents = []*pb.IOEvent{
+		{
+			TimestampNs:    1_000_050_000, // 50µs after — within 100ms window
+			NativeFrameIds: []uint32{nativeFrame},
+			// No RubyContextFrameIds — will fall back to nearest sample
+			NearestSampleIdx: 0,
+		},
+	}
+
+	b.synthesizeIOSamples(tb)
+
+	if len(tb.samples) != 2 {
+		t.Fatalf("expected 2 samples (original + synthetic), got %d", len(tb.samples))
+	}
+
+	var ioSample *pb.Sample
+	for _, s := range tb.samples {
+		if s.IsIoSample {
+			ioSample = s
+			break
+		}
+	}
+	if ioSample == nil {
+		t.Fatal("no I/O sample found via nearest-sample fallback")
+	}
+	// Should have [read, Controller#action]
+	if len(ioSample.FrameIds) != 2 {
+		t.Fatalf("expected 2 frames, got %d", len(ioSample.FrameIds))
+	}
+}
+
+func TestSynthesizeIOSamples_NoNativeFrames(t *testing.T) {
+	b := NewBuilder("test", "host", 1000, 99)
+
+	rubyFrame := b.frames.Intern("foo", "test.rb", 1)
+
+	tb := &threadBuilder{}
+	tb.samples = []*pb.Sample{
+		{TimestampNs: 1_000_000_000, FrameIds: []uint32{rubyFrame}, Weight: 1},
+	}
+	tb.ioEvents = []*pb.IOEvent{
+		{
+			TimestampNs:         1_000_050_000,
+			RubyContextFrameIds: []uint32{rubyFrame},
+			// No NativeFrameIds — should not create synthetic sample
+		},
+	}
+
+	b.synthesizeIOSamples(tb)
+
+	// Should still be just 1 sample (no synthesis without native frames)
+	if len(tb.samples) != 1 {
+		t.Fatalf("expected 1 sample (no synthesis), got %d", len(tb.samples))
+	}
+}
+
+func TestSynthesizeIOSamples_TooFarApart(t *testing.T) {
+	b := NewBuilder("test", "host", 1000, 99)
+
+	rubyFrame := b.frames.Intern("foo", "test.rb", 1)
+	nativeFrame := b.frames.Intern("write", "/usr/lib/libc.so.6", 0)
+
+	tb := &threadBuilder{}
+	tb.samples = []*pb.Sample{
+		{TimestampNs: 1_000_000_000, FrameIds: []uint32{rubyFrame}, Weight: 1},
+	}
+	tb.ioEvents = []*pb.IOEvent{
+		{
+			TimestampNs:      1_200_000_000, // 200ms later — beyond 100ms window
+			NativeFrameIds:   []uint32{nativeFrame},
+			NearestSampleIdx: 0,
+			// No RubyContextFrameIds
+		},
+	}
+
+	b.synthesizeIOSamples(tb)
+
+	// Should still be just 1 sample (too far apart, no SUSPENDED context)
+	if len(tb.samples) != 1 {
+		t.Fatalf("expected 1 sample (too far apart), got %d", len(tb.samples))
+	}
+}
+
+func TestExtractRubyFrameIDs(t *testing.T) {
+	st := newStringTable()
+	ft := newFrameTable(st)
+
+	rubyFrame1 := ft.Intern("Controller#index", "app/controllers.rb", 10)
+	rubyFrame2 := ft.Intern("AR#query", "activerecord.rb", 20)
+	nativeFrame := ft.Intern("trilogy_query", "/usr/lib/trilogy.so", 0)
+
+	mixed := []uint32{nativeFrame, rubyFrame1, rubyFrame2}
+	result := extractRubyFrameIDs(mixed, ft)
+
+	if len(result) != 2 {
+		t.Fatalf("expected 2 Ruby frames, got %d", len(result))
+	}
+	if result[0] != rubyFrame1 || result[1] != rubyFrame2 {
+		t.Errorf("wrong Ruby frames: got %v, want [%d, %d]", result, rubyFrame1, rubyFrame2)
+	}
+}

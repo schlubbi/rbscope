@@ -487,10 +487,11 @@ func buildSamples(tb *threadBuilder, tl *pb.ThreadTimeline) SamplesTable {
 		}
 	}
 
-	// I/O events with RubyContextFrameIds are NOT added as synthetic samples.
-	// They would drown out the regular timer-based samples and produce
-	// misleading call trees (SUSPENDED stacks are the idle/accept context,
-	// not the application code context). I/O events appear as markers instead.
+	// I/O events with native+Ruby context are synthesized into samples
+	// by timeline.Builder (synthesizeIOSamples). These appear in
+	// tl.Samples with IsIoSample=true. No special handling needed here —
+	// they flow through the same internStack path as regular samples,
+	// producing unified Ruby → C extension → syscall call trees.
 
 	return SamplesTable{
 		Schema: SampleTupleSchema{Stack: 0, Time: 1, EventDelay: 2},
@@ -721,8 +722,8 @@ func categorizeFrame(fileName string) (cat, subcat int) {
 		return catNative, 0
 	}
 
-	// cfunc marker
-	if fileName == "<cfunc>" {
+	// cfunc marker — Ruby C functions with no source file
+	if fileName == "<cfunc>" || fileName == "(unknown)" {
 		return catCfunc, 0
 	}
 

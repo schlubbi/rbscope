@@ -130,3 +130,53 @@ func TestFrameTableSharesStringTable(t *testing.T) {
 		t.Errorf("'render' appears %d times, want 1", count)
 	}
 }
+
+func TestFrameTableIsNative(t *testing.T) {
+	st := newStringTable()
+	ft := newFrameTable(st)
+
+	// Ruby source frame
+	rubyIdx := ft.Intern("render", "app/views/posts/index.html.erb", 42)
+	if ft.IsNative(rubyIdx) {
+		t.Error("Ruby source frame should not be native")
+	}
+
+	// Native .so frame
+	soIdx := ft.Intern("trilogy_query_send", "/usr/lib/trilogy.so", 0)
+	if !ft.IsNative(soIdx) {
+		t.Error("Expected .so frame to be native")
+	}
+
+	// Native .so with version
+	soVerIdx := ft.Intern("read", "/usr/lib/aarch64-linux-gnu/libc.so.6", 0)
+	if !ft.IsNative(soVerIdx) {
+		t.Error("Expected .so.6 frame to be native")
+	}
+
+	// cfunc (no path) — not native
+	cfuncIdx := ft.Intern("Hash#each", "", 0)
+	if ft.IsNative(cfuncIdx) {
+		t.Error("cfunc with empty path should not be native")
+	}
+
+	// Out of range
+	if ft.IsNative(999) {
+		t.Error("Out of range index should not be native")
+	}
+}
+
+func TestStringTableLookup(t *testing.T) {
+	st := newStringTable()
+	idx := st.Intern("hello")
+
+	if got := st.Lookup(idx); got != "hello" {
+		t.Errorf("Lookup(%d) = %q, want %q", idx, got, "hello")
+	}
+	if got := st.Lookup(999); got != "" {
+		t.Errorf("Lookup(999) = %q, want empty", got)
+	}
+	// Index 0 is always empty string
+	if got := st.Lookup(0); got != "" {
+		t.Errorf("Lookup(0) = %q, want empty", got)
+	}
+}

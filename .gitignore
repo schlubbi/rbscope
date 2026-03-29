@@ -28,3 +28,6 @@ gem/pkg/
 # Bundle
 gem/.bundle/
 test-rails-app/vendor/
+test-rails-app/.bundle/
+test-rails-app/Gemfile.lock
+test-rails-app/db/schema.rb
