@@ -49,6 +49,8 @@ extern "C" {
 
     fn rb_tracearg_object(arg: *const std::ffi::c_void) -> rb_sys::VALUE;
 
+    fn rb_class2name(klass: rb_sys::VALUE) -> *const std::os::raw::c_char;
+
     fn rb_profile_frames(
         start: std::os::raw::c_int,
         limit: std::os::raw::c_int,
@@ -78,6 +80,56 @@ const RUBY_T_MASK: usize = 0x1f;
 unsafe fn builtin_type(val: rb_sys::VALUE) -> i32 {
     let flags = *(val as *const usize);
     (flags & RUBY_T_MASK) as i32
+}
+
+/// Get the class name of a Ruby object during NEWOBJ.
+///
+/// Uses rb_class_of() + rb_class2name() which return a C string without
+/// allocating Ruby objects. Filters by type to avoid crashes on internal
+/// types (T_NODE, T_ZOMBIE, etc.) following dd-trace-rb's approach.
+/// Falls back to the VM type name when klass is 0 (internal objects).
+unsafe fn get_class_name(val: rb_sys::VALUE, obj_type: i32) -> String {
+    // Only attempt class lookup for types that have a valid klass during NEWOBJ.
+    const T_OBJECT: i32 = 0x01;
+    const T_CLASS: i32 = 0x02;
+    const T_MODULE: i32 = 0x03;
+    const T_FLOAT: i32 = 0x04;
+    const T_STRING: i32 = 0x05;
+    const T_REGEXP: i32 = 0x06;
+    const T_ARRAY: i32 = 0x07;
+    const T_HASH: i32 = 0x08;
+    const T_STRUCT: i32 = 0x09;
+    const T_BIGNUM: i32 = 0x0a;
+    const T_FILE: i32 = 0x0b;
+    const T_DATA: i32 = 0x0c;
+    const T_MATCH: i32 = 0x0d;
+    const T_COMPLEX: i32 = 0x0e;
+    const T_RATIONAL: i32 = 0x0f;
+    const T_SYMBOL: i32 = 0x1a;
+
+    match obj_type {
+        T_OBJECT | T_CLASS | T_MODULE | T_FLOAT | T_STRING | T_REGEXP |
+        T_ARRAY | T_HASH | T_STRUCT | T_BIGNUM | T_FILE | T_DATA |
+        T_MATCH | T_COMPLEX | T_RATIONAL | T_SYMBOL => {
+            // Read klass directly from RBasic (offset +8 on 64-bit).
+            // rb_class_of() is an inline function, not an exported symbol.
+            let klass = *((val as *const rb_sys::VALUE).add(1));
+            // klass=0 means internal object (e.g. rb_str_tmp_frozen_acquire)
+            if klass == 0 || klass == rb_sys::Qnil as rb_sys::VALUE {
+                return ruby_type_name(obj_type);
+            }
+            let name_ptr = rb_class2name(klass);
+            if name_ptr.is_null() {
+                return ruby_type_name(obj_type);
+            }
+            let cstr = std::ffi::CStr::from_ptr(name_ptr);
+            match cstr.to_str() {
+                Ok(s) if !s.is_empty() => s.to_string(),
+                _ => ruby_type_name(obj_type),
+            }
+        }
+        _ => ruby_type_name(obj_type),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +193,13 @@ unsafe extern "C" fn on_newobj_event(
 
 unsafe fn on_newobj_event_inner(val: rb_sys::VALUE) {
     let obj_type = builtin_type(val);
-    let object_type = ruby_type_name(obj_type);
+
+    // Get the class name of the newly allocated object.
+    // rb_class_of() + rb_class2name() return a C string (no Ruby String
+    // allocation) and are safe to call during NEWOBJ for most types.
+    // Falls back to the VM type name (T_STRING etc.) for internal types
+    // or when klass is 0 (internal objects).
+    let object_type = get_class_name(val, obj_type);
 
     // Estimate object size. We can't call rb_obj_memsize_of() during NEWOBJ
     // (it may trigger allocations). Use the RVALUE slot size (40 bytes on
