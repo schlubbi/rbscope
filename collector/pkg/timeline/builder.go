@@ -218,12 +218,18 @@ func (b *Builder) Ingest(event any) {
 			if label == "" {
 				label = "[unknown]"
 			}
-			// Qualify ambiguous method names with file context so the
-			// Firefox Profiler Stack Chart shows distinguishable labels.
-			// e.g. "call" → "call [rack/logger]"
-			// Only in BPF mode — gem mode labels are left as-is.
 			path := shortenRubyPath(info.Path)
-			label = qualifyMethodName(label, path)
+
+			// Resolve class name from cfp->self for qualified method names.
+			// e.g. "call" → "Rack::Logger#call"
+			className := b.frameResolver.ResolveClassName(ev.PID, frame.SelfVal)
+			if className != "" {
+				label = className + "#" + label
+			} else if ambiguousNames[label] && path != "" {
+				// Fallback: qualify with file context if no class name
+				label = label + " [" + pathStem(path) + "]"
+			}
+
 			frameIDs = append(frameIDs, b.frames.Intern(label, path, info.Line))
 		}
 

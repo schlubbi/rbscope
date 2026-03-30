@@ -71,6 +71,7 @@ struct pid_config {
 struct ruby_frame {
     u64 iseq_addr;      // pointer to rb_iseq_struct (0 = cfunc frame)
     u64 pc;             // program counter within iseq (for line number)
+    u64 self_val;       // cfp->self (receiver VALUE, for class name resolution)
     u32 is_cfunc;       // 1 if this is a C function frame
     u32 _pad;
 };
@@ -166,6 +167,12 @@ static __always_inline int walk_ruby_stack(
         // Store frame
         event->frames[i].iseq_addr = iseq;
         event->frames[i].is_cfunc = (iseq == 0) ? 1 : 0;
+
+        // Read self (receiver) for class name resolution
+        u64 self_val = 0;
+        bpf_probe_read_user(&self_val, sizeof(self_val),
+            (void *)(cfp_ptr + off->cfp_self));
+        event->frames[i].self_val = self_val;
 
         // Read PC for line number resolution (only meaningful for iseq frames)
         if (iseq != 0) {

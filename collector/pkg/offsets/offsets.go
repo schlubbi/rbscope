@@ -46,6 +46,9 @@ type RubyOffsets struct {
 	RStringEmbedStart uint32 // start of embedded string data
 	RStringNoEmbed    uint64 // RSTRING_NOEMBED flag value (bit mask)
 
+	// RClass (via RClass_and_rb_classext_t layout)
+	ClassClasspath uint32 // absolute offset from class VALUE to classext.classpath
+
 	// Symbol addresses (virtual addresses in ELF, add to base for runtime)
 	VMPtrSymAddr uint64 // ruby_current_vm_ptr symbol address
 

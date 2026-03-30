@@ -19,9 +19,11 @@ type FrameInfo struct {
 // iseq addresses to human-readable frame info. Caches results since
 // iseq structs are immutable once created.
 type FrameResolver struct {
-	mu      sync.RWMutex
-	cache   map[frameKey]FrameInfo
-	offsets *RubyOffsets
+	mu         sync.RWMutex
+	cache      map[frameKey]FrameInfo
+	classMu    sync.RWMutex
+	classCache map[classKey]string
+	offsets    *RubyOffsets
 }
 
 type frameKey struct {
@@ -29,11 +31,17 @@ type frameKey struct {
 	iseqAddr uint64
 }
 
+type classKey struct {
+	pid      uint32
+	klassVal uint64
+}
+
 // NewFrameResolver creates a new resolver with the given Ruby offsets.
 func NewFrameResolver(off *RubyOffsets) *FrameResolver {
 	return &FrameResolver{
-		cache:   make(map[frameKey]FrameInfo),
-		offsets: off,
+		cache:      make(map[frameKey]FrameInfo),
+		classCache: make(map[classKey]string),
+		offsets:    off,
 	}
 }
 
@@ -243,4 +251,56 @@ func readUint64(f *os.File, addr uint64, out *uint64) error {
 	}
 	*out = binary.LittleEndian.Uint64(buf[:])
 	return nil
+}
+
+// ResolveClassName reads the class name for a given cfp->self VALUE.
+// Chain: self → RBasic.klass → classext.classpath → RString
+// Results are cached — class names don't change.
+func (r *FrameResolver) ResolveClassName(pid uint32, selfVal uint64) string {
+	if selfVal == 0 || selfVal&0x7 != 0 {
+		return "" // not a heap object (fixnum, nil, true, false, symbol)
+	}
+
+	// Read klass from self (RBasic.klass at offset 8)
+	memPath := fmt.Sprintf("/proc/%d/mem", pid)
+	f, err := os.Open(memPath) // #nosec G304
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+
+	var klassVal uint64
+	if err := readUint64(f, selfVal+8, &klassVal); err != nil {
+		return ""
+	}
+	if klassVal == 0 || klassVal&0x7 != 0 {
+		return ""
+	}
+
+	// Check cache by klass pointer
+	key := classKey{pid, klassVal}
+	r.classMu.RLock()
+	if name, ok := r.classCache[key]; ok {
+		r.classMu.RUnlock()
+		return name
+	}
+	r.classMu.RUnlock()
+
+	// Read classpath VALUE from klass + ClassClasspath offset
+	off := r.offsets
+	if off.ClassClasspath == 0 {
+		return ""
+	}
+	var classpathVal uint64
+	if err := readUint64(f, klassVal+uint64(off.ClassClasspath), &classpathVal); err != nil {
+		return ""
+	}
+
+	name := readRString(f, classpathVal, off)
+
+	r.classMu.Lock()
+	r.classCache[key] = name
+	r.classMu.Unlock()
+
+	return name
 }

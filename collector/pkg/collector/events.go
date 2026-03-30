@@ -591,6 +591,7 @@ func parseGVLStackEvent(data []byte) (*GVLStackEvent, error) {
 type StackWalkFrame struct {
 	IseqAddr uint64 // pointer to rb_iseq_struct (0 = cfunc)
 	PC       uint64 // program counter within iseq
+	SelfVal  uint64 // cfp->self (receiver VALUE, for class name resolution)
 	IsCfunc  bool
 }
 
@@ -609,8 +610,8 @@ type StackWalkEvent struct {
 // stackWalkHeaderSize: event_type(4)+pid(4)+tid(4)+num_frames(4)+timestamp(8)+thread_id(8)+native_stack_len(4)+pad(4) = 40
 const stackWalkHeaderSize = 40
 
-// stackWalkFrameSize: iseq_addr(8)+pc(8)+is_cfunc(4)+pad(4) = 24
-const stackWalkFrameSize = 24
+// stackWalkFrameSize: iseq_addr(8)+pc(8)+self_val(8)+is_cfunc(4)+pad(4) = 32
+const stackWalkFrameSize = 32
 
 func parseStackWalkEvent(data []byte) (*StackWalkEvent, error) {
 	if len(data) < stackWalkHeaderSize {
@@ -636,7 +637,8 @@ func parseStackWalkEvent(data []byte) (*StackWalkEvent, error) {
 		frame := StackWalkFrame{
 			IseqAddr: binary.LittleEndian.Uint64(data[off : off+8]),
 			PC:       binary.LittleEndian.Uint64(data[off+8 : off+16]),
-			IsCfunc:  binary.LittleEndian.Uint32(data[off+16:off+20]) == 1,
+			SelfVal:  binary.LittleEndian.Uint64(data[off+16 : off+24]),
+			IsCfunc:  binary.LittleEndian.Uint32(data[off+24:off+28]) == 1,
 		}
 		ev.Frames = append(ev.Frames, frame)
 	}

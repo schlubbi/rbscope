@@ -178,9 +178,10 @@ func resolveNestedOffsets(dw *dwarf.Data, off *RubyOffsets) error {
 	needVM := off.VMRactorMainThread == 0
 	needThread := off.ThreadEC == 0
 	needRString := off.RStringHeapPtr == 0
+	needClass := off.ClassClasspath == 0
 
 	for {
-		if !needVM && !needRString && !needThread {
+		if !needVM && !needRString && !needThread && !needClass {
 			break
 		}
 		entry, err := reader.Next()
@@ -237,6 +238,39 @@ func resolveNestedOffsets(dw *dwarf.Data, off *RubyOffsets) error {
 					off.ThreadEC = uint32(f.ByteOffset)
 					needThread = false
 					break
+				}
+			}
+		}
+
+		if name == "RClass_and_rb_classext_t" && needClass {
+			typ, err := dw.Type(entry.Offset)
+			if err != nil {
+				continue
+			}
+			st, ok := typ.(*dwarf.StructType)
+			if !ok {
+				continue
+			}
+			// Find classext.classpath: classext is an inline struct member
+			// (may be behind a typedef like rb_classext_t)
+			for _, f := range st.Field {
+				if f.Name != "classext" {
+					continue
+				}
+				// Unwrap typedef if needed
+				fieldType := f.Type
+				if td, ok := fieldType.(*dwarf.TypedefType); ok {
+					fieldType = td.Type
+				}
+				inner, ok := fieldType.(*dwarf.StructType)
+				if !ok {
+					continue
+				}
+				for _, ff := range inner.Field {
+					if ff.Name == "classpath" {
+						off.ClassClasspath = uint32(f.ByteOffset + ff.ByteOffset)
+						needClass = false
+					}
 				}
 			}
 		}

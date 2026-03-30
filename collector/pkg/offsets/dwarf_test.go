@@ -71,5 +71,6 @@ func TestExtractFromDWARF(t *testing.T) {
 	t.Logf("  Thread: ec=%d", off.ThreadEC)
 	t.Logf("  RString: len=%d heap_ptr=%d embed_start=%d noembed=0x%x",
 		off.RStringLen, off.RStringHeapPtr, off.RStringEmbedStart, off.RStringNoEmbed)
+	t.Logf("  Class: classpath=%d", off.ClassClasspath)
 	t.Logf("  VMPtrSymAddr: 0x%x", off.VMPtrSymAddr)
 }

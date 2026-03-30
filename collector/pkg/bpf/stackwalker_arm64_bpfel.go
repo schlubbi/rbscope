@@ -60,6 +60,7 @@ type stackwalkerStackWalkerEvent struct {
 		_        structs.HostLayout
 		IseqAddr uint64
 		Pc       uint64
+		SelfVal  uint64
 		IsCfunc  uint32
 		Pad      uint32
 	}
