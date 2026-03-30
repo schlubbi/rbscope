@@ -15,6 +15,7 @@ const (
 	EventGVLWait    EventType = 6 // deprecated: use EventGVLState
 	EventGVLState   EventType = 7
 	EventGVLStack   EventType = 8 // Ruby stack captured at GVL SUSPENDED
+	EventStackWalk  EventType = 9 // BPF stack walker raw frame event
 )
 
 // EventType identifies the kind of event produced by the BPF programs.
@@ -197,6 +198,8 @@ func ParseEvent(data []byte) (any, error) {
 		return parseGVLStateChangeEvent(data)
 	case EventGVLStack:
 		return parseGVLStackEvent(data)
+	case EventStackWalk:
+		return parseStackWalkEvent(data)
 	default:
 		return nil, fmt.Errorf("unknown event type: %d", eventType)
 	}
@@ -582,4 +585,77 @@ func parseGVLStackEvent(data []byte) (*GVLStackEvent, error) {
 		TimestampNs: binary.LittleEndian.Uint64(data[16:24]),
 		StackData:   stackData,
 	}, nil
+}
+
+// StackWalkFrame represents a single frame from the BPF stack walker.
+type StackWalkFrame struct {
+	IseqAddr uint64 // pointer to rb_iseq_struct (0 = cfunc)
+	PC       uint64 // program counter within iseq
+	IsCfunc  bool
+}
+
+// StackWalkEvent is the raw event from the BPF stack walker.
+// Contains iseq addresses that need to be resolved to method names
+// by the frame resolver (via /proc/pid/mem reads).
+type StackWalkEvent struct {
+	EventHeader
+	NumFrames      uint32
+	ThreadID       uint64
+	NativeStackLen uint32
+	Frames         []StackWalkFrame
+	NativeStackIPs []uint64
+}
+
+// stackWalkHeaderSize: event_type(4)+pid(4)+tid(4)+num_frames(4)+timestamp(8)+thread_id(8)+native_stack_len(4)+pad(4) = 40
+const stackWalkHeaderSize = 40
+
+// stackWalkFrameSize: iseq_addr(8)+pc(8)+is_cfunc(4)+pad(4) = 24
+const stackWalkFrameSize = 24
+
+func parseStackWalkEvent(data []byte) (*StackWalkEvent, error) {
+	if len(data) < stackWalkHeaderSize {
+		return nil, fmt.Errorf("stack walk event too short: %d bytes", len(data))
+	}
+
+	ev := &StackWalkEvent{}
+	ev.Type = EventStackWalk
+	ev.PID = binary.LittleEndian.Uint32(data[4:8])
+	ev.TID = binary.LittleEndian.Uint32(data[8:12])
+	ev.NumFrames = binary.LittleEndian.Uint32(data[12:16])
+	ev.Timestamp = binary.LittleEndian.Uint64(data[16:24])
+	ev.ThreadID = binary.LittleEndian.Uint64(data[24:32])
+	ev.NativeStackLen = binary.LittleEndian.Uint32(data[32:36])
+
+	// Parse Ruby frames
+	frameStart := stackWalkHeaderSize
+	for i := uint32(0); i < ev.NumFrames; i++ {
+		off := frameStart + int(i)*stackWalkFrameSize
+		if off+stackWalkFrameSize > len(data) {
+			break
+		}
+		frame := StackWalkFrame{
+			IseqAddr: binary.LittleEndian.Uint64(data[off : off+8]),
+			PC:       binary.LittleEndian.Uint64(data[off+8 : off+16]),
+			IsCfunc:  binary.LittleEndian.Uint32(data[off+16:off+20]) == 1,
+		}
+		ev.Frames = append(ev.Frames, frame)
+	}
+
+	// Parse native stack IPs
+	// Native stack is at a fixed offset in the struct: after all MAX_RUBY_FRAMES frames
+	// MAX_RUBY_FRAMES = 128, each 24 bytes = 3072 bytes of frame data
+	nativeStart := stackWalkHeaderSize + 128*stackWalkFrameSize
+	nativeBytes := int(ev.NativeStackLen)
+	if nativeStart+nativeBytes <= len(data) && nativeBytes > 0 {
+		numIPs := nativeBytes / 8
+		for i := 0; i < numIPs; i++ {
+			off := nativeStart + i*8
+			ip := binary.LittleEndian.Uint64(data[off : off+8])
+			if ip != 0 {
+				ev.NativeStackIPs = append(ev.NativeStackIPs, ip)
+			}
+		}
+	}
+
+	return ev, nil
 }

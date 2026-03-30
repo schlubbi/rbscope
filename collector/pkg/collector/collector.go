@@ -200,6 +200,8 @@ func (c *Collector) eventLoop(ctx context.Context) {
 			ev.Timestamp = uint64(int64(ev.Timestamp) + ktimeOffset) // #nosec G115 -- ktime conversion
 		case *RubyAllocEvent:
 			ev.Timestamp = uint64(int64(ev.Timestamp) + ktimeOffset) // #nosec G115 -- ktime conversion
+		case *StackWalkEvent:
+			ev.Timestamp = uint64(int64(ev.Timestamp) + ktimeOffset) // #nosec G115 -- ktime conversion
 		}
 
 		// Auto-register PIDs for I/O tracing: when a ruby sample arrives

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/schlubbi/rbscope/collector/pkg/collector"
+	"github.com/schlubbi/rbscope/collector/pkg/offsets"
 	pb "github.com/schlubbi/rbscope/collector/pkg/proto/rbscopepb"
 	"github.com/schlubbi/rbscope/collector/pkg/symbols"
 )
@@ -33,7 +34,8 @@ type Builder struct {
 	frequency uint32
 
 	idleClassifier *IdleClassifier
-	resolver       *symbols.Resolver // for native stack symbol resolution
+	resolver       *symbols.Resolver         // for native stack symbol resolution
+	frameResolver  *offsets.FrameResolver     // for BPF stack walker iseq resolution
 }
 
 // NewBuilder creates a Builder for a new capture window.
@@ -59,6 +61,11 @@ func NewBuilder(service, hostname string, pid, frequencyHz uint32) *Builder {
 // and merged with Ruby frames.
 func (b *Builder) SetResolver(r *symbols.Resolver) {
 	b.resolver = r
+}
+
+// SetFrameResolver sets the BPF stack walker frame resolver for iseq → method/path resolution.
+func (b *Builder) SetFrameResolver(r *offsets.FrameResolver) {
+	b.frameResolver = r
 }
 
 // Ingest processes a decoded BPF event, routing it to the correct thread.
@@ -187,6 +194,45 @@ func (b *Builder) Ingest(event any) {
 		// Store all Ruby stacks captured at GVL SUSPENDED for this TID.
 		// They're correlated with I/O events by timestamp during Build().
 		b.suspendedStacks[ev.TID] = append(b.suspendedStacks[ev.TID], ev)
+
+	case *collector.StackWalkEvent:
+		// BPF stack walker event — resolve iseq addresses to method/path/line.
+		if b.frameResolver == nil {
+			break
+		}
+		b.ensureThreadName(ev.TID, ev.PID)
+		tb := b.thread(ev.TID)
+
+		frameIDs := make([]uint32, 0, len(ev.Frames))
+		for _, frame := range ev.Frames {
+			if frame.IsCfunc || frame.IseqAddr == 0 {
+				frameIDs = append(frameIDs, b.frames.Intern("[cfunc]", "", 0))
+				continue
+			}
+			info, err := b.frameResolver.Resolve(ev.PID, frame.IseqAddr)
+			if err != nil {
+				frameIDs = append(frameIDs, b.frames.Intern("[unknown]", "", 0))
+				continue
+			}
+			label := info.Label
+			if label == "" {
+				label = "[unknown]"
+			}
+			frameIDs = append(frameIDs, b.frames.Intern(label, info.Path, info.Line))
+		}
+
+		// Resolve native stack IPs
+		if len(ev.NativeStackIPs) > 0 && b.resolver != nil {
+			nativeFrames := b.resolveNativeStack(ev.NativeStackIPs)
+			frameIDs = append(frameIDs, nativeFrames...)
+		}
+
+		sample := &pb.Sample{
+			TimestampNs: ev.Timestamp,
+			FrameIds:    frameIDs,
+			Weight:      1,
+		}
+		tb.samples = append(tb.samples, sample)
 	}
 }
 
