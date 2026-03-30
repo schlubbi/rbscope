@@ -220,6 +220,7 @@ const (
 	catGC     = 9  // Garbage collection — brown
 	catOTel   = 10 // OTel spans — purple
 	catIdle   = 11 // Idle/waiting — grey
+	catAlloc  = 12 // Allocations — teal
 )
 
 // Export converts a Capture proto to Gecko JSON and writes it to path.
@@ -419,6 +420,65 @@ func (tb *threadBuilder) internStack(frameIDs []uint32) int {
 	}
 
 	return prefix.(int)
+}
+
+// internSyntheticFrame creates a frame entry from a raw label string,
+// not backed by a capture FrameTable entry. Used for synthetic frames
+// like allocation type labels.
+func (tb *threadBuilder) internSyntheticFrame(label string, cat int) int {
+	key := "synth:" + label
+	if idx, ok := tb.frameKeys[key]; ok {
+		return idx
+	}
+	locIdx := tb.internString(label)
+	idx := len(tb.frameData)
+	tb.frameData = append(tb.frameData, []any{locIdx, false, nil, nil, nil, nil, cat, 0})
+	tb.frameKeys[key] = idx
+	return idx
+}
+
+// internStackWithLeaf is like internStack but prepends a synthetic leaf frame.
+// frameIDs are leaf-first from the capture; the synthetic leaf becomes the
+// new leaf (index 0) of the resulting stack.
+func (tb *threadBuilder) internStackWithLeaf(frameIDs []uint32, leafFrameIdx int) int {
+	// Build prefix tree root→leaf. frameIDs are leaf-first, so reverse
+	// for the original frames, then append the synthetic leaf.
+	var prefix any // nil for root
+	for i := len(frameIDs) - 1; i >= 0; i-- {
+		frameIdx := tb.internFrame(frameIDs[i])
+
+		var prefixKey string
+		if prefix == nil {
+			prefixKey = fmt.Sprintf("nil:%d", frameIdx)
+		} else {
+			prefixKey = fmt.Sprintf("%d:%d", prefix, frameIdx)
+		}
+
+		if idx, ok := tb.stackKeys[prefixKey]; ok {
+			prefix = idx
+			continue
+		}
+
+		idx := len(tb.stackData)
+		tb.stackData = append(tb.stackData, []any{frameIdx, prefix})
+		tb.stackKeys[prefixKey] = idx
+		prefix = idx
+	}
+
+	// Append synthetic leaf frame
+	var prefixKey string
+	if prefix == nil {
+		prefixKey = fmt.Sprintf("nil:%d", leafFrameIdx)
+	} else {
+		prefixKey = fmt.Sprintf("%d:%d", prefix, leafFrameIdx)
+	}
+	if idx, ok := tb.stackKeys[prefixKey]; ok {
+		return idx
+	}
+	idx := len(tb.stackData)
+	tb.stackData = append(tb.stackData, []any{leafFrameIdx, prefix})
+	tb.stackKeys[prefixKey] = idx
+	return idx
 }
 
 func (tb *threadBuilder) nsToMs(ns uint64) float64 {
@@ -664,6 +724,56 @@ func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) MarkersTable {
 		})
 	}
 
+	// Allocation markers — emitted as "Native allocation" type so that
+	// Firefox Profiler extracts them into the nativeAllocations table,
+	// which feeds Call Tree, Flame Graph, and Stack Chart views.
+	// A synthetic leaf frame (e.g. "[T_STRING]") shows the allocated type.
+	for _, alloc := range tl.Allocations {
+		ms := tb.nsToMs(alloc.TimestampNs)
+
+		// Build a stack with a synthetic leaf showing the object type.
+		objType := lookupString(tb.capture.StringTable, alloc.ObjectTypeIdx)
+		typeFrame := tb.internSyntheticFrame(fmt.Sprintf("[%s]", objType), catAlloc)
+
+		var stackRef any
+		stackIdx := tb.internStackWithLeaf(alloc.FrameIds, typeFrame)
+		if stackIdx >= 0 {
+			stackRef = stackIdx
+		}
+
+		// The "Native allocation" marker type is recognized by
+		// process-profile.ts _processMarkers(). It requires:
+		//   type: "Native allocation"
+		//   size: <bytes>  (used as weight in the allocations table)
+		//   stack: GeckoMarkerStack with samples referencing stackTable
+		nameIdx := tb.internString("Native allocation")
+		payload := map[string]any{
+			"type": "Native allocation",
+			"size": alloc.SizeBytes,
+			"stack": map[string]any{
+				"name":           "SyncProfile",
+				"registerTime":   nil,
+				"unregisterTime": nil,
+				"processType":    "default",
+				"tid":            tl.ThreadId,
+				"pid":            tb.capture.Header.Pid,
+				"markers": map[string]any{
+					"schema": map[string]any{"name": 0, "startTime": 1, "endTime": 2, "phase": 3, "category": 4, "data": 5},
+					"data":   []any{},
+				},
+				"samples": map[string]any{
+					"schema": map[string]any{"stack": 0, "time": 1, "eventDelay": 2},
+					"data":   [][]any{{stackRef, ms, 0}},
+				},
+			},
+		}
+
+		data = append(data, []any{
+			nameIdx, ms, nil, MarkerPhaseInstant, catAlloc,
+			payload,
+		})
+	}
+
 	return MarkersTable{
 		Schema: MarkerTupleSchema{
 			Name: 0, StartTime: 1, EndTime: 2, Phase: 3, Category: 4, Data: 5,
@@ -824,6 +934,7 @@ func defaultCategories() []Category {
 		{Name: "GC", Color: "brown", Subcategories: []string{"GC"}},
 		{Name: "OTel", Color: "lightgreen", Subcategories: []string{"Span"}},
 		{Name: "Idle", Color: "grey", Subcategories: []string{"Idle"}},
+		{Name: "Alloc", Color: "darkgreen", Subcategories: []string{"Allocation"}},
 	}
 }
 

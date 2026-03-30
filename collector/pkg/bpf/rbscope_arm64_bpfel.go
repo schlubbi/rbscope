@@ -54,6 +54,7 @@ type rbscopeSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type rbscopeProgramSpecs struct {
+	HandleRubyAlloc  *ebpf.ProgramSpec `ebpf:"handle_ruby_alloc"`
 	HandleRubySample *ebpf.ProgramSpec `ebpf:"handle_ruby_sample"`
 }
 
@@ -112,11 +113,13 @@ type rbscopeVariables struct {
 //
 // It can be passed to loadRbscopeObjects or ebpf.CollectionSpec.LoadAndAssign.
 type rbscopePrograms struct {
+	HandleRubyAlloc  *ebpf.Program `ebpf:"handle_ruby_alloc"`
 	HandleRubySample *ebpf.Program `ebpf:"handle_ruby_sample"`
 }
 
 func (p *rbscopePrograms) Close() error {
 	return _RbscopeClose(
+		p.HandleRubyAlloc,
 		p.HandleRubySample,
 	)
 }

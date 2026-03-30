@@ -106,8 +106,8 @@ func TestBuild_TopLevel(t *testing.T) {
 	if profile.Meta.Product != "rbscope — test-app" {
 		t.Errorf("product: got %q", profile.Meta.Product)
 	}
-	if len(profile.Meta.Categories) != 12 {
-		t.Errorf("categories: got %d, want 12", len(profile.Meta.Categories))
+	if len(profile.Meta.Categories) != 13 {
+		t.Errorf("categories: got %d, want 13", len(profile.Meta.Categories))
 	}
 	if len(profile.Meta.MarkerSchema) != 8 {
 		t.Errorf("marker schemas: got %d, want 8", len(profile.Meta.MarkerSchema))

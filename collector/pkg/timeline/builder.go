@@ -67,6 +67,24 @@ func (b *Builder) SetResolver(r *symbols.Resolver) {
 // Events may come from forked children of the target PID (uprobe inheritance).
 func (b *Builder) Ingest(event any) {
 	switch ev := event.(type) {
+	case *collector.RubyAllocEvent:
+		b.ensureThreadName(ev.TID, ev.PID)
+		tb := b.thread(ev.TID)
+		frames := collector.ParseInlineStack(ev.StackData)
+		frameIDs := make([]uint32, 0, len(frames))
+
+		for _, f := range frames {
+			frameIDs = append(frameIDs, b.frames.Intern(f.Label, f.Path, f.Line))
+		}
+
+		alloc := &pb.AllocationSample{
+			TimestampNs:   ev.Timestamp,
+			ObjectTypeIdx: b.strings.Intern(ev.ObjectType),
+			SizeBytes:     ev.SizeBytes,
+			FrameIds:      frameIDs,
+		}
+		tb.allocations = append(tb.allocations, alloc)
+
 	case *collector.RubySampleEvent:
 		b.ensureThreadName(ev.TID, ev.PID)
 		tb := b.thread(ev.TID)
@@ -564,6 +582,7 @@ func (b *Builder) Build() *pb.Capture {
 			ThreadId:        tid,
 			ThreadNameIdx:   b.resolveThreadName(tid),
 			Samples:         tb.samples,
+			Allocations:     tb.allocations,
 			IoEvents:        tb.ioEvents,
 			SchedEvents:     tb.schedEvents,
 			GvlEvents:       tb.gvlEvents,
@@ -696,6 +715,7 @@ func (b *Builder) resolveThreadName(tid uint32) uint32 {
 
 type threadBuilder struct {
 	samples         []*pb.Sample
+	allocations     []*pb.AllocationSample
 	ioEvents        []*pb.IOEvent
 	schedEvents     []*pb.SchedEvent
 	gvlEvents       []*pb.GVLEvent

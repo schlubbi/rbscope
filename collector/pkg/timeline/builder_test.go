@@ -1151,3 +1151,66 @@ func TestSynthesizeIOSamples_FallbackAlsoChecksPlausibility(t *testing.T) {
 		t.Fatalf("expected 1 synthesized sample via fallback, got %d", ioSamples)
 	}
 }
+
+func TestBuilder_IngestAllocEvent(t *testing.T) {
+	b := NewBuilder("test", "host1", 100, 99)
+
+	stackData := makeStackData([]collector.InlineFrame{
+		{Label: "Object.new", Path: "test.rb", Line: 5},
+		{Label: "PostsController#index", Path: "app/controllers/posts_controller.rb", Line: 10},
+	})
+
+	b.Ingest(&collector.RubyAllocEvent{
+		RubySampleEvent: collector.RubySampleEvent{
+			EventHeader:  collector.EventHeader{TID: 100, PID: 100, Timestamp: 1000000},
+			Weight:       1,
+			StackData:    stackData,
+			StackDataLen: uint32(len(stackData)),
+		},
+		ObjectType: "String",
+		SizeBytes:  40,
+	})
+
+	b.Ingest(&collector.RubyAllocEvent{
+		RubySampleEvent: collector.RubySampleEvent{
+			EventHeader:  collector.EventHeader{TID: 100, PID: 100, Timestamp: 2000000},
+			Weight:       1,
+			StackData:    stackData,
+			StackDataLen: uint32(len(stackData)),
+		},
+		ObjectType: "Array",
+		SizeBytes:  80,
+	})
+
+	capture := b.Build()
+
+	if len(capture.Threads) != 1 {
+		t.Fatalf("expected 1 thread, got %d", len(capture.Threads))
+	}
+
+	thread := capture.Threads[0]
+	if len(thread.Allocations) != 2 {
+		t.Fatalf("expected 2 allocations, got %d", len(thread.Allocations))
+	}
+
+	alloc0 := thread.Allocations[0]
+	if alloc0.SizeBytes != 40 {
+		t.Errorf("alloc[0] size: got %d, want 40", alloc0.SizeBytes)
+	}
+	typeName := capture.StringTable[alloc0.ObjectTypeIdx]
+	if typeName != "String" {
+		t.Errorf("alloc[0] type: got %q, want %q", typeName, "String")
+	}
+	if len(alloc0.FrameIds) != 2 {
+		t.Errorf("alloc[0] frames: got %d, want 2", len(alloc0.FrameIds))
+	}
+
+	alloc1 := thread.Allocations[1]
+	if alloc1.SizeBytes != 80 {
+		t.Errorf("alloc[1] size: got %d, want 80", alloc1.SizeBytes)
+	}
+
+	if len(thread.Samples) != 0 {
+		t.Errorf("expected 0 CPU samples, got %d", len(thread.Samples))
+	}
+}

@@ -108,23 +108,41 @@ func (e *BuilderPyroscopeExporter) buildAndPush(ctx context.Context) error {
 	capture := e.builder.Build()
 	e.builder.Reset()
 
-	// Count samples across all threads.
+	// Count samples and allocations across all threads.
 	totalSamples := 0
+	totalAllocs := 0
 	for _, t := range capture.Threads {
 		totalSamples += len(t.Samples)
+		totalAllocs += len(t.Allocations)
 	}
-	if totalSamples == 0 {
+	if totalSamples == 0 && totalAllocs == 0 {
 		return nil
 	}
 
-	prof := CaptureToProfile(capture)
-	prof.DurationNanos = e.flushEvery.Nanoseconds()
-	prof.TimeNanos = time.Now().UnixNano()
+	now := time.Now().UnixNano()
 
-	if err := e.pyro.Push(ctx, prof); err != nil {
-		return err
+	// Push CPU profile
+	if totalSamples > 0 {
+		prof := CaptureToProfile(capture)
+		prof.DurationNanos = e.flushEvery.Nanoseconds()
+		prof.TimeNanos = now
+		if err := e.pyro.Push(ctx, prof); err != nil {
+			return err
+		}
 	}
 
-	e.log.Info("pushed unified profile to pyroscope", "samples", totalSamples)
+	// Push allocation profile (separate profile type)
+	if totalAllocs > 0 {
+		allocProf := CaptureToAllocProfile(capture)
+		if allocProf != nil {
+			allocProf.DurationNanos = e.flushEvery.Nanoseconds()
+			allocProf.TimeNanos = now
+			if err := e.pyro.PushWithName(ctx, allocProf, e.pyro.appName+".alloc_objects"); err != nil {
+				e.log.Warn("pyroscope alloc push failed", "err", err)
+			}
+		}
+	}
+
+	e.log.Info("pushed unified profile to pyroscope", "samples", totalSamples, "allocs", totalAllocs)
 	return nil
 }

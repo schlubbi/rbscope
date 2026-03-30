@@ -191,11 +191,14 @@ func (c *Collector) eventLoop(ctx context.Context) {
 		// Convert BPF ktime (CLOCK_MONOTONIC) timestamps to wall clock.
 		// IO and Sched events use bpf_ktime_get_ns(); Ruby samples and
 		// GVL events already use wall clock from the gem.
+		// Alloc events also use bpf_ktime_get_ns() via the BPF uprobe.
 		ktimeOffset := c.bpf.KtimeOffsetNs()
 		switch ev := event.(type) {
 		case *IOEvent:
 			ev.Timestamp = uint64(int64(ev.Timestamp) + ktimeOffset) // #nosec G115 -- ktime conversion
 		case *SchedEvent:
+			ev.Timestamp = uint64(int64(ev.Timestamp) + ktimeOffset) // #nosec G115 -- ktime conversion
+		case *RubyAllocEvent:
 			ev.Timestamp = uint64(int64(ev.Timestamp) + ktimeOffset) // #nosec G115 -- ktime conversion
 		}
 
