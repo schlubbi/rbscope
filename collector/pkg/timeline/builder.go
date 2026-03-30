@@ -91,11 +91,34 @@ func (b *Builder) Ingest(event any) {
 	case *collector.RubyAllocEvent:
 		b.ensureThreadName(ev.TID, ev.PID)
 		tb := b.thread(ev.TID)
-		frames := collector.ParseInlineStack(ev.StackData)
-		frameIDs := make([]uint32, 0, len(frames))
 
-		for _, f := range frames {
-			frameIDs = append(frameIDs, b.frames.Intern(f.Label, f.Path, f.Line))
+		var frameIDs []uint32
+
+		// Try format v3 (raw frame addresses) first, fall back to v2 (inline strings).
+		if rawFrames := collector.ParseRawFrameStack(ev.StackData); rawFrames != nil && b.frameResolver != nil {
+			// Format v3: resolve raw VALUE pointers via /proc/pid/mem.
+			// This is the low-overhead path — the gem sent raw rb_profile_frames
+			// VALUEs instead of resolved strings.
+			procPID := ev.PID
+			if mapped, ok := b.hostToContainerPID[ev.PID]; ok {
+				procPID = mapped
+			}
+			frameIDs = make([]uint32, 0, len(rawFrames))
+			for _, rf := range rawFrames {
+				info := b.frameResolver.ResolveProfileFrame(procPID, rf.Value, rf.Line)
+				if info.Label == "" {
+					continue // skip unresolvable frames
+				}
+				path := shortenRubyPath(info.Path)
+				frameIDs = append(frameIDs, b.frames.Intern(info.Label, path, info.Line))
+			}
+		} else {
+			// Format v2 fallback: inline strings already resolved by the gem.
+			frames := collector.ParseInlineStack(ev.StackData)
+			frameIDs = make([]uint32, 0, len(frames))
+			for _, f := range frames {
+				frameIDs = append(frameIDs, b.frames.Intern(f.Label, f.Path, f.Line))
+			}
 		}
 
 		alloc := &pb.AllocationSample{

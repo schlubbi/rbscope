@@ -316,10 +316,90 @@ func (r *FrameResolver) ResolveClassName(pid uint32, selfVal uint64) string {
 const (
 	tIMEMO    = 0x1a // T_IMEMO
 	imemoMent = 6    // imemo_ment subtype
+	imemoIseq = 7    // imemo_iseq subtype
 	flUShift  = 12   // FL_USHIFT
 
 	idEntryUnit = 512 // Ruby's ID_ENTRY_UNIT for paged symbol table
 )
+
+// ResolveProfileFrame resolves a VALUE returned by rb_profile_frames.
+// These VALUEs are T_IMEMO objects — either imemo_iseq (Ruby methods) or
+// imemo_ment (C function method entries). The imemo subtype in bits 12-15
+// of the flags word determines which resolution path to use.
+//
+// For iseq frames: reuses Resolve() → iseq.body.location.{label, pathobj}
+// For cfunc frames: reads called_id from the method entry → symbol table
+func (r *FrameResolver) ResolveProfileFrame(pid uint32, frameVal uint64, line int32) FrameInfo {
+	if frameVal == 0 || frameVal&0x7 != 0 || frameVal < 0x1000 {
+		return FrameInfo{}
+	}
+
+	// Check cache first — profile frame VALUEs are stable per method
+	key := frameKey{pid, frameVal}
+	r.mu.RLock()
+	if info, ok := r.cache[key]; ok {
+		r.mu.RUnlock()
+		// Override line with the actual call-site line from rb_profile_frames
+		if line > 0 {
+			info.Line = uint32(line)
+		}
+		return info
+	}
+	r.mu.RUnlock()
+
+	memPath := fmt.Sprintf("/proc/%d/mem", pid)
+	f, err := os.Open(memPath) // #nosec G304
+	if err != nil {
+		return FrameInfo{}
+	}
+	defer func() { _ = f.Close() }()
+
+	// Read RBasic flags to determine imemo subtype
+	var flags uint64
+	if err := readUint64(f, frameVal, &flags); err != nil {
+		return FrameInfo{}
+	}
+
+	// Must be T_IMEMO
+	if flags&0x1f != tIMEMO {
+		return FrameInfo{}
+	}
+
+	imemoType := (flags >> flUShift) & 0xf
+	var info FrameInfo
+
+	switch imemoType {
+	case imemoIseq:
+		// Ruby method — resolve via iseq.body.location
+		resolved, err := r.resolveFromMem(pid, frameVal)
+		if err != nil {
+			return FrameInfo{}
+		}
+		info = resolved
+		if line > 0 {
+			info.Line = uint32(line)
+		}
+
+	case imemoMent:
+		// C function method entry — resolve via called_id → symbol table
+		name := r.resolveCfuncFromME(pid, f, frameVal)
+		if name == "" {
+			name = "[cfunc]"
+		} else {
+			name = name + " [cfunc]"
+		}
+		info = FrameInfo{Label: name}
+
+	default:
+		return FrameInfo{}
+	}
+
+	r.mu.Lock()
+	r.cache[key] = info
+	r.mu.Unlock()
+
+	return info
+}
 
 // ResolveCfuncName reads the method name for a cfunc frame via ep[-2] → method entry → called_id.
 // The ep value comes from the BPF walker (carried in the pc field for cfunc frames).
@@ -343,8 +423,6 @@ func (r *FrameResolver) ResolveCfuncName(pid uint32, ep uint64) string {
 	}
 	defer func() { _ = f.Close() }()
 
-	off := r.offsets
-
 	// Read ep[-2] → method entry (or cref)
 	var meVal uint64
 	if err := readUint64(f, ep-16, &meVal); err != nil {
@@ -366,19 +444,27 @@ func (r *FrameResolver) ResolveCfuncName(pid uint32, ep uint64) string {
 		return ""
 	}
 
-	// Read called_id from method entry
-	var calledID uint64
-	if err := readUint64(f, meVal+uint64(off.MECalledID), &calledID); err != nil {
-		return ""
-	}
-
-	name := r.resolveID(pid, calledID)
+	name := r.resolveCfuncFromME(pid, f, meVal)
 
 	r.cfuncMu.Lock()
 	r.cfuncCache[key] = name
 	r.cfuncMu.Unlock()
 
 	return name
+}
+
+// resolveCfuncFromME reads the method name from a validated method entry (imemo_ment).
+// meVal must point to a T_IMEMO with imemo_ment subtype (caller validates).
+func (r *FrameResolver) resolveCfuncFromME(pid uint32, f *os.File, meVal uint64) string {
+	off := r.offsets
+
+	// Read called_id from method entry
+	var calledID uint64
+	if err := readUint64(f, meVal+uint64(off.MECalledID), &calledID); err != nil {
+		return ""
+	}
+
+	return r.resolveID(pid, calledID)
 }
 
 // resolveID converts a Ruby ID to a method name string using the global symbol table.

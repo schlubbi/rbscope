@@ -71,6 +71,14 @@ type InlineFrame struct {
 	Line  uint32
 }
 
+// RawFrame represents a single frame from format v3 stack data.
+// Contains the raw VALUE pointer from rb_profile_frames (iseq or cme address)
+// and the line number. The collector resolves these via /proc/pid/mem.
+type RawFrame struct {
+	Value uint64
+	Line  int32
+}
+
 // RubySpanEvent marks a span transition (enter/exit) observed in the Ruby VM.
 type RubySpanEvent struct {
 	EventHeader
@@ -308,6 +316,26 @@ func ParseInlineStack(data []byte) []InlineFrame {
 		off += 4
 
 		frames = append(frames, InlineFrame{Label: label, Path: path, Line: line})
+	}
+	return frames
+}
+
+// ParseRawFrameStack parses format v3 raw frame stack data.
+// Format: [u8: version=3][u16: num_frames][per frame: u64 value + i32 line]
+// Returns nil if data is not format v3.
+func ParseRawFrameStack(data []byte) []RawFrame {
+	if len(data) < 3 || data[0] != 3 {
+		return nil
+	}
+	numFrames := int(binary.LittleEndian.Uint16(data[1:3]))
+	off := 3
+
+	frames := make([]RawFrame, 0, numFrames)
+	for i := 0; i < numFrames && off+12 <= len(data); i++ {
+		val := binary.LittleEndian.Uint64(data[off:])
+		line := int32(binary.LittleEndian.Uint32(data[off+8:]))
+		off += 12
+		frames = append(frames, RawFrame{Value: val, Line: line})
 	}
 	return frames
 }
