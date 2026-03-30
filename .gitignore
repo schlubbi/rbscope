@@ -32,3 +32,4 @@ test-rails-app/.bundle/
 test-rails-app/Gemfile.lock
 test-rails-app/db/schema.rb
 collector/rbscope-collector
+/profiles/

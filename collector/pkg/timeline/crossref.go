@@ -68,12 +68,22 @@ func deriveThreadStates(tb *threadBuilder, classifier *IdleClassifier) []*pb.Thr
 
 		// Map the off-CPU reason to a thread state.
 		// If caused by an IO event, use the idle classifier.
+		// If voluntary sleep (TASK_INTERRUPTIBLE) without an IO match,
+		// classify as IDLE — the thread is likely in epoll_wait/select
+		// waiting for the next request.
 		state := offCPUReasonToState(sched.Reason)
-		if sched.Reason == pb.OffCPUReason_OFF_CPU_IO_BLOCKED {
+		switch sched.Reason {
+		case pb.OffCPUReason_OFF_CPU_IO_BLOCKED:
 			ioIdx := int(sched.CausedByIoIdx)
 			if ioIdx < len(tb.rawIOEvents) && tb.rawIOEvents[ioIdx] != nil {
 				state = classifier.ClassifyIOState(tb.rawIOEvents[ioIdx])
 			}
+		case pb.OffCPUReason_OFF_CPU_VOLUNTARY_SLEEP:
+			// TASK_INTERRUPTIBLE without a matching IO event typically
+			// means the thread is in a poll/select/epoll_wait syscall
+			// (which we don't trace individually). For worker threads
+			// this is the idle loop. Classify as IDLE.
+			state = pb.ThreadState_THREAD_STATE_IDLE
 		}
 
 		states = append(states, &pb.ThreadStateInterval{

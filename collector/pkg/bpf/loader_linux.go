@@ -40,6 +40,9 @@ type RealBPF struct {
 	gvlReader      *ringbuf.Reader
 	gvlStackReader *ringbuf.Reader // separate ring buffer for large GVL stack events
 	gvlLinks       []link.Link
+	schedObjs      *schedtracerObjects
+	schedReader    *ringbuf.Reader
+	schedLinks     []link.Link
 	readToggle     int   // rotates reads across ring buffers
 	ktimeOffsetNs  int64 // wallclock_ns - ktime_ns, add to ktime to get epoch
 }
@@ -92,6 +95,12 @@ func (r *RealBPF) Load() error {
 	if err := r.loadGVLTracer(); err != nil {
 		// GVL tracing is optional — log but don't fail
 		fmt.Fprintf(os.Stderr, "rbscope: gvl_tracer load skipped: %v\n", err)
+	}
+
+	// Load sched_tracer for off-CPU tracking and idle detection
+	if err := r.loadSchedTracer(); err != nil {
+		// Sched tracing is optional — log but don't fail
+		fmt.Fprintf(os.Stderr, "rbscope: sched_tracer load skipped: %v\n", err)
 	}
 
 	// Record the wall clock ↔ ktime offset for timestamp conversion.
@@ -178,6 +187,38 @@ func (r *RealBPF) loadGVLTracer() error {
 	return nil
 }
 
+// loadSchedTracer loads the sched_tracer BPF program for off-CPU tracking.
+// Attaches to the sched_switch tracepoint to measure off-CPU duration and
+// capture the task state (INTERRUPTIBLE vs UNINTERRUPTIBLE) for idle detection.
+func (r *RealBPF) loadSchedTracer() error {
+	schedObjs := &schedtracerObjects{}
+	if err := loadSchedtracerObjects(schedObjs, nil); err != nil {
+		return fmt.Errorf("load sched_tracer: %w", err)
+	}
+	r.schedObjs = schedObjs
+
+	rd, err := ringbuf.NewReader(schedObjs.SchedEvents)
+	if err != nil {
+		schedObjs.Close() //nolint:errcheck
+		r.schedObjs = nil
+		return fmt.Errorf("open sched ring buffer: %w", err)
+	}
+	r.schedReader = rd
+
+	// Attach the sched_switch tracepoint
+	l, err := link.Tracepoint("sched", "sched_switch", schedObjs.TpSchedSwitch, nil)
+	if err != nil {
+		rd.Close()        //nolint:errcheck
+		schedObjs.Close() //nolint:errcheck
+		r.schedObjs = nil
+		r.schedReader = nil
+		return fmt.Errorf("attach sched_switch tracepoint: %w", err)
+	}
+	r.schedLinks = append(r.schedLinks, l)
+
+	return nil
+}
+
 // AttachPID attaches a uprobe to the rbscope shared library mapped into the
 // target process. It scans /proc/{pid}/maps to locate the library rather
 // than assuming a fixed install path. Also adds the PID to the io_tracer's
@@ -190,6 +231,14 @@ func (r *RealBPF) AttachPID(pid uint32) error {
 		val := uint8(1)
 		if err := r.ioObjs.TargetPids.Put(pid, val); err != nil {
 			fmt.Fprintf(os.Stderr, "rbscope: add pid %d to io target_pids: %v\n", pid, err)
+		}
+	}
+
+	// Add PID to sched_tracer's target_pids map for off-CPU filtering
+	if r.schedObjs != nil {
+		val := uint8(1)
+		if err := r.schedObjs.TargetPids.Put(pid, val); err != nil {
+			fmt.Fprintf(os.Stderr, "rbscope: add pid %d to sched target_pids: %v\n", pid, err)
 		}
 	}
 
@@ -314,11 +363,11 @@ func (r *RealBPF) ReadRingBuffer(buf []byte) (int, error) {
 		}
 	}
 
-	// Then rotate between io, gvl, and gvl-stacks
-	r.readToggle = (r.readToggle + 1) % 3
-	secondaries := []*ringbuf.Reader{r.ioReader, r.gvlReader, r.gvlStackReader}
-	for i := 0; i < 3; i++ {
-		idx := (r.readToggle + i) % 3
+	// Then rotate between io, gvl, gvl-stacks, and sched
+	r.readToggle = (r.readToggle + 1) % 4
+	secondaries := []*ringbuf.Reader{r.ioReader, r.gvlReader, r.gvlStackReader, r.schedReader}
+	for i := 0; i < 4; i++ {
+		idx := (r.readToggle + i) % 4
 		rd := secondaries[idx]
 		if rd == nil {
 			continue
@@ -342,7 +391,7 @@ func (r *RealBPF) ReadRingBuffer(buf []byte) (int, error) {
 	}
 
 	// Check all remaining with minimal timeout
-	for _, rd := range []*ringbuf.Reader{r.reader, r.ioReader, r.gvlReader, r.gvlStackReader} {
+	for _, rd := range []*ringbuf.Reader{r.reader, r.ioReader, r.gvlReader, r.gvlStackReader, r.schedReader} {
 		if rd == nil {
 			continue
 		}
@@ -384,6 +433,9 @@ func (r *RealBPF) Close() error {
 	for _, l := range r.gvlLinks {
 		_ = l.Close()
 	}
+	for _, l := range r.schedLinks {
+		_ = l.Close()
+	}
 	if r.reader != nil {
 		_ = r.reader.Close()
 	}
@@ -396,12 +448,18 @@ func (r *RealBPF) Close() error {
 	if r.gvlStackReader != nil {
 		_ = r.gvlStackReader.Close()
 	}
+	if r.schedReader != nil {
+		_ = r.schedReader.Close()
+	}
 	_ = r.objs.Close()
 	if r.ioObjs != nil {
 		_ = r.ioObjs.Close()
 	}
 	if r.gvlObjs != nil {
 		_ = r.gvlObjs.Close()
+	}
+	if r.schedObjs != nil {
+		_ = r.schedObjs.Close()
 	}
 	return nil
 }

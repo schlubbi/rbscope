@@ -14,7 +14,7 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
 
-#define EVENT_OFFCPU 20
+#define EVENT_OFFCPU 5
 
 // ---- maps ----------------------------------------------------------------
 
@@ -25,11 +25,16 @@ struct {
 } sched_events SEC(".maps");
 
 // TID → timestamp when it went off-CPU
+struct offcpu_start_val {
+    u64 ts;
+    u8  prev_state;
+};
+
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 65536);
     __type(key, u32);   // TID
-    __type(value, u64); // off-CPU timestamp (ns)
+    __type(value, struct offcpu_start_val);
 } offcpu_start SEC(".maps");
 
 // Target PIDs populated from userspace — only track these processes
@@ -43,11 +48,11 @@ struct {
 // ---- event ---------------------------------------------------------------
 
 struct offcpu_event {
-    u8  event_type;
-    u8  _pad[3];
+    u32 event_type;
     u32 pid;
     u32 tid;
-    u32 _pad2;
+    u8  prev_state;  // task state when going off-CPU (0=RUNNING, 1=INTERRUPTIBLE, 2=UNINTERRUPTIBLE)
+    u8  _pad[3];
     u64 off_cpu_ns;
     u64 timestamp_ns;
 };
@@ -66,16 +71,21 @@ int tp_sched_switch(struct trace_event_raw_sched_switch *ctx) {
     // and rely on the target_pids check when we see it come back.
     // Record unconditionally; filter on wake-up.
     if (prev_tid != 0) {
-        bpf_map_update_elem(&offcpu_start, &prev_tid, &now, BPF_ANY);
+        struct offcpu_start_val val = {
+            .ts = now,
+            .prev_state = (u8)ctx->prev_state,
+        };
+        bpf_map_update_elem(&offcpu_start, &prev_tid, &val, BPF_ANY);
     }
 
     // --- next thread coming on-CPU ---
     u32 next_tid = (u32)ctx->next_pid;
-    u64 *start_ts = bpf_map_lookup_elem(&offcpu_start, &next_tid);
-    if (!start_ts)
+    struct offcpu_start_val *start = bpf_map_lookup_elem(&offcpu_start, &next_tid);
+    if (!start)
         return 0;
 
-    u64 delta = now - *start_ts;
+    u64 delta = now - start->ts;
+    u8 state = start->prev_state;
     bpf_map_delete_elem(&offcpu_start, &next_tid);
 
     // Filter: only emit for tracked PIDs.
@@ -92,6 +102,7 @@ int tp_sched_switch(struct trace_event_raw_sched_switch *ctx) {
     ev->event_type   = EVENT_OFFCPU;
     ev->pid          = pid;
     ev->tid          = next_tid;
+    ev->prev_state   = state;
     ev->off_cpu_ns   = delta;
     ev->timestamp_ns = now;
 
