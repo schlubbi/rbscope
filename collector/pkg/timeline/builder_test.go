@@ -51,13 +51,18 @@ func makeIOEvent(tid uint32, ts uint64, latNs uint64) *collector.IOEvent {
 }
 
 func makeSchedEvent(tid uint32, ts uint64, offCPUNs uint64) *collector.SchedEvent {
+	return makeSchedEventWithState(tid, ts, offCPUNs, 0) // default: TASK_RUNNING (preempted)
+}
+
+func makeSchedEventWithState(tid uint32, ts uint64, offCPUNs uint64, prevState uint8) *collector.SchedEvent {
 	return &collector.SchedEvent{
 		EventHeader: collector.EventHeader{
 			Type:      collector.EventSched,
 			TID:       tid,
 			Timestamp: ts,
 		},
-		OffCPUNs: offCPUNs,
+		PrevState: prevState,
+		OffCPUNs:  offCPUNs,
 	}
 }
 
@@ -234,9 +239,9 @@ func TestThreadStateDeriv(t *testing.T) {
 		t.Fatalf("states = %d, want >= 3", len(states))
 	}
 
-	// First: off-CPU [900, 1000]
-	if states[0].State != pb.ThreadState_THREAD_STATE_OFF_CPU_UNKNOWN {
-		t.Errorf("state[0] = %v, want OFF_CPU_UNKNOWN", states[0].State)
+	// First: off-CPU [900, 1000] — preempted (PrevState=0=TASK_RUNNING)
+	if states[0].State != pb.ThreadState_THREAD_STATE_OFF_CPU_PREEMPTED {
+		t.Errorf("state[0] = %v, want OFF_CPU_PREEMPTED", states[0].State)
 	}
 	if states[0].StartNs != 900 || states[0].EndNs != 1000 {
 		t.Errorf("state[0] range = [%d, %d], want [900, 1000]", states[0].StartNs, states[0].EndNs)
@@ -250,9 +255,9 @@ func TestThreadStateDeriv(t *testing.T) {
 		t.Errorf("state[1] range = [%d, %d], want [1000, 2000]", states[1].StartNs, states[1].EndNs)
 	}
 
-	// Third: off-CPU [2000, 2500]
-	if states[2].State != pb.ThreadState_THREAD_STATE_OFF_CPU_UNKNOWN {
-		t.Errorf("state[2] = %v, want OFF_CPU_UNKNOWN", states[2].State)
+	// Third: off-CPU [2000, 2500] — preempted
+	if states[2].State != pb.ThreadState_THREAD_STATE_OFF_CPU_PREEMPTED {
+		t.Errorf("state[2] = %v, want OFF_CPU_PREEMPTED", states[2].State)
 	}
 }
 
@@ -277,6 +282,24 @@ func TestIOSchedCrossRefUpdatesState(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected OFF_CPU_IO state from IO↔sched cross-ref")
+	}
+}
+
+func TestVoluntarySleepClassifiedAsIdle(t *testing.T) {
+	b := NewBuilder("svc", "h", 1, 99)
+
+	// TASK_INTERRUPTIBLE=1 (voluntary sleep, e.g. epoll_wait)
+	// without any matching IO event → should be IDLE
+	b.Ingest(makeSchedEventWithState(1, 5000, 4000, 1))
+
+	capture := b.Build()
+
+	states := capture.Threads[0].States
+	if len(states) == 0 {
+		t.Fatal("expected at least 1 state")
+	}
+	if states[0].State != pb.ThreadState_THREAD_STATE_IDLE {
+		t.Errorf("state = %v, want IDLE", states[0].State)
 	}
 }
 

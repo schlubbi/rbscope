@@ -157,6 +157,7 @@ func (b *Builder) Ingest(event any) {
 		schedEvent := &pb.SchedEvent{
 			TimestampNs: ev.Timestamp,
 			OffCpuNs:    ev.OffCPUNs,
+			Reason:      prevStateToReason(ev.PrevState),
 		}
 		tb.schedEvents = append(tb.schedEvents, schedEvent)
 
@@ -531,6 +532,26 @@ func (b *Builder) SampleCounts() map[uint32]int {
 		counts[tid] = len(tb.samples)
 	}
 	return counts
+}
+
+// prevStateToReason maps the Linux task prev_state from sched_switch to an
+// OffCPUReason. This provides a baseline classification that crossRefIOToSched
+// may override with OFF_CPU_IO_BLOCKED when a matching IO event is found.
+func prevStateToReason(prevState uint8) pb.OffCPUReason {
+	// Linux task_state bits:
+	//   0 = TASK_RUNNING (preempted by scheduler)
+	//   1 = TASK_INTERRUPTIBLE (voluntary sleep — waiting for event)
+	//   2 = TASK_UNINTERRUPTIBLE (D-state — kernel I/O)
+	switch prevState {
+	case 0:
+		return pb.OffCPUReason_OFF_CPU_PREEMPTED
+	case 1:
+		return pb.OffCPUReason_OFF_CPU_VOLUNTARY_SLEEP
+	case 2:
+		return pb.OffCPUReason_OFF_CPU_IO_BLOCKED // D-state — kernel disk I/O
+	default:
+		return pb.OffCPUReason_OFF_CPU_UNKNOWN
+	}
 }
 
 // Build produces the final Capture with cross-references and thread states.

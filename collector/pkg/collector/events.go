@@ -125,6 +125,7 @@ const (
 // SchedEvent captures a context-switch or scheduling event.
 type SchedEvent struct {
 	EventHeader
+	PrevState uint8 // task state when going off-CPU (0=RUNNING, 1=INTERRUPTIBLE, 2=UNINTERRUPTIBLE)
 	PrevPID   uint32
 	NextPID   uint32
 	OffCPUNs  uint64
@@ -421,20 +422,21 @@ func parseIOEventEnriched(data []byte) (*IOEvent, error) {
 	return ev, nil
 }
 
-func parseSchedEvent(hdr EventHeader, data []byte) (*SchedEvent, error) {
-	const minSize = eventHeaderSize + 4 + 4 + 8 + 8
-	if len(data) < minSize {
+func parseSchedEvent(_ EventHeader, data []byte) (*SchedEvent, error) {
+	// BPF struct layout (32 bytes):
+	//   event_type(4) + pid(4) + tid(4) + prev_state(1) + pad(3) +
+	//   off_cpu_ns(8) + timestamp_ns(8)
+	const schedSize = 32
+	if len(data) < schedSize {
 		return nil, fmt.Errorf("sched event too short: %d bytes", len(data))
 	}
-	ev := &SchedEvent{EventHeader: hdr}
-	off := eventHeaderSize
-	ev.PrevPID = binary.LittleEndian.Uint32(data[off:])
-	off += 4
-	ev.NextPID = binary.LittleEndian.Uint32(data[off:])
-	off += 4
-	ev.OffCPUNs = binary.LittleEndian.Uint64(data[off:])
-	off += 8
-	ev.RunqLatNs = binary.LittleEndian.Uint64(data[off:])
+	ev := &SchedEvent{}
+	ev.Type = EventSched
+	ev.PID = binary.LittleEndian.Uint32(data[4:8])
+	ev.TID = binary.LittleEndian.Uint32(data[8:12])
+	ev.PrevState = data[12]
+	ev.OffCPUNs = binary.LittleEndian.Uint64(data[16:24])
+	ev.Timestamp = binary.LittleEndian.Uint64(data[24:32])
 	return ev, nil
 }
 

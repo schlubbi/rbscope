@@ -8,9 +8,17 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"structs"
 
 	"github.com/cilium/ebpf"
 )
+
+type schedtracerOffcpuStartVal struct {
+	_         structs.HostLayout
+	Ts        uint64
+	PrevState uint8
+	_         [7]byte
+}
 
 // loadSchedtracer returns the embedded CollectionSpec for schedtracer.
 func loadSchedtracer() (*ebpf.CollectionSpec, error) {

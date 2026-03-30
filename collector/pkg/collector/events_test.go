@@ -162,11 +162,16 @@ func TestParseEvent_UnknownType(t *testing.T) {
 }
 
 func TestParseEvent_Sched(t *testing.T) {
-	data := make([]byte, 48)
-	data[0] = byte(EventSched)
-	data[24] = 200  // prevPID
-	data[28] = 0x2C // nextPID = 300
-	data[29] = 0x01
+	// BPF struct layout (32 bytes):
+	//   event_type(4) + pid(4) + tid(4) + prev_state(1) + pad(3) +
+	//   off_cpu_ns(8) + timestamp_ns(8)
+	data := make([]byte, 32)
+	binary.LittleEndian.PutUint32(data[0:], uint32(EventSched)) // event_type
+	binary.LittleEndian.PutUint32(data[4:], 200)                // pid
+	binary.LittleEndian.PutUint32(data[8:], 300)                // tid
+	data[12] = 1                                                // prev_state = TASK_INTERRUPTIBLE
+	binary.LittleEndian.PutUint64(data[16:], 5000)              // off_cpu_ns
+	binary.LittleEndian.PutUint64(data[24:], 1_000_000_000)     // timestamp_ns
 
 	evt, err := ParseEvent(data)
 	if err != nil {
@@ -177,11 +182,20 @@ func TestParseEvent_Sched(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *SchedEvent, got %T", evt)
 	}
-	if sched.PrevPID != 200 {
-		t.Errorf("PrevPID: got %d, want 200", sched.PrevPID)
+	if sched.PID != 200 {
+		t.Errorf("PID: got %d, want 200", sched.PID)
 	}
-	if sched.NextPID != 300 {
-		t.Errorf("NextPID: got %d, want 300", sched.NextPID)
+	if sched.TID != 300 {
+		t.Errorf("TID: got %d, want 300", sched.TID)
+	}
+	if sched.PrevState != 1 {
+		t.Errorf("PrevState: got %d, want 1", sched.PrevState)
+	}
+	if sched.OffCPUNs != 5000 {
+		t.Errorf("OffCPUNs: got %d, want 5000", sched.OffCPUNs)
+	}
+	if sched.Timestamp != 1_000_000_000 {
+		t.Errorf("Timestamp: got %d, want 1000000000", sched.Timestamp)
 	}
 }
 
