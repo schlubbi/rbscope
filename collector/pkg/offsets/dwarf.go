@@ -3,7 +3,10 @@ package offsets
 import (
 	"debug/dwarf"
 	"debug/elf"
+	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -14,8 +17,10 @@ type structInfo struct {
 }
 
 // ExtractFromDWARF reads Ruby VM struct offsets from DWARF debug info in
-// an ELF binary (typically libruby.so). Returns an error if DWARF data
-// is missing or required structs/fields are not found.
+// an ELF binary (typically libruby.so). If the binary has been stripped,
+// it follows .gnu_debuglink or build-id to locate separate debug files
+// (e.g., installed via libruby-dbgsym packages).
+// Returns an error if DWARF data is missing or required structs/fields are not found.
 func ExtractFromDWARF(elfPath string) (*RubyOffsets, error) {
 	f, err := elf.Open(elfPath)
 	if err != nil {
@@ -25,7 +30,21 @@ func ExtractFromDWARF(elfPath string) (*RubyOffsets, error) {
 
 	dw, err := f.DWARF()
 	if err != nil {
-		return nil, fmt.Errorf("read DWARF from %s: %w", elfPath, err)
+		// No inline DWARF — try to find a separate debug file.
+		debugPath, debugErr := findDebugFile(f, elfPath)
+		if debugErr != nil {
+			return nil, fmt.Errorf("read DWARF from %s: %w (no separate debug file found: %v)", elfPath, err, debugErr)
+		}
+		df, dfErr := elf.Open(debugPath)
+		if dfErr != nil {
+			return nil, fmt.Errorf("open debug file %s: %w", debugPath, dfErr)
+		}
+		defer df.Close() //nolint:errcheck
+		dw, err = df.DWARF()
+		if err != nil {
+			return nil, fmt.Errorf("read DWARF from debug file %s: %w", debugPath, err)
+		}
+		fmt.Fprintf(os.Stderr, "rbscope: using separate debug file %s\n", debugPath)
 	}
 
 	// Target struct names → parsed info
@@ -437,7 +456,83 @@ func FindSymbolAddress(f *elf.File, name string) (uint64, error) {
 	return 0, fmt.Errorf("symbol %q not found in ELF", name)
 }
 
-// ExtractFromDWARFWithNested is a more thorough DWARF extractor that
-// follows type references to resolve nested struct member offsets
-// (e.g., RString.as.heap.ptr). This is needed because readStructMembers
-// only captures direct members.
+// findDebugFile locates a separate debug info file for a stripped ELF binary.
+// It checks two mechanisms:
+//  1. Build-ID: /usr/lib/debug/.build-id/<xx>/<rest>.debug
+//  2. .gnu_debuglink: debug file name relative to the binary's directory
+func findDebugFile(f *elf.File, elfPath string) (string, error) {
+	// Method 1: Build-ID lookup
+	// The build-id is in a PT_NOTE segment or .note.gnu.build-id section.
+	if buildID := extractBuildID(f); buildID != "" {
+		prefix := buildID[:2]
+		suffix := buildID[2:]
+		candidates := []string{
+			filepath.Join("/usr/lib/debug/.build-id", prefix, suffix+".debug"),
+		}
+		// Also check relative to /proc/pid/root for containerized environments
+		dir := filepath.Dir(elfPath)
+		if strings.Contains(dir, "/proc/") {
+			// elfPath is like /proc/123/root/usr/lib/libruby.so
+			// Extract the /proc/123/root prefix
+			if idx := strings.Index(dir, "/root/"); idx >= 0 {
+				rootPrefix := dir[:idx+5] // e.g., /proc/123/root
+				candidates = append(candidates,
+					filepath.Join(rootPrefix, "usr/lib/debug/.build-id", prefix, suffix+".debug"),
+				)
+			}
+		}
+		for _, path := range candidates {
+			if _, err := os.Stat(path); err == nil {
+				return path, nil
+			}
+		}
+	}
+
+	// Method 2: .gnu_debuglink section
+	if sect := f.Section(".gnu_debuglink"); sect != nil {
+		data, err := sect.Data()
+		if err == nil && len(data) > 0 {
+			// Format: null-terminated filename + 4-byte CRC
+			debugName := strings.TrimRight(string(data[:len(data)-4]), "\x00")
+			if idx := strings.IndexByte(debugName, 0); idx >= 0 {
+				debugName = debugName[:idx]
+			}
+			dir := filepath.Dir(elfPath)
+			candidates := []string{
+				filepath.Join(dir, debugName),
+				filepath.Join(dir, ".debug", debugName),
+				filepath.Join("/usr/lib/debug", dir, debugName),
+			}
+			for _, path := range candidates {
+				if _, err := os.Stat(path); err == nil {
+					return path, nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no separate debug file found for %s", elfPath)
+}
+
+// extractBuildID reads the GNU build-id from an ELF file's .note.gnu.build-id section.
+func extractBuildID(f *elf.File) string {
+	sect := f.Section(".note.gnu.build-id")
+	if sect == nil {
+		return ""
+	}
+	data, err := sect.Data()
+	if err != nil || len(data) < 16 {
+		return ""
+	}
+	// ELF note format: namesz(4) + descsz(4) + type(4) + name + desc
+	// For GNU build-id: name="GNU\0" (4 bytes), type=3
+	nameSize := f.ByteOrder.Uint32(data[0:4])
+	descSize := f.ByteOrder.Uint32(data[4:8])
+	// Skip header (12 bytes) + name (aligned to 4 bytes)
+	nameAligned := (nameSize + 3) &^ 3
+	descStart := 12 + nameAligned
+	if int(descStart+descSize) > len(data) {
+		return ""
+	}
+	return hex.EncodeToString(data[descStart : descStart+descSize])
+}

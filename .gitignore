@@ -33,3 +33,7 @@ test-rails-app/Gemfile.lock
 test-rails-app/db/schema.rb
 collector/rbscope-collector
 /profiles/
+
+# Profile output files (prevent accidental commits)
+*-profile.json
+*-profile-*.json
