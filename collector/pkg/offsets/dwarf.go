@@ -284,7 +284,7 @@ func resolveNestedOffsets(dw *dwarf.Data, off *RubyOffsets) error {
 				}
 				for _, ff := range inner.Field {
 					if ff.Name == "classpath" {
-						off.ClassClasspath = uint32(f.ByteOffset + ff.ByteOffset)
+						off.ClassClasspath = uint32(f.ByteOffset + ff.ByteOffset) //nolint:gosec // DWARF offsets are small
 						needClass = false
 					}
 				}
@@ -315,7 +315,7 @@ func resolveNestedOffsets(dw *dwarf.Data, off *RubyOffsets) error {
 						if heapSt, ok := uf.Type.(*dwarf.StructType); ok {
 							for _, hf := range heapSt.Field {
 								if hf.Name == "ptr" {
-									off.RStringHeapPtr = uint32(f.ByteOffset + uf.ByteOffset + hf.ByteOffset)
+									off.RStringHeapPtr = uint32(f.ByteOffset + uf.ByteOffset + hf.ByteOffset) //nolint:gosec // DWARF offsets are small
 								}
 							}
 						}
@@ -324,7 +324,7 @@ func resolveNestedOffsets(dw *dwarf.Data, off *RubyOffsets) error {
 						if embedSt, ok := uf.Type.(*dwarf.StructType); ok {
 							for _, ef := range embedSt.Field {
 								if ef.Name == "ary" {
-									off.RStringEmbedStart = uint32(f.ByteOffset + uf.ByteOffset + ef.ByteOffset)
+									off.RStringEmbedStart = uint32(f.ByteOffset + uf.ByteOffset + ef.ByteOffset) //nolint:gosec // DWARF offsets are small
 								}
 							}
 						}
@@ -369,7 +369,7 @@ func readStructMembers(reader *dwarf.Reader, si *structInfo) error {
 			}
 
 			offset := getMemberOffset(entry)
-			si.members[name] = uint32(offset)
+			si.members[name] = uint32(offset) //nolint:gosec // DWARF member offsets are small
 		}
 
 		// Skip children of non-interesting tags

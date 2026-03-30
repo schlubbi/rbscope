@@ -1275,7 +1275,7 @@ func TestQualifyMethodName(t *testing.T) {
 		{"block in call", "rack/events.rb", "block in call [rack/events]"},
 		{"index", "app/controllers/posts_controller.rb", "index"}, // not ambiguous
 		{"process_action", "action_controller/metal.rb", "process_action"},
-		{"call", "", "call"},            // no path, leave as-is
+		{"call", "", "call"}, // no path, leave as-is
 		{"new", "active_record/base.rb", "new [active_record/base]"},
 	}
 
