@@ -35,5 +35,7 @@ collector/rbscope-collector
 /profiles/
 
 # Profile output files (prevent accidental commits)
-*-profile.json
-*-profile-*.json
+# Blanket-ignore all JSON except known config files
+*.json
+!.devcontainer/devcontainer.json
+*.pb

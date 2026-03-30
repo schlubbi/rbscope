@@ -114,8 +114,13 @@ unsafe fn get_class_name(val: rb_sys::VALUE, obj_type: i32) -> String {
             // Read klass directly from RBasic (offset +8 on 64-bit).
             // rb_class_of() is an inline function, not an exported symbol.
             let klass = *((val as *const rb_sys::VALUE).add(1));
-            // klass=0 means internal object (e.g. rb_str_tmp_frozen_acquire)
-            if klass == 0 || klass == rb_sys::Qnil as rb_sys::VALUE {
+            // klass may not be initialized during NEWOBJ — check for NULL,
+            // Qnil, and values that don't look like heap pointers.
+            if klass == 0
+                || klass == rb_sys::Qnil as rb_sys::VALUE
+                || klass < 0x1000
+                || klass & 0x07 != 0
+            {
                 return ruby_type_name(obj_type);
             }
             let name_ptr = rb_class2name(klass);
@@ -184,6 +189,13 @@ unsafe extern "C" fn on_newobj_event(
     // Get the newly allocated object from the trace arg
     let val = rb_tracearg_object(arg);
 
+    // Guard: rb_tracearg_object can return 0 (NULL) for internal allocations
+    // in Ruby 4.0 where the object isn't fully registered yet.
+    if val == 0 || val == rb_sys::Qfalse as rb_sys::VALUE {
+        IN_ALLOC_CALLBACK.store(false, Ordering::Release);
+        return;
+    }
+
     let _ = std::panic::catch_unwind(|| {
         on_newobj_event_inner(val);
     });
@@ -192,6 +204,13 @@ unsafe extern "C" fn on_newobj_event(
 }
 
 unsafe fn on_newobj_event_inner(val: rb_sys::VALUE) {
+    // Validate that val looks like a heap pointer before dereferencing.
+    // Immediate VALUEs (Fixnum, Symbol, true/false/nil) have low bits set
+    // and should never appear here, but guard anyway.
+    if val & 0x07 != 0 || val < 0x1000 {
+        return;
+    }
+
     let obj_type = builtin_type(val);
 
     // Get the class name of the newly allocated object.
@@ -236,13 +255,20 @@ unsafe fn on_newobj_event_inner(val: rb_sys::VALUE) {
     // is still ours after each call (rb_profile_frame_full_label allocates).
     let mut stack = InlineStack::new();
     for i in 0..nf {
+        let frame_val = frame_buf[i];
+        // Guard: skip NULL or immediate-looking frame VALUEs.
+        // rb_profile_frames can return garbage in some edge cases.
+        if frame_val == 0 || frame_val & 0x07 != 0 || frame_val < 0x1000 {
+            continue;
+        }
+
         // rb_profile_frame_full_label allocates a Ruby String, which fires
         // NEWOBJ → our callback → reentrancy guard blocks it → returns.
         // The returned VALUE is safe to read because it's fully initialized.
-        let label_val = rb_profile_frame_full_label(frame_buf[i]);
+        let label_val = rb_profile_frame_full_label(frame_val);
         let label = ruby_value_to_string(label_val);
 
-        let path_val = rb_profile_frame_path(frame_buf[i]);
+        let path_val = rb_profile_frame_path(frame_val);
         let path = ruby_value_to_string(path_val);
 
         let line = if line_buf[i] > 0 { line_buf[i] as u32 } else { 0 };
