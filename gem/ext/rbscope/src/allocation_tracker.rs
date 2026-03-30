@@ -7,8 +7,8 @@
 // Architecture:
 //   1. rb_add_event_hook2(RUBY_INTERNAL_EVENT_NEWOBJ, callback, ...)
 //   2. On every Nth allocation: capture stack via rb_profile_frames()
-//   3. Get object class name via rb_obj_class() + rb_class_name()
-//   4. Get approximate size via rb_obj_memsize_of()
+//   3. Get object type from RBasic flags (builtin_type)
+//   4. Resolve frame labels via rb_profile_frame_full_label()
 //   5. Fire __rbscope_probe_ruby_alloc USDT probe
 //
 // The collector receives these as typed RubyAllocEvent and builds
@@ -49,9 +49,6 @@ extern "C" {
 
     fn rb_tracearg_object(arg: *const std::ffi::c_void) -> rb_sys::VALUE;
 
-    fn rb_class2name(klass: rb_sys::VALUE) -> *const std::os::raw::c_char;
-    fn rb_obj_memsize_of(obj: rb_sys::VALUE) -> usize;
-
     fn rb_profile_frames(
         start: std::os::raw::c_int,
         limit: std::os::raw::c_int,
@@ -61,7 +58,6 @@ extern "C" {
 
     fn rb_profile_frame_full_label(frame: rb_sys::VALUE) -> rb_sys::VALUE;
     fn rb_profile_frame_path(frame: rb_sys::VALUE) -> rb_sys::VALUE;
-    fn rb_string_value_ptr(val_ptr: *mut rb_sys::VALUE) -> *const std::os::raw::c_char;
 }
 
 
@@ -82,14 +78,6 @@ const RUBY_T_MASK: usize = 0x1f;
 unsafe fn builtin_type(val: rb_sys::VALUE) -> i32 {
     let flags = *(val as *const usize);
     (flags & RUBY_T_MASK) as i32
-}
-
-/// Read the klass field from a heap-allocated Ruby VALUE.
-/// struct RBasic { VALUE flags; VALUE klass; } — klass is at offset 8.
-/// Returns 0 if the klass hasn't been written yet.
-#[inline]
-unsafe fn rbasic_class(val: rb_sys::VALUE) -> rb_sys::VALUE {
-    *((val as *const rb_sys::VALUE).add(1))
 }
 
 // ---------------------------------------------------------------------------
@@ -196,66 +184,6 @@ unsafe fn on_newobj_event_inner(val: rb_sys::VALUE) {
     if stack.serialize(&mut buf).is_ok() && buf.len() <= MAX_STACK_BYTES {
         probes::fire_ruby_alloc(&object_type, size, &buf);
         ALLOC_SAMPLED.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-/// Get the class name of a Ruby object as a String.
-/// Uses rb_type() to filter to safe object types, then rb_class_of() +
-/// rb_class2name() which returns a C string (no Ruby String allocation).
-/// Returns "(unknown)" if class name extraction fails.
-unsafe fn get_class_name(val: rb_sys::VALUE, obj_type: i32) -> String {
-    // Guard against special values
-    if val == rb_sys::Qnil as rb_sys::VALUE
-        || val == rb_sys::Qfalse as rb_sys::VALUE
-        || val == 0
-    {
-        return "(unknown)".to_string();
-    }
-
-    // Skip immediate values (fixnum, symbol, flonum)
-    if val & 0x07 != 0 {
-        return "(unknown)".to_string();
-    }
-
-    // Only attempt class lookup for object types that have a valid klass
-    // field during NEWOBJ. Internal types like T_IMEMO may not.
-    // Constants from ruby/ruby.h:
-    const T_OBJECT: i32 = 0x01;
-    const T_CLASS: i32 = 0x02;
-    const T_MODULE: i32 = 0x03;
-    const T_FLOAT: i32 = 0x04;
-    const T_STRING: i32 = 0x05;
-    const T_REGEXP: i32 = 0x06;
-    const T_ARRAY: i32 = 0x07;
-    const T_HASH: i32 = 0x08;
-    const T_STRUCT: i32 = 0x09;
-    const T_BIGNUM: i32 = 0x0a;
-    const T_FILE: i32 = 0x0b;
-    const T_DATA: i32 = 0x0c;
-    const T_MATCH: i32 = 0x0d;
-    const T_COMPLEX: i32 = 0x0e;
-    const T_RATIONAL: i32 = 0x0f;
-
-
-    match obj_type {
-        T_OBJECT | T_CLASS | T_MODULE | T_FLOAT | T_STRING | T_REGEXP |
-        T_ARRAY | T_HASH | T_STRUCT | T_BIGNUM | T_FILE | T_DATA |
-        T_MATCH | T_COMPLEX | T_RATIONAL => {
-            let klass = rbasic_class(val);
-            if klass == 0 || klass == rb_sys::Qnil as rb_sys::VALUE {
-                return ruby_type_name(obj_type);
-            }
-            let name_ptr = rb_class2name(klass);
-            if name_ptr.is_null() {
-                return ruby_type_name(obj_type);
-            }
-            let cstr = std::ffi::CStr::from_ptr(name_ptr);
-            match cstr.to_str() {
-                Ok(s) if !s.is_empty() => s.to_string(),
-                _ => ruby_type_name(obj_type),
-            }
-        }
-        _ => ruby_type_name(obj_type),
     }
 }
 
