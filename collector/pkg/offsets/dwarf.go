@@ -185,6 +185,16 @@ func ExtractFromDWARF(elfPath string) (*RubyOffsets, error) {
 	mdef := targets["rb_method_definition_struct"]
 	off.DefType = getField(mdef, "type")
 
+	// body.iseq.iseqptr — the iseq pointer for VM_METHOD_TYPE_ISEQ methods.
+	// body is a union; iseq is its first variant; iseqptr is the first field.
+	// Ruby's STATIC_ASSERT guarantees offsetof(body) <= 8.
+	bodyOff := getField(mdef, "body")
+	if bodyOff > 0 {
+		off.DefBodyIseq = bodyOff // iseqptr is at body+0 (first field of first union variant)
+	} else {
+		off.DefBodyIseq = 8 // fallback: body is at offset 8 in all known Ruby versions
+	}
+
 	// Find ruby_current_vm_ptr symbol
 	vmPtrAddr, err := FindSymbolAddress(f, "ruby_current_vm_ptr")
 	if err != nil {

@@ -370,7 +370,7 @@ func (r *FrameResolver) ResolveProfileFrame(pid uint32, frameVal uint64, line in
 
 	switch imemoType {
 	case imemoIseq:
-		// Ruby method — resolve via iseq.body.location
+		// Raw iseq object — resolve via iseq.body.location
 		resolved, err := r.resolveFromMem(pid, frameVal)
 		if err != nil {
 			return FrameInfo{}
@@ -381,14 +381,51 @@ func (r *FrameResolver) ResolveProfileFrame(pid uint32, frameVal uint64, line in
 		}
 
 	case imemoMent:
-		// C function method entry — resolve via called_id → symbol table
-		name := r.resolveCfuncFromME(pid, f, frameVal)
-		if name == "" {
-			name = "[cfunc]"
-		} else {
-			name = name + " [cfunc]"
+		// Callable method entry (CME). In Ruby 4.0, rb_profile_frames returns
+		// CMEs for BOTH Ruby methods and C methods. We must check def->type
+		// to distinguish them:
+		//   VM_METHOD_TYPE_ISEQ (0) → Ruby method: follow def->body.iseq.iseqptr
+		//   VM_METHOD_TYPE_CFUNC (1) → C method: resolve via called_id
+		off := r.offsets
+
+		// Read def pointer from CME
+		var defPtr uint64
+		if err := readUint64(f, frameVal+uint64(off.MEDef), &defPtr); err != nil || defPtr == 0 {
+			return FrameInfo{}
 		}
-		info = FrameInfo{Label: name}
+
+		// Read def->type (first byte, bitfield)
+		typeBuf := make([]byte, 1)
+		if _, err := f.ReadAt(typeBuf, int64(defPtr+uint64(off.DefType))); err != nil {
+			return FrameInfo{}
+		}
+		defType := typeBuf[0] & 0x0f // lower nibble holds the method type
+
+		if defType == 0 { // VM_METHOD_TYPE_ISEQ
+			// Ruby method — read iseq pointer from def->body.iseq.iseqptr
+			var iseqPtr uint64
+			if err := readUint64(f, defPtr+uint64(off.DefBodyIseq), &iseqPtr); err != nil || iseqPtr == 0 {
+				return FrameInfo{}
+			}
+			// Resolve the iseq
+			resolved, err := r.resolveFromMem(pid, iseqPtr)
+			if err != nil {
+				return FrameInfo{}
+			}
+			info = resolved
+			if line > 0 {
+				info.Line = uint32(line)
+			}
+		} else {
+			// CFUNC or other method type — resolve via called_id
+			name := r.resolveCfuncFromME(pid, f, frameVal)
+			if name == "" {
+				name = "[cfunc]"
+			} else {
+				name = name + " [cfunc]"
+			}
+			info = FrameInfo{Label: name}
+		}
 
 	default:
 		return FrameInfo{}
