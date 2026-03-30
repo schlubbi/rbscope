@@ -223,7 +223,11 @@ func (b *Builder) Ingest(event any) {
 		b.ensureThreadName(ev.TID, ev.PID)
 		tb := b.thread(ev.TID)
 
-		frameIDs := make([]uint32, 0, len(ev.Frames))
+		type resolvedFrame struct {
+			id       uint32
+			resolved bool // true if we got a real label (not [unknown]/[cfunc]-only)
+		}
+		resolved := make([]resolvedFrame, 0, len(ev.Frames))
 		for _, frame := range ev.Frames {
 			if frame.IsCfunc || frame.IseqAddr == 0 {
 				// For cfunc frames, PC carries EP (set by BPF walker).
@@ -235,19 +239,23 @@ func (b *Builder) Ingest(event any) {
 					className = b.frameResolver.ResolveClassName(procPID, frame.SelfVal)
 				}
 				label := "[cfunc]"
+				ok := false
 				if className != "" && cfuncName != "" {
 					label = className + "#" + cfuncName
+					ok = true
 				} else if className != "" {
 					label = className + " [cfunc]"
+					ok = true
 				} else if cfuncName != "" {
 					label = cfuncName + " [cfunc]"
+					ok = true
 				}
-				frameIDs = append(frameIDs, b.frames.Intern(label, "", 0))
+				resolved = append(resolved, resolvedFrame{b.frames.Intern(label, "", 0), ok})
 				continue
 			}
 			info, err := b.frameResolver.Resolve(procPID, frame.IseqAddr)
 			if err != nil {
-				frameIDs = append(frameIDs, b.frames.Intern("[unknown]", "", 0))
+				resolved = append(resolved, resolvedFrame{b.frames.Intern("[unknown]", "", 0), false})
 				continue
 			}
 			label := info.Label
@@ -266,7 +274,18 @@ func (b *Builder) Ingest(event any) {
 				label = label + " [" + pathStem(path) + "]"
 			}
 
-			frameIDs = append(frameIDs, b.frames.Intern(label, path, info.Line))
+			resolved = append(resolved, resolvedFrame{b.frames.Intern(label, path, info.Line), true})
+		}
+
+		// Trim trailing unresolved frames — the BPF walker can overshoot
+		// end_cfp by a few slots, producing garbage frames at the stack bottom.
+		for len(resolved) > 0 && !resolved[len(resolved)-1].resolved {
+			resolved = resolved[:len(resolved)-1]
+		}
+
+		frameIDs := make([]uint32, len(resolved))
+		for i, rf := range resolved {
+			frameIDs[i] = rf.id
 		}
 
 		// Resolve native stack IPs
@@ -507,6 +526,11 @@ func shouldFilterNativeFrame(funcName, libPath string, isRubyVM bool) bool {
 	}
 	// Empty/unresolved frames
 	if funcName == "" {
+		return true
+	}
+	// Unresolved raw addresses (no mapping found) — these appear as "0x..."
+	// and create noise at the stack root.
+	if strings.HasPrefix(funcName, "0x") {
 		return true
 	}
 	// rbscope's own USDT probe functions

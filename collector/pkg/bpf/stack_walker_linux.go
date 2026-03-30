@@ -7,12 +7,11 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"strconv"
-	"strings"
 	"time"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/schlubbi/rbscope/collector/pkg/collector"
@@ -398,35 +397,118 @@ func (s *StackWalkerBPF) PIDMapping() map[uint32]uint32 {
 
 // discoverHostPID returns the init-namespace (host) PID for a given container PID.
 //
-// In containerized environments (Docker, Codespaces, OrbStack), bpf_get_current_pid_tgid()
+// In containerized environments (Docker, Codespaces, etc.), bpf_get_current_pid_tgid()
 // returns the host-namespace PID, which may differ from the PID seen inside the
-// container.
+// container. This function discovers the mapping by attaching a minimal BPF program
+// (via inline assembly) to a PID-targeted perf event and reading what
+// bpf_get_current_pid_tgid() returns.
 //
-// /proc/<pid>/sched always reports the init-namespace PID on its first line:
-//
-//	ruby (12345, #threads: 3)
-//
-// This is deterministic and available on all kernels with CONFIG_SCHED_DEBUG
-// (enabled by default on Ubuntu, Fedora, RHEL, Debian, Codespace kernels).
+// perf_event_open() with a specific pid handles namespace translation internally,
+// so the event fires for the correct task. The BPF helper then returns the
+// init-namespace PID which is what the main stack walker BPF will see.
 func discoverHostPID(containerPid uint32) (uint32, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/sched", containerPid))
+	// Create a small array map to receive the result from BPF
+	resultMap, err := ebpf.NewMap(&ebpf.MapSpec{
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  8,
+		MaxEntries: 1,
+	})
 	if err != nil {
-		return containerPid, err
+		return containerPid, fmt.Errorf("create discovery map: %w", err)
 	}
-	// First line: "command (hostpid, #threads: N)"
-	line := strings.SplitN(string(data), "\n", 2)[0]
-	start := strings.Index(line, "(")
-	comma := strings.Index(line, ",")
-	if start < 0 || comma < 0 || comma <= start+1 {
+	defer resultMap.Close()
+
+	// Minimal BPF program: call bpf_get_current_pid_tgid(), store to map
+	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
+		Type: ebpf.PerfEvent,
+		Instructions: asm.Instructions{
+			asm.FnGetCurrentPidTgid.Call(),
+			asm.Mov.Reg(asm.R6, asm.R0),
+			asm.Mov.Imm(asm.R0, 0),
+			asm.StoreMem(asm.RFP, -4, asm.R0, asm.Word),
+			asm.StoreMem(asm.RFP, -16, asm.R6, asm.DWord),
+			asm.LoadMapPtr(asm.R1, resultMap.FD()),
+			asm.Mov.Reg(asm.R2, asm.RFP),
+			asm.Add.Imm(asm.R2, -4),
+			asm.Mov.Reg(asm.R3, asm.RFP),
+			asm.Add.Imm(asm.R3, -16),
+			asm.Mov.Imm(asm.R4, 0),
+			asm.FnMapUpdateElem.Call(),
+			asm.Mov.Imm(asm.R0, 0),
+			asm.Return(),
+		},
+		License: "GPL",
+	})
+	if err != nil {
+		return containerPid, fmt.Errorf("load discovery prog: %w", err)
+	}
+	defer prog.Close()
+
+	// Attach perf events targeted at containerPid on all CPUs.
+	nCPU := runtime.NumCPU()
+	var discoveryLinks []link.Link
+	var discoveryFDs []int
+	for cpu := 0; cpu < nCPU; cpu++ {
+		attr := unix.PerfEventAttr{
+			Type:   unix.PERF_TYPE_SOFTWARE,
+			Config: unix.PERF_COUNT_SW_CPU_CLOCK,
+			Size:   uint32(unsafe.Sizeof(unix.PerfEventAttr{})),
+			Sample: 999,
+			Bits:   unix.PerfBitFreq,
+		}
+		fd, err := unix.PerfEventOpen(&attr, int(containerPid), cpu, -1, unix.PERF_FLAG_FD_CLOEXEC)
+		if err != nil {
+			continue
+		}
+		discoveryFDs = append(discoveryFDs, fd)
+		l, err := link.AttachRawLink(link.RawLinkOptions{
+			Target:  fd,
+			Program: prog,
+			Attach:  ebpf.AttachPerfEvent,
+		})
+		if err != nil {
+			unix.Close(fd)
+			continue
+		}
+		discoveryLinks = append(discoveryLinks, l)
+	}
+	defer func() {
+		for _, l := range discoveryLinks {
+			l.Close()
+		}
+		for _, fd := range discoveryFDs {
+			unix.Close(fd)
+		}
+	}()
+
+	if len(discoveryLinks) == 0 {
 		return containerPid, nil
 	}
-	hostPid, err := strconv.ParseUint(strings.TrimSpace(line[start+1:comma]), 10, 32)
-	if err != nil {
-		return containerPid, nil
+
+	// Poll until the target gets scheduled and sampled.
+	// Workers may be idle between requests, so retry a few times.
+	var hostPid uint32
+	for attempt := 0; attempt < 10; attempt++ {
+		time.Sleep(200 * time.Millisecond)
+
+		var key uint32
+		var val uint64
+		if err := resultMap.Lookup(key, &val); err != nil {
+			continue
+		}
+
+		hostPid = uint32(val >> 32)
+		if hostPid != 0 {
+			break
+		}
 	}
-	if uint32(hostPid) != containerPid && hostPid != 0 {
+
+	if hostPid != 0 && hostPid != containerPid {
 		fmt.Fprintf(os.Stderr, "rbscope: PID namespace detected: container PID %d -> host PID %d\n",
-			containerPid, uint32(hostPid))
+			containerPid, hostPid)
+		return hostPid, nil
 	}
-	return uint32(hostPid), nil
+
+	return containerPid, nil
 }

@@ -643,10 +643,32 @@ func parseStackWalkEvent(data []byte) (*StackWalkEvent, error) {
 		ev.Frames = append(ev.Frames, frame)
 	}
 
+	// Trim trailing garbage frames past the valid stack bottom.
+	// The BPF walker can overshoot end_cfp by a few slots, producing
+	// frames with bogus iseq pointers (small values, instruction bytes).
+	// Walk backward from the end and drop frames whose iseq address
+	// is clearly not a valid heap pointer (< 0x1000 or not 8-byte aligned).
+	for len(ev.Frames) > 0 {
+		last := ev.Frames[len(ev.Frames)-1]
+		if last.IsCfunc {
+			// cfunc with iseq==0 is valid; but check if PC (ep) is sane
+			if last.PC < 0x1000 {
+				ev.Frames = ev.Frames[:len(ev.Frames)-1]
+				continue
+			}
+			break
+		}
+		if last.IseqAddr < 0x10000 || last.IseqAddr&0x7 != 0 {
+			ev.Frames = ev.Frames[:len(ev.Frames)-1]
+			continue
+		}
+		break
+	}
+
 	// Parse native stack IPs
 	// Native stack is at a fixed offset in the struct: after all MAX_RUBY_FRAMES frames
-	// MAX_RUBY_FRAMES = 512, each 32 bytes = 16384 bytes of frame data
-	nativeStart := stackWalkHeaderSize + 512*stackWalkFrameSize
+	// MAX_RUBY_FRAMES = 768, each 32 bytes = 24576 bytes of frame data
+	nativeStart := stackWalkHeaderSize + 768*stackWalkFrameSize
 	nativeBytes := int(ev.NativeStackLen)
 	if nativeStart+nativeBytes <= len(data) && nativeBytes > 0 {
 		numIPs := nativeBytes / 8

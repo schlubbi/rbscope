@@ -16,7 +16,7 @@
 #include <bpf/bpf_core_read.h>
 
 // Maximum Ruby frames we'll walk per sample.
-#define MAX_RUBY_FRAMES 512
+#define MAX_RUBY_FRAMES 768
 
 // Event types
 #define EVENT_RUBY_SAMPLE 1
