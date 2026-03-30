@@ -230,6 +230,33 @@ func runCapture(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("create BPF program: %w", err)
 		}
 		bpfProg = realBPF
+
+		// Set up frame resolver for v3 alloc stack data (raw frame VALUEs).
+		// Discover libruby and extract DWARF offsets, same as BPF mode.
+		if tb != nil {
+			rubyPath := flagCaptureRubyPath
+			if rubyPath == "" {
+				info, err := offsets.FindLibruby(flagCapturePID)
+				if err == nil {
+					rubyPath = info.HostPath
+				}
+			}
+			if rubyPath != "" {
+				rubyOffsets, err := offsets.ExtractFromDWARF(rubyPath)
+				if err == nil {
+					// Adjust symbol addresses to runtime addresses
+					info, err := offsets.FindLibruby(flagCapturePID)
+					if err == nil {
+						rubyOffsets.VMPtrSymAddr += info.BaseAddr
+						rubyOffsets.GlobalSymbolsAddr += info.BaseAddr
+					}
+					tb.SetFrameResolver(offsets.NewFrameResolver(rubyOffsets))
+					logger.Info("frame resolver ready for gem mode alloc tracking", "ruby", rubyPath)
+				} else {
+					logger.Warn("could not extract Ruby offsets for alloc frame resolution", "err", err)
+				}
+			}
+		}
 	case "bpf":
 		rubyPath := flagCaptureRubyPath
 		if rubyPath == "" {
