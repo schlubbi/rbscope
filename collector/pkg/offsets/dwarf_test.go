@@ -6,10 +6,13 @@ import (
 )
 
 func TestExtractFromDWARF(t *testing.T) {
-	// Skip if not in the Lima VM
-	rubyPath := "/opt/ruby-4.0/lib/libruby.so.4.0.1"
+	// Use RBSCOPE_TEST_LIBRUBY env var, or fall back to Lima VM path
+	rubyPath := os.Getenv("RBSCOPE_TEST_LIBRUBY")
+	if rubyPath == "" {
+		rubyPath = "/opt/ruby-4.0/lib/libruby.so.4.0.1"
+	}
 	if _, err := os.Stat(rubyPath); err != nil {
-		t.Skipf("Ruby binary not found at %s (not in Lima VM?)", rubyPath)
+		t.Skipf("Ruby binary not found at %s (set RBSCOPE_TEST_LIBRUBY or run in Lima VM)", rubyPath)
 	}
 
 	off, err := ExtractFromDWARF(rubyPath)

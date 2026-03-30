@@ -94,7 +94,7 @@ RUBY_CONFIGURE_OPTS="--enable-debug-env" rbenv install 3.3.0
 CONFIGURE_OPTS="debugflags=-g" ruby-build 3.3.0 ~/.rubies/ruby-3.3.0
 ```
 
-rbscope auto-discovers `libruby.so` from `/proc/pid/maps` — no manual path configuration needed in most cases.
+rbscope auto-discovers `libruby.so` from `/proc/pid/maps` — no manual path configuration needed in most cases. See [Ruby Version Support](docs/ruby-versions.md) for details on distro packages, custom builds, and adding support for new Ruby releases.
 
 ## Quick Start
 
