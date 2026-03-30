@@ -108,6 +108,12 @@ unsafe extern "C" fn on_newobj_event(
     _data: rb_sys::VALUE,
     arg: *const std::ffi::c_void,
 ) {
+    // Bail immediately if tracking is disabled — this check must come
+    // first since the hook stays registered and fires on every allocation.
+    if !ALLOC_TRACKING_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+
     // Hot path: increment counter and skip if not our sampling tick.
     let total = ALLOC_TOTAL.fetch_add(1, Ordering::Relaxed);
     let interval = SAMPLE_INTERVAL.load(Ordering::Relaxed) as u64;
@@ -134,13 +140,19 @@ unsafe extern "C" fn on_newobj_event(
 }
 
 unsafe fn on_newobj_event_inner(val: rb_sys::VALUE) {
-    if !ALLOC_TRACKING_ENABLED.load(Ordering::Relaxed) {
-        return;
-    }
-
     let obj_type = builtin_type(val);
     let object_type = ruby_type_name(obj_type);
-    let size = 0u64;
+
+    // Estimate object size. We can't call rb_obj_memsize_of() during NEWOBJ
+    // (it may trigger allocations). Use the RVALUE slot size (40 bytes on
+    // 64-bit) as the baseline — every Ruby object occupies at least one slot.
+    // For types that commonly have extra heap data, add a conservative estimate.
+    let size: u64 = match obj_type {
+        0x05 => 80,  // T_STRING — slot + typical small string heap buffer
+        0x07 => 72,  // T_ARRAY — slot + embedded capacity (usually 3 elements)
+        0x08 => 96,  // T_HASH — slot + st_table overhead
+        _    => 40,  // RVALUE slot size (minimum for any object)
+    };
 
     // Capture Ruby call stack — just the raw frame VALUEs + lines.
     // We CANNOT call rb_profile_frame_full_label here because it
