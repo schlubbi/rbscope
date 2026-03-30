@@ -269,8 +269,12 @@ fn ruby_type_name(t: i32) -> String {
 /// Reads the RString struct directly to avoid calling any Ruby C API
 /// functions that might trigger allocations during NEWOBJ events.
 ///
-/// RString layout (64-bit): { RBasic(16), union { heap{len(8), ptr(8), ...}, embed{ary[]} } }
-/// STR_NOEMBED flag (bit 13) indicates heap vs embedded string.
+/// Ruby 4.0 RString layout (64-bit):
+///   { RBasic(16: flags+klass), long len(8), union { heap{ptr, capa}, embed{ary[]} } }
+///
+/// `len` is always at offset 16 regardless of embed/noembed.
+/// STR_NOEMBED flag (bit 13) determines whether ptr is at offset 24 (heap)
+/// or data starts inline at offset 24 (embedded).
 unsafe fn ruby_value_to_string(value: rb_sys::VALUE) -> String {
     if value == rb_sys::Qnil as rb_sys::VALUE
         || value == rb_sys::Qfalse as rb_sys::VALUE
@@ -289,26 +293,27 @@ unsafe fn ruby_value_to_string(value: rb_sys::VALUE) -> String {
         return "(unknown)".to_string();
     }
 
-    // RBasic is 16 bytes (flags + klass). RString union starts at offset 16.
     let base = value as *const u8;
+
+    // len is always at offset 16 in Ruby 4.0+ (direct field, not in flags)
+    let len = *(base.add(16) as *const isize) as usize;
+
+    if len == 0 || len > 10_000 {
+        return "(unknown)".to_string();
+    }
 
     // STR_NOEMBED = FL_USER1 = (1 << 13). If set, string is on heap.
     const STR_NOEMBED: usize = 1 << 13;
 
-    let (ptr, len): (*const u8, usize) = if flags & STR_NOEMBED != 0 {
-        // Heap string: offset 16 = len (long), offset 24 = ptr (*char)
-        let len = *(base.add(16) as *const isize) as usize;
-        let ptr = *(base.add(24) as *const *const u8);
-        (ptr, len)
+    let ptr: *const u8 = if flags & STR_NOEMBED != 0 {
+        // Heap string: ptr at offset 24
+        *(base.add(24) as *const *const u8)
     } else {
-        // Embedded string: length is in flags bits [19:15] (Ruby 3.3+/4.0).
-        // EMBED_LEN_SHIFT = 15, EMBED_LEN_MASK = 0x1F (5 bits)
-        let len = (flags >> 15) & 0x1f;
-        let ptr = base.add(16); // data starts right after RBasic
-        (ptr, len)
+        // Embedded string: data starts at offset 24
+        base.add(24)
     };
 
-    if ptr.is_null() || len > 10_000 {
+    if ptr.is_null() {
         return "(unknown)".to_string();
     }
 
