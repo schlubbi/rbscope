@@ -49,8 +49,6 @@ extern "C" {
 
     fn rb_tracearg_object(arg: *const std::ffi::c_void) -> rb_sys::VALUE;
 
-    fn rb_class2name(klass: rb_sys::VALUE) -> *const std::os::raw::c_char;
-
     fn rb_profile_frames(
         start: std::os::raw::c_int,
         limit: std::os::raw::c_int,
@@ -84,57 +82,14 @@ unsafe fn builtin_type(val: rb_sys::VALUE) -> i32 {
 
 /// Get the class name of a Ruby object during NEWOBJ.
 ///
-/// Uses rb_class_of() + rb_class2name() which return a C string without
-/// allocating Ruby objects. Filters by type to avoid crashes on internal
-/// types (T_NODE, T_ZOMBIE, etc.) following dd-trace-rb's approach.
-/// Falls back to the VM type name when klass is 0 (internal objects).
-unsafe fn get_class_name(val: rb_sys::VALUE, obj_type: i32) -> String {
-    // Only attempt class lookup for types that have a valid klass during NEWOBJ.
-    const T_OBJECT: i32 = 0x01;
-    const T_CLASS: i32 = 0x02;
-    const T_MODULE: i32 = 0x03;
-    const T_FLOAT: i32 = 0x04;
-    const T_STRING: i32 = 0x05;
-    const T_REGEXP: i32 = 0x06;
-    const T_ARRAY: i32 = 0x07;
-    const T_HASH: i32 = 0x08;
-    const T_STRUCT: i32 = 0x09;
-    const T_BIGNUM: i32 = 0x0a;
-    const T_FILE: i32 = 0x0b;
-    const T_DATA: i32 = 0x0c;
-    const T_MATCH: i32 = 0x0d;
-    const T_COMPLEX: i32 = 0x0e;
-    const T_RATIONAL: i32 = 0x0f;
-    const T_SYMBOL: i32 = 0x1a;
-
-    match obj_type {
-        T_OBJECT | T_CLASS | T_MODULE | T_FLOAT | T_STRING | T_REGEXP |
-        T_ARRAY | T_HASH | T_STRUCT | T_BIGNUM | T_FILE | T_DATA |
-        T_MATCH | T_COMPLEX | T_RATIONAL | T_SYMBOL => {
-            // Read klass directly from RBasic (offset +8 on 64-bit).
-            // rb_class_of() is an inline function, not an exported symbol.
-            let klass = *((val as *const rb_sys::VALUE).add(1));
-            // klass may not be initialized during NEWOBJ — check for NULL,
-            // Qnil, and values that don't look like heap pointers.
-            if klass == 0
-                || klass == rb_sys::Qnil as rb_sys::VALUE
-                || klass < 0x1000
-                || klass & 0x07 != 0
-            {
-                return ruby_type_name(obj_type);
-            }
-            let name_ptr = rb_class2name(klass);
-            if name_ptr.is_null() {
-                return ruby_type_name(obj_type);
-            }
-            let cstr = std::ffi::CStr::from_ptr(name_ptr);
-            match cstr.to_str() {
-                Ok(s) if !s.is_empty() => s.to_string(),
-                _ => ruby_type_name(obj_type),
-            }
-        }
-        _ => ruby_type_name(obj_type),
-    }
+/// SAFETY: During NEWOBJ, the object and its class may not be fully initialized.
+/// `rb_class2name` is NOT safe to call here — it calls `RSTRING_PTR` on the
+/// class name VALUE, which can be Qnil (0x4) for classes without names yet
+/// (e.g., during bootsnap `load_from_binary`), causing a NULL deref in Ruby's
+/// own C code. We use only the VM type name (T_STRING, T_ARRAY, etc.) which
+/// is always available from RBasic flags.
+unsafe fn get_class_name(_val: rb_sys::VALUE, obj_type: i32) -> String {
+    ruby_type_name(obj_type)
 }
 
 // ---------------------------------------------------------------------------
