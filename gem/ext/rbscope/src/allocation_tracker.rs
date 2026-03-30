@@ -108,6 +108,12 @@ unsafe extern "C" fn on_newobj_event(
     _data: rb_sys::VALUE,
     arg: *const std::ffi::c_void,
 ) {
+    // Bail immediately if tracking is disabled — this check must come
+    // first since the hook stays registered and fires on every allocation.
+    if !ALLOC_TRACKING_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+
     // Hot path: increment counter and skip if not our sampling tick.
     let total = ALLOC_TOTAL.fetch_add(1, Ordering::Relaxed);
     let interval = SAMPLE_INTERVAL.load(Ordering::Relaxed) as u64;
@@ -134,10 +140,6 @@ unsafe extern "C" fn on_newobj_event(
 }
 
 unsafe fn on_newobj_event_inner(val: rb_sys::VALUE) {
-    if !ALLOC_TRACKING_ENABLED.load(Ordering::Relaxed) {
-        return;
-    }
-
     let obj_type = builtin_type(val);
     let object_type = ruby_type_name(obj_type);
 
