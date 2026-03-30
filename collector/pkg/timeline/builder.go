@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/schlubbi/rbscope/collector/pkg/collector"
+	"github.com/schlubbi/rbscope/collector/pkg/offsets"
 	pb "github.com/schlubbi/rbscope/collector/pkg/proto/rbscopepb"
 	"github.com/schlubbi/rbscope/collector/pkg/symbols"
 )
@@ -33,7 +34,8 @@ type Builder struct {
 	frequency uint32
 
 	idleClassifier *IdleClassifier
-	resolver       *symbols.Resolver // for native stack symbol resolution
+	resolver       *symbols.Resolver      // for native stack symbol resolution
+	frameResolver  *offsets.FrameResolver // for BPF stack walker iseq resolution
 }
 
 // NewBuilder creates a Builder for a new capture window.
@@ -59,6 +61,11 @@ func NewBuilder(service, hostname string, pid, frequencyHz uint32) *Builder {
 // and merged with Ruby frames.
 func (b *Builder) SetResolver(r *symbols.Resolver) {
 	b.resolver = r
+}
+
+// SetFrameResolver sets the BPF stack walker frame resolver for iseq → method/path resolution.
+func (b *Builder) SetFrameResolver(r *offsets.FrameResolver) {
+	b.frameResolver = r
 }
 
 // Ingest processes a decoded BPF event, routing it to the correct thread.
@@ -187,7 +194,180 @@ func (b *Builder) Ingest(event any) {
 		// Store all Ruby stacks captured at GVL SUSPENDED for this TID.
 		// They're correlated with I/O events by timestamp during Build().
 		b.suspendedStacks[ev.TID] = append(b.suspendedStacks[ev.TID], ev)
+
+	case *collector.StackWalkEvent:
+		// BPF stack walker event — resolve iseq addresses to method/path/line.
+		if b.frameResolver == nil {
+			break
+		}
+		b.ensureThreadName(ev.TID, ev.PID)
+		tb := b.thread(ev.TID)
+
+		frameIDs := make([]uint32, 0, len(ev.Frames))
+		for _, frame := range ev.Frames {
+			if frame.IsCfunc || frame.IseqAddr == 0 {
+				// For cfunc frames, PC carries EP (set by BPF walker).
+				// Resolve method name via ep[-2] → method entry → called_id.
+				cfuncName := ""
+				className := ""
+				if b.frameResolver != nil {
+					cfuncName = b.frameResolver.ResolveCfuncName(ev.PID, frame.PC)
+					className = b.frameResolver.ResolveClassName(ev.PID, frame.SelfVal)
+				}
+				label := "[cfunc]"
+				if className != "" && cfuncName != "" {
+					label = className + "#" + cfuncName
+				} else if className != "" {
+					label = className + " [cfunc]"
+				} else if cfuncName != "" {
+					label = cfuncName + " [cfunc]"
+				}
+				frameIDs = append(frameIDs, b.frames.Intern(label, "", 0))
+				continue
+			}
+			info, err := b.frameResolver.Resolve(ev.PID, frame.IseqAddr)
+			if err != nil {
+				frameIDs = append(frameIDs, b.frames.Intern("[unknown]", "", 0))
+				continue
+			}
+			label := info.Label
+			if label == "" {
+				label = "[unknown]"
+			}
+			path := shortenRubyPath(info.Path)
+
+			// Resolve class name from cfp->self for qualified method names.
+			// e.g. "call" → "Rack::Logger#call"
+			className := b.frameResolver.ResolveClassName(ev.PID, frame.SelfVal)
+			if className != "" {
+				label = className + "#" + label
+			} else if ambiguousNames[label] && path != "" {
+				// Fallback: qualify with file context if no class name
+				label = label + " [" + pathStem(path) + "]"
+			}
+
+			frameIDs = append(frameIDs, b.frames.Intern(label, path, info.Line))
+		}
+
+		// Resolve native stack IPs
+		if len(ev.NativeStackIPs) > 0 && b.resolver != nil {
+			nativeFrames := b.resolveNativeStack(ev.NativeStackIPs)
+			frameIDs = append(frameIDs, nativeFrames...)
+		}
+
+		sample := &pb.Sample{
+			TimestampNs: ev.Timestamp,
+			FrameIds:    frameIDs,
+			Weight:      1,
+		}
+		tb.samples = append(tb.samples, sample)
 	}
+}
+
+// ambiguousNames is the set of Ruby method names that appear across many
+// different classes/modules, making them indistinguishable in a flame graph
+// without file context. Generated from Rails middleware stacks where
+// every layer has a `call` method.
+var ambiguousNames = map[string]bool{
+	"call":             true,
+	"new":              true,
+	"initialize":       true,
+	"each":             true,
+	"map":              true,
+	"select":           true,
+	"block in call":    true,
+	"block in new":     true,
+	"block in each":    true,
+	"block (2 levels)": true,
+	"block (3 levels)": true,
+}
+
+// qualifyMethodName adds a short file context to ambiguous method names
+// so they're distinguishable in a flame graph. Only applied in BPF mode.
+//
+//	"call" + "rack/logger.rb"  → "call [rack/logger]"
+//	"index" + "posts_controller.rb" → "index" (not ambiguous, left as-is)
+func qualifyMethodName(name, path string) string {
+	if path == "" || !ambiguousNames[name] {
+		return name
+	}
+	stem := pathStem(path)
+	if stem == "" {
+		return name
+	}
+	return name + " [" + stem + "]"
+}
+
+// pathStem returns a short, readable identifier from a file path.
+// Uses up to 2 path components without the extension:
+//
+//	"rack/logger.rb" → "rack/logger"
+//	"rails/rack/logger.rb" → "rack/logger"
+//	"posts_controller.rb" → "posts_controller"
+func pathStem(path string) string {
+	// Strip extension
+	if i := strings.LastIndex(path, "."); i > 0 {
+		path = path[:i]
+	}
+	// Take up to last 2 components
+	parts := strings.Split(path, "/")
+	if len(parts) > 2 {
+		parts = parts[len(parts)-2:]
+	}
+	return strings.Join(parts, "/")
+}
+
+// shortenRubyPath strips common prefixes from Ruby file paths for readability.
+// Transforms vendor/bundle gem paths and ruby stdlib paths into short forms:
+//
+//	".../vendor/bundle/ruby/4.0.0/gems/rack-3.2.5/lib/rack/logger.rb"
+//	 → "rack/logger.rb"
+//
+//	".../lib/ruby/4.0.0/net/http.rb"  → "net/http.rb"
+//	"/app/controllers/posts_controller.rb" → "app/controllers/posts_controller.rb"
+func shortenRubyPath(path string) string {
+	if path == "" {
+		return path
+	}
+
+	// Gem paths: .../gems/<gem-name>/lib/<rest>  → <rest>
+	if i := strings.Index(path, "/gems/"); i >= 0 {
+		after := path[i+6:] // after "/gems/"
+		// Skip gem name+version: "rack-3.2.5/lib/rack/logger.rb" → "rack/logger.rb"
+		if j := strings.Index(after, "/lib/"); j >= 0 {
+			return after[j+5:]
+		}
+		// No /lib/ — just skip gem name: "bundler-4.0.9/exe/bundle" → "exe/bundle"
+		if j := strings.Index(after, "/"); j >= 0 {
+			return after[j+1:]
+		}
+	}
+
+	// Ruby stdlib: .../lib/ruby/<version>/<rest> → <rest>
+	if i := strings.Index(path, "/lib/ruby/"); i >= 0 {
+		after := path[i+10:] // after "/lib/ruby/"
+		// Skip version: "4.0.0/net/http.rb" → "net/http.rb"
+		if j := strings.Index(after, "/"); j >= 0 {
+			return after[j+1:]
+		}
+	}
+
+	// App paths: keep from /app/ onward
+	if i := strings.Index(path, "/app/"); i >= 0 {
+		return path[i+1:]
+	}
+
+	// Config paths: keep from /config/ onward
+	if i := strings.Index(path, "/config/"); i >= 0 {
+		return path[i+1:]
+	}
+
+	// Fallback: strip any leading path up to and including /lib/
+	if i := strings.LastIndex(path, "/lib/"); i >= 0 {
+		return path[i+5:]
+	}
+
+	return path
 }
 
 // parseAndInternSuspendedStack parses a serialized InlineStack (format v2)

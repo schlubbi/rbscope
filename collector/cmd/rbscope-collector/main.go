@@ -24,6 +24,7 @@ import (
 	"github.com/schlubbi/rbscope/collector/pkg/export"
 	csvexport "github.com/schlubbi/rbscope/collector/pkg/export/csv"
 	"github.com/schlubbi/rbscope/collector/pkg/export/gecko"
+	"github.com/schlubbi/rbscope/collector/pkg/offsets"
 	"github.com/schlubbi/rbscope/collector/pkg/symbols"
 	"github.com/schlubbi/rbscope/collector/pkg/timeline"
 )
@@ -48,6 +49,8 @@ var (
 	flagCaptureOutput   string
 	flagCaptureBPFObj   string
 	flagCaptureFormat   string
+	flagCaptureMode     string
+	flagCaptureRubyPath string
 )
 
 func main() {
@@ -97,6 +100,8 @@ func captureCmd() *cobra.Command {
 	f.StringVar(&flagCaptureOutput, "output", "capture.pb", "Output file path")
 	f.StringVar(&flagCaptureFormat, "format", "pb", "Output format: pb (protobuf), gecko (Firefox Profiler JSON), or csv (DuckDB-ready)")
 	f.StringVar(&flagCaptureBPFObj, "bpf-obj", "", "Path to compiled BPF ELF object")
+	f.StringVar(&flagCaptureMode, "mode", "gem", "Profiling mode: gem (USDT probes) or bpf (zero-instrumentation)")
+	f.StringVar(&flagCaptureRubyPath, "ruby-path", "", "Path to libruby.so with DWARF (required for --mode=bpf)")
 	_ = cmd.MarkFlagRequired("pid")
 
 	return cmd
@@ -217,11 +222,36 @@ func runCapture(_ *cobra.Command, _ []string) error {
 	}
 
 	var bpfProg collector.BPFProgram
-	realBPF, err := bpf.NewRealBPF(flagCaptureBPFObj)
-	if err != nil {
-		return fmt.Errorf("create BPF program: %w", err)
+	switch flagCaptureMode {
+	case "gem":
+		realBPF, err := bpf.NewRealBPF(flagCaptureBPFObj)
+		if err != nil {
+			return fmt.Errorf("create BPF program: %w", err)
+		}
+		bpfProg = realBPF
+	case "bpf":
+		rubyPath := flagCaptureRubyPath
+		if rubyPath == "" {
+			// Auto-discover from /proc/pid/maps
+			info, err := offsets.FindLibruby(flagCapturePID)
+			if err != nil {
+				return fmt.Errorf("auto-discover libruby for pid %d: %w (use --ruby-path)", flagCapturePID, err)
+			}
+			rubyPath = info.HostPath
+			logger.Info("auto-discovered libruby", "path", rubyPath)
+		}
+		sw, err := bpf.NewStackWalkerBPF(rubyPath, 99)
+		if err != nil {
+			return fmt.Errorf("create stack walker: %w", err)
+		}
+		bpfProg = sw
+		// Set up frame resolver for BPF stack walker iseq → method resolution
+		if tb != nil {
+			tb.SetFrameResolver(offsets.NewFrameResolver(sw.Offsets()))
+		}
+	default:
+		return fmt.Errorf("unknown mode: %q (use gem or bpf)", flagCaptureMode)
 	}
-	bpfProg = realBPF
 
 	c := collector.New(cfg, bpfProg)
 
