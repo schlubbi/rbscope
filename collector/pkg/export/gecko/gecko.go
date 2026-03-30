@@ -356,20 +356,18 @@ func (tb *threadBuilder) internFrame(rbFrameIdx uint32) int {
 	funcName := lookupString(tb.capture.StringTable, frame.FunctionNameIdx)
 	fileName := lookupString(tb.capture.StringTable, frame.FileNameIdx)
 
-	// Build location string for function identity. Firefox Profiler's
+	// Build location string. Firefox Profiler's
 	// extractFuncsAndResourcesFromFrameLocations parses "name (file:line)"
-	// and uses the line number in the func dedup key. To ensure all frames
-	// from the same function merge in the flame graph, we use line 0 in
-	// the location string for all frames. The actual callsite line goes
-	// into frameTable.line for detail views and source annotations.
+	// and uses the line number in the func dedup key. Including the real
+	// line number means each callsite gets its own Call Tree node.
 	label := funcName
 	if fileName != "" {
-		label = fmt.Sprintf("%s (%s:0)", funcName, fileName)
+		label = fmt.Sprintf("%s (%s:%d)", funcName, fileName, frame.LineNumber)
 	}
 
-	// Frame dedup key includes line — different callsites are separate frames
-	// but share a function via the location string above.
-	key := fmt.Sprintf("%s:%d", label, frame.LineNumber)
+	// Frame dedup key — with real line numbers in the location string,
+	// this is now redundant but kept for stack table prefix-tree identity.
+	key := label
 	if idx, ok := tb.frameKeys[key]; ok {
 		return idx
 	}
