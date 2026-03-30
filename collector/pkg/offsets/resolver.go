@@ -23,6 +23,8 @@ type FrameResolver struct {
 	cache      map[frameKey]FrameInfo
 	classMu    sync.RWMutex
 	classCache map[classKey]string
+	cfuncMu    sync.RWMutex
+	cfuncCache map[cfuncKey]string
 	offsets    *RubyOffsets
 }
 
@@ -36,11 +38,17 @@ type classKey struct {
 	klassVal uint64
 }
 
+type cfuncKey struct {
+	pid    uint32
+	epAddr uint64 // the ep value (not the cfp addr)
+}
+
 // NewFrameResolver creates a new resolver with the given Ruby offsets.
 func NewFrameResolver(off *RubyOffsets) *FrameResolver {
 	return &FrameResolver{
 		cache:      make(map[frameKey]FrameInfo),
 		classCache: make(map[classKey]string),
+		cfuncCache: make(map[cfuncKey]string),
 		offsets:    off,
 	}
 }
@@ -303,4 +311,142 @@ func (r *FrameResolver) ResolveClassName(pid uint32, selfVal uint64) string {
 	r.classMu.Unlock()
 
 	return name
+}
+
+const (
+	tIMEMO    = 0x1a // T_IMEMO
+	imemoMent = 6    // imemo_ment subtype
+	flUShift  = 12   // FL_USHIFT
+
+	idEntryUnit = 512 // Ruby's ID_ENTRY_UNIT for paged symbol table
+)
+
+// ResolveCfuncName reads the method name for a cfunc frame via ep[-2] → method entry → called_id.
+// The ep value comes from the BPF walker (carried in the pc field for cfunc frames).
+func (r *FrameResolver) ResolveCfuncName(pid uint32, ep uint64) string {
+	if ep == 0 {
+		return ""
+	}
+
+	key := cfuncKey{pid, ep}
+	r.cfuncMu.RLock()
+	if name, ok := r.cfuncCache[key]; ok {
+		r.cfuncMu.RUnlock()
+		return name
+	}
+	r.cfuncMu.RUnlock()
+
+	memPath := fmt.Sprintf("/proc/%d/mem", pid)
+	f, err := os.Open(memPath) // #nosec G304
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+
+	off := r.offsets
+
+	// Read ep[-2] → method entry (or cref)
+	var meVal uint64
+	if err := readUint64(f, ep-16, &meVal); err != nil {
+		return ""
+	}
+	if meVal == 0 || meVal&0x7 != 0 {
+		return ""
+	}
+
+	// Check flags: must be T_IMEMO with imemo_ment subtype
+	var flags uint64
+	if err := readUint64(f, meVal, &flags); err != nil {
+		return ""
+	}
+	if flags&0x1f != tIMEMO {
+		return ""
+	}
+	if (flags>>flUShift)&0xf != imemoMent {
+		return ""
+	}
+
+	// Read called_id from method entry
+	var calledID uint64
+	if err := readUint64(f, meVal+uint64(off.MECalledID), &calledID); err != nil {
+		return ""
+	}
+
+	name := r.resolveID(pid, calledID)
+
+	r.cfuncMu.Lock()
+	r.cfuncCache[key] = name
+	r.cfuncMu.Unlock()
+
+	return name
+}
+
+// resolveID converts a Ruby ID to a method name string using the global symbol table.
+// The symbol table is a paged array: ids[serial / 512][serial % 512] → frozen String.
+func (r *FrameResolver) resolveID(pid uint32, id uint64) string {
+	off := r.offsets
+	if off.GlobalSymbolsAddr == 0 || id == 0 {
+		return ""
+	}
+
+	memPath := fmt.Sprintf("/proc/%d/mem", pid)
+	f, err := os.Open(memPath) // #nosec G304
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+
+	serial := id >> 3
+	pageIdx := serial / idEntryUnit
+	pageOff := serial % idEntryUnit
+
+	// GlobalSymbolsAddr is already the runtime address (base + ELF offset),
+	// adjusted in StackWalkerBPF.AttachPID().
+	gsAddr := off.GlobalSymbolsAddr
+
+	// Read ids (Array VALUE) from global_symbols + IDs offset
+	var idsVal uint64
+	if err := readUint64(f, gsAddr+uint64(off.GlobalSymbolsIDs), &idsVal); err != nil {
+		return ""
+	}
+
+	// Read outer array: heap_len at offset 16, heap_ptr at offset 32
+	var outerLen uint64
+	if err := readUint64(f, idsVal+16, &outerLen); err != nil {
+		return ""
+	}
+	if pageIdx >= outerLen {
+		return ""
+	}
+	var outerPtr uint64
+	if err := readUint64(f, idsVal+32, &outerPtr); err != nil {
+		return ""
+	}
+
+	// Read page VALUE
+	var pageVal uint64
+	if err := readUint64(f, outerPtr+pageIdx*8, &pageVal); err != nil || pageVal == 0 {
+		return ""
+	}
+
+	// Read inner array: len at offset 16, ptr at offset 32
+	var innerLen uint64
+	if err := readUint64(f, pageVal+16, &innerLen); err != nil {
+		return ""
+	}
+	if pageOff >= innerLen {
+		return ""
+	}
+	var innerPtr uint64
+	if err := readUint64(f, pageVal+32, &innerPtr); err != nil {
+		return ""
+	}
+
+	// Read the entry (frozen String VALUE)
+	var entry uint64
+	if err := readUint64(f, innerPtr+pageOff*8, &entry); err != nil || entry == 0 {
+		return ""
+	}
+
+	return readRString(f, entry, off)
 }

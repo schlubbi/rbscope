@@ -49,6 +49,15 @@ type RubyOffsets struct {
 	// RClass (via RClass_and_rb_classext_t layout)
 	ClassClasspath uint32 // absolute offset from class VALUE to classext.classpath
 
+	// Method entry (rb_callable_method_entry_t)
+	MECalledID uint32 // offset of called_id in method entry struct
+	MEDef      uint32 // offset of def pointer in method entry struct
+	DefType    uint32 // offset of type in rb_method_definition_struct
+
+	// Symbol table
+	GlobalSymbolsAddr uint64 // address of ruby_global_symbols in libruby
+	GlobalSymbolsIDs  uint32 // offset of ids (Array VALUE) in global_symbols
+
 	// Symbol addresses (virtual addresses in ELF, add to base for runtime)
 	VMPtrSymAddr uint64 // ruby_current_vm_ptr symbol address
 

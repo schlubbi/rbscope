@@ -38,6 +38,8 @@ func ExtractFromDWARF(elfPath string) (*RubyOffsets, error) {
 		"rb_iseq_location_struct",
 		"RString",
 		"rb_vm_struct",
+		"rb_callable_method_entry_struct",
+		"rb_method_definition_struct",
 	}
 	for _, name := range targetNames {
 		targets[name] = nil
@@ -155,12 +157,29 @@ func ExtractFromDWARF(elfPath string) (*RubyOffsets, error) {
 	// Default to (1<<13), can be overridden
 	off.RStringNoEmbed = 1 << 13
 
+	// rb_callable_method_entry_struct
+	cme := targets["rb_callable_method_entry_struct"]
+	off.MECalledID = getField(cme, "called_id")
+	off.MEDef = getField(cme, "def")
+
+	// rb_method_definition_struct
+	mdef := targets["rb_method_definition_struct"]
+	off.DefType = getField(mdef, "type")
+
 	// Find ruby_current_vm_ptr symbol
 	vmPtrAddr, err := FindSymbolAddress(f, "ruby_current_vm_ptr")
 	if err != nil {
 		return nil, fmt.Errorf("symbol ruby_current_vm_ptr not found: %w", err)
 	}
 	off.VMPtrSymAddr = vmPtrAddr
+
+	// Find ruby_global_symbols for ID → string resolution
+	gsAddr, err := FindSymbolAddress(f, "ruby_global_symbols")
+	if err == nil {
+		off.GlobalSymbolsAddr = gsAddr
+		off.GlobalSymbolsIDs = 16 // ids is at offset 16 in rb_symbols_t
+	}
+	// Not fatal if missing — cfunc name resolution just won't work
 
 	// Second pass: resolve nested struct offsets via DWARF type tree.
 	// This handles ractor.threads.running_ec and RString.as.heap.ptr.

@@ -174,6 +174,11 @@ func (s *StackWalkerBPF) AttachPID(pid uint32) error {
 		}
 	}
 
+	// Adjust GlobalSymbolsAddr to runtime address (one-time, first PID)
+	if s.rubyOffsets.GlobalSymbolsAddr != 0 && s.rubyOffsets.GlobalSymbolsAddr < info.BaseAddr {
+		s.rubyOffsets.GlobalSymbolsAddr += info.BaseAddr
+	}
+
 	// Register with sched_tracer
 	if s.schedObjs != nil {
 		val := uint8(1)

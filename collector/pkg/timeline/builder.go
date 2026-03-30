@@ -206,7 +206,23 @@ func (b *Builder) Ingest(event any) {
 		frameIDs := make([]uint32, 0, len(ev.Frames))
 		for _, frame := range ev.Frames {
 			if frame.IsCfunc || frame.IseqAddr == 0 {
-				frameIDs = append(frameIDs, b.frames.Intern("[cfunc]", "", 0))
+				// For cfunc frames, PC carries EP (set by BPF walker).
+				// Resolve method name via ep[-2] → method entry → called_id.
+				cfuncName := ""
+				className := ""
+				if b.frameResolver != nil {
+					cfuncName = b.frameResolver.ResolveCfuncName(ev.PID, frame.PC)
+					className = b.frameResolver.ResolveClassName(ev.PID, frame.SelfVal)
+				}
+				label := "[cfunc]"
+				if className != "" && cfuncName != "" {
+					label = className + "#" + cfuncName
+				} else if className != "" {
+					label = className + " [cfunc]"
+				} else if cfuncName != "" {
+					label = cfuncName + " [cfunc]"
+				}
+				frameIDs = append(frameIDs, b.frames.Intern(label, "", 0))
 				continue
 			}
 			info, err := b.frameResolver.Resolve(ev.PID, frame.IseqAddr)

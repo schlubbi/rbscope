@@ -181,7 +181,12 @@ static __always_inline int walk_ruby_stack(
                 (void *)(cfp_ptr + off->cfp_pc));
             event->frames[i].pc = pc;
         } else {
-            event->frames[i].pc = 0;
+            // For cfunc frames, carry EP in the pc field so Go can
+            // resolve ep[-2] → method entry → called_id → method name
+            u64 ep = 0;
+            bpf_probe_read_user(&ep, sizeof(ep),
+                (void *)(cfp_ptr + off->cfp_ep));
+            event->frames[i].pc = ep;
         }
 
         num_frames++;
