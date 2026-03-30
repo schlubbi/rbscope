@@ -1,132 +1,306 @@
-# rbscope Deployment Guide
+# Deployment Guide
 
-## Prerequisites
+## One-Shot Capture (Investigation)
 
-- Kubernetes cluster with kernel ≥5.8 (BTF + BPF ring buffer support)
-- Ruby processes with `rbscope` gem loaded
-- At least one backend: Pyroscope, Jaeger v2, or Datadog
+For ad-hoc profiling of a running Ruby process. No app changes needed.
 
-## Gem Installation (Tier 1)
+### Prerequisites
 
-Add to your Gemfile:
-```ruby
-gem 'rbscope'
-```
+1. Linux kernel ≥ 5.8
+2. Root access (or `CAP_BPF` + `CAP_PERFMON` + `CAP_SYS_PTRACE`)
+3. Ruby with DWARF debug info in `libruby.so`
 
-Enable via environment variable:
+### Steps
+
 ```bash
-RBSCOPE_ENABLED=1
+# 1. Find the Ruby PID
+pgrep -fa 'puma|unicorn|pitchfork|sidekiq'
+
+# 2. Capture a 10-second profile
+sudo rbscope-collector capture \
+  --pid 12345 \
+  --mode bpf \
+  --duration 10s \
+  --format gecko \
+  --output profile.json
+
+# 3. View the profile
+# Open https://profiler.firefox.com and load profile.json
 ```
 
-### Rails Application Integration
+The collector auto-discovers `libruby.so` from `/proc/pid/maps`. If it fails:
 
-```ruby
-# config/initializers/rbscope.rb
-if ENV['RBSCOPE_ENABLED']
-  require 'rbscope'
-  Rbscope.start(frequency: 19)
-
-  # Add OTel span exporter (alongside existing exporters)
-  require 'rbscope/otel'
-  if defined?(OpenTelemetry::SDK)
-    OpenTelemetry.tracer_provider.add_span_processor(
-      OpenTelemetry::SDK::Trace::Export::SimpleSpanProcessor.new(
-        Rbscope::OTelExporter.new
-      )
-    )
-  end
-end
+```bash
+# Specify the path manually
+sudo rbscope-collector capture \
+  --pid 12345 \
+  --mode bpf \
+  --ruby-path /usr/lib/libruby.so.3.3.0 \
+  --duration 10s \
+  --format gecko \
+  --output profile.json
 ```
 
-## Collector Deployment (Tier 2)
+### Fork-Based Servers (Pitchfork/Unicorn)
+
+Point `--pid` at **any worker**. The collector auto-discovers siblings with the same parent PID and attaches to all of them. Each worker gets its own thread in the Firefox Profiler output.
+
+```bash
+# Get any worker PID
+PID=$(pgrep -f "pitchfork.*worker" | head -1)
+sudo rbscope-collector capture --pid $PID --mode bpf --duration 30s --format gecko --output profile.json
+```
+
+### Generating Load During Capture
+
+For meaningful profiles, generate traffic while capturing:
+
+```bash
+# In one terminal: start capture
+sudo rbscope-collector capture --pid 12345 --mode bpf --duration 15s --format gecko --output profile.json
+
+# In another terminal: generate load
+hey -n 500 -c 10 http://localhost:3000/posts
+```
+
+## Always-On (Continuous Profiling)
+
+Run the collector as a daemon that auto-discovers Ruby processes and streams profiles to a backend.
+
+### Standalone
+
+```bash
+sudo rbscope-collector run \
+  --export pyroscope \
+  --pyroscope-url http://pyroscope:4040 \
+  --frequency 19
+```
+
+The collector:
+1. Scans `/proc` every 5 seconds for Ruby processes
+2. Attaches BPF programs to discovered processes
+3. Detaches when processes exit
+4. Streams profiles to Pyroscope at 10-second intervals
+
+### systemd Service
+
+```ini
+# /etc/systemd/system/rbscope-collector.service
+[Unit]
+Description=rbscope Ruby Profiler
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rbscope-collector run \
+  --export pyroscope \
+  --pyroscope-url http://pyroscope:4040 \
+  --frequency 19
+Restart=always
+RestartSec=5
+
+# Minimum capabilities
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now rbscope-collector
+```
 
 ### Kubernetes DaemonSet
 
-```bash
-# Create namespace and RBAC
-kubectl apply -f collector/deploy/k8s/namespace.yaml
-kubectl apply -f collector/deploy/k8s/rbac.yaml
+See the [README](../README.md#kubernetes-daemonset) for the full DaemonSet spec.
 
-# Configure
-kubectl apply -f collector/deploy/k8s/configmap.yaml
+Key requirements:
+- `hostPID: true` — see host processes
+- Capabilities: `BPF`, `PERFMON`, `SYS_PTRACE`
+- Mount `/proc` and `/sys` read-only
 
-# Deploy collector
-kubectl apply -f collector/deploy/k8s/daemonset.yaml
-
-# Verify
-kubectl -n rbscope get ds rbscope-collector
-kubectl -n rbscope logs -l app=rbscope-collector --tail=20
-```
-
-### ConfigMap Options
+### Docker Compose (Development)
 
 ```yaml
-data:
-  frequency: "19"              # Sampling Hz (19=always-on, 99=standard, 999=deep)
-  export: "pyroscope"          # Comma-separated: pyroscope,datadog,otlp,file
-  pyroscope_url: "http://pyroscope:4040"
-  otlp_endpoint: "otel-collector:4317"
-  discovery_interval: "5s"     # How often to scan for new Ruby processes
-  deep_capture_enabled: "false"
+services:
+  rbscope-collector:
+    image: ghcr.io/schlubbi/rbscope-collector:latest
+    command: >
+      run
+      --export pyroscope
+      --pyroscope-url http://pyroscope:4040
+      --frequency 19
+    pid: host
+    cap_add:
+      - BPF
+      - PERFMON
+      - SYS_PTRACE
+    volumes:
+      - /proc:/proc:ro
+      - /sys:/sys:ro
+
+  pyroscope:
+    image: grafana/pyroscope:latest
+    ports:
+      - "4040:4040"
 ```
 
-### Required Capabilities
+## Enhanced Mode (with Gem)
 
-The collector needs these Linux capabilities:
-- `CAP_BPF` — Load and manage BPF programs
-- `CAP_PERFMON` — Attach BPF programs to perf events (uprobes, tracepoints)
-- `CAP_SYS_PTRACE` — Read /proc/<pid>/fd for fd→socket resolution
+For GVL contention and allocation profiling, deploy the gem alongside the BPF collector.
 
-On older kernels (< 5.8), `CAP_SYS_ADMIN` may be needed instead.
+### Add the Gem
 
-## Backend Setup (Tier 3)
+```ruby
+# Gemfile
+gem 'rbscope', require: false
+```
 
-### Option A: Full Stack with OTel Collector
+```ruby
+# config/initializers/rbscope.rb
+if ENV['RBSCOPE_ENABLE']
+  require 'rbscope'
+end
+```
+
+### Deploy
 
 ```bash
-# From repo root — starts OTel Collector + Pyroscope + Jaeger
-docker-compose up -d
+# Start your app with the gem enabled
+RBSCOPE_ENABLE=1 bundle exec pitchfork -c config/pitchfork.rb
 ```
 
-The OTel Collector acts as a router:
-- Receives OTLP profiles/traces from rbscope-collector
-- Fans out to Pyroscope (profiles) and Jaeger (traces + profile correlation)
-
-### Option B: Direct Pyroscope
-
-Set collector export to `pyroscope` and point `pyroscope_url` at your Pyroscope instance.
-
-### Option C: Direct Datadog
-
-Set collector export to `datadog` and configure `datadog_url`. Correlates with existing OTel traces via `runtime-id` tag.
-
-## On-Demand Deep Capture
-
-Trigger a deep capture for investigation:
+### Capture with Gem Mode
 
 ```bash
-# From the collector pod or CLI
-rbscope-collector capture --pid <RUBY_PID> --duration 10s --output /tmp/capture.rbscope
+sudo rbscope-collector capture \
+  --pid 12345 \
+  --mode gem \
+  --duration 10s \
+  --format gecko \
+  --output profile.json
 ```
 
-View the capture:
-1. Convert to Firefox Profiler format (Gecko JSON)
-2. Open https://profiler.firefox.com/ and load the file
+Gem mode captures:
+- Stack samples (via USDT probes + `rb_profile_frames`)
+- GVL contention intervals (READY → RUNNING transitions with wait duration)
+- Allocation events (type, size, stack)
+- I/O and scheduling markers (from BPF tracepoints)
 
-## Rollout Strategy
+## Export Backends
 
-1. **Dev** — Run collector locally against `bin/rails server`
-2. **Staging** — DaemonSet on staging cluster, gem on subset of web workers
-3. **Canary** — Enable on a small node pool, compare overhead metrics
-4. **Production** — Gradual rollout, always-on at 19Hz across all web workers
+### Pyroscope
 
-## Monitoring the Collector
+```bash
+rbscope-collector run --export pyroscope --pyroscope-url http://pyroscope:4040
+```
 
-The collector exposes Prometheus metrics on `:8080/metrics`:
+### Datadog
+
+```bash
+DD_API_KEY=your-key rbscope-collector run \
+  --export datadog \
+  --datadog-url https://intake.profile.datadoghq.com
+```
+
+### OTLP (OpenTelemetry Collector)
+
+```bash
+rbscope-collector run \
+  --export otlp \
+  --otlp-endpoint otel-collector:4317
+```
+
+### Multiple Backends
+
+```bash
+rbscope-collector run \
+  --export pyroscope,datadog \
+  --pyroscope-url http://pyroscope:4040 \
+  --datadog-url https://intake.profile.datadoghq.com
+```
+
+## Sampling Frequency
+
+| Frequency | Flag | Use case |
+|---|---|---|
+| 19 Hz | `--frequency 19` | Always-on production (minimal overhead) |
+| 99 Hz | `--frequency 99` | Standard profiling / captures |
+| 999 Hz | `--frequency 999` | High-resolution investigation |
+
+The default for `run` is 19 Hz. The default for `capture` is 99 Hz.
+
+## Health and Monitoring
+
+The collector exposes HTTP endpoints on port 8080:
+
+| Endpoint | Description |
+|---|---|
+| `/healthz` | Returns `ok` — use for liveness probes |
+| `/metrics` | Prometheus metrics |
+
+Key metrics:
 
 | Metric | Description |
-|--------|-------------|
+|---|---|
 | `rbscope_samples_total` | Total stack samples captured |
 | `rbscope_drops_total` | Ring buffer drops (should be 0) |
-| `rbscope_export_latency_seconds` | Export operation latency histogram |
-| `rbscope_attached_pids` | Number of currently attached Ruby processes |
+| `rbscope_export_latency_seconds` | Export operation latency |
+| `rbscope_attached_pids` | Number of currently attached processes |
+
+## Troubleshooting
+
+### "No debug info found in libruby.so"
+
+Install the debug info package for your Ruby:
+
+```bash
+# Ubuntu/Debian
+sudo apt install libruby-dev
+
+# Fedora/RHEL
+sudo dnf debuginfo-install ruby
+
+# Verify
+readelf -S $(ruby -e 'puts RbConfig::CONFIG["libdir"]')/libruby.so* | grep debug_info
+```
+
+### "Permission denied" or "operation not permitted"
+
+The collector needs BPF capabilities:
+
+```bash
+# Run as root
+sudo rbscope-collector capture --pid 12345 --mode bpf ...
+
+# Or grant capabilities to the binary
+sudo setcap 'cap_bpf,cap_perfmon,cap_sys_ptrace=ep' /usr/local/bin/rbscope-collector
+```
+
+### "Could not find libruby.so"
+
+Auto-discovery reads `/proc/pid/maps`. If it fails:
+
+```bash
+# Find libruby manually
+cat /proc/12345/maps | grep libruby
+
+# Pass the path explicitly
+rbscope-collector capture --pid 12345 --mode bpf --ruby-path /path/to/libruby.so ...
+```
+
+### "Kernel too old for BPF ring buffer"
+
+BPF ring buffers require Linux ≥ 5.8. Check:
+
+```bash
+uname -r
+```
+
+### Empty profiles (0 samples)
+
+1. Verify the PID is correct and the process is running
+2. Generate load — idle processes produce few samples
+3. Check the collector log for errors
+4. Verify `libruby.so` has DWARF debug info
