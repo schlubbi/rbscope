@@ -109,8 +109,8 @@ func TestBuild_TopLevel(t *testing.T) {
 	if len(profile.Meta.Categories) != 13 {
 		t.Errorf("categories: got %d, want 13", len(profile.Meta.Categories))
 	}
-	if len(profile.Meta.MarkerSchema) != 9 {
-		t.Errorf("marker schemas: got %d, want 9", len(profile.Meta.MarkerSchema))
+	if len(profile.Meta.MarkerSchema) != 8 {
+		t.Errorf("marker schemas: got %d, want 8", len(profile.Meta.MarkerSchema))
 	}
 }
 
