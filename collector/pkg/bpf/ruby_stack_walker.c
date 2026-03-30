@@ -16,7 +16,7 @@
 #include <bpf/bpf_core_read.h>
 
 // Maximum Ruby frames we'll walk per sample.
-#define MAX_RUBY_FRAMES 128
+#define MAX_RUBY_FRAMES 512
 
 // Event types
 #define EVENT_RUBY_SAMPLE 1
@@ -153,7 +153,7 @@ static __always_inline int walk_ruby_stack(
     // Walk frames: cfp starts at EC.cfp (top of stack, most recent frame)
     // and grows upward (toward end_cfp) to reach older frames.
     // We skip the first CFP (it's the dummy FINISH frame).
-    #pragma unroll
+    // Bounded loop — no #pragma unroll needed on kernel 5.3+ (verifier handles it).
     for (int i = 0; i < MAX_RUBY_FRAMES; i++) {
         if (cfp_ptr == 0 || cfp_ptr >= end_cfp)
             break;

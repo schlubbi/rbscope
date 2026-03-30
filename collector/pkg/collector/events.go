@@ -645,8 +645,8 @@ func parseStackWalkEvent(data []byte) (*StackWalkEvent, error) {
 
 	// Parse native stack IPs
 	// Native stack is at a fixed offset in the struct: after all MAX_RUBY_FRAMES frames
-	// MAX_RUBY_FRAMES = 128, each 24 bytes = 3072 bytes of frame data
-	nativeStart := stackWalkHeaderSize + 128*stackWalkFrameSize
+	// MAX_RUBY_FRAMES = 512, each 32 bytes = 16384 bytes of frame data
+	nativeStart := stackWalkHeaderSize + 512*stackWalkFrameSize
 	nativeBytes := int(ev.NativeStackLen)
 	if nativeStart+nativeBytes <= len(data) && nativeBytes > 0 {
 		numIPs := nativeBytes / 8
