@@ -1237,3 +1237,52 @@ func TestBuilder_IngestAllocEvent(t *testing.T) {
 		t.Errorf("expected 0 CPU samples, got %d", len(thread.Samples))
 	}
 }
+
+func TestShortenRubyPath(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		// Gem paths
+		{"/app/vendor/bundle/ruby/4.0.0/gems/rack-3.2.5/lib/rack/logger.rb", "rack/logger.rb"},
+		{"/vendor/bundle/ruby/4.0.0/gems/railties-8.1.3/lib/rails/engine.rb", "rails/engine.rb"},
+		{"/gems/bundler-4.0.9/exe/bundle", "exe/bundle"},
+		// Ruby stdlib
+		{"/opt/ruby-4.0/lib/ruby/4.0.0/net/http.rb", "net/http.rb"},
+		{"/opt/ruby-4.0/lib/ruby/4.0.0/rubygems.rb", "rubygems.rb"},
+		// App paths
+		{"/rbscope/test-rails-app/app/controllers/posts_controller.rb", "app/controllers/posts_controller.rb"},
+		{"/rbscope/test-rails-app/config/routes.rb", "config/routes.rb"},
+		// Empty
+		{"", ""},
+		// Already short
+		{"rack/logger.rb", "rack/logger.rb"},
+	}
+
+	for _, tt := range tests {
+		got := shortenRubyPath(tt.in)
+		if got != tt.want {
+			t.Errorf("shortenRubyPath(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestQualifyMethodName(t *testing.T) {
+	tests := []struct {
+		name, path, want string
+	}{
+		{"call", "rack/logger.rb", "call [rack/logger]"},
+		{"call", "rack/lint.rb", "call [rack/lint]"},
+		{"block in call", "rack/events.rb", "block in call [rack/events]"},
+		{"index", "app/controllers/posts_controller.rb", "index"}, // not ambiguous
+		{"process_action", "action_controller/metal.rb", "process_action"},
+		{"call", "", "call"},            // no path, leave as-is
+		{"new", "active_record/base.rb", "new [active_record/base]"},
+	}
+
+	for _, tt := range tests {
+		got := qualifyMethodName(tt.name, tt.path)
+		if got != tt.want {
+			t.Errorf("qualifyMethodName(%q, %q) = %q, want %q", tt.name, tt.path, got, tt.want)
+		}
+	}
+}
