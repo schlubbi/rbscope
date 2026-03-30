@@ -28,6 +28,7 @@ type Profile struct {
 	Processes    []any     `json:"processes"`
 	PausedRanges []any     `json:"pausedRanges"`
 	Counters     []Counter `json:"counters,omitempty"`
+	Sources      *Sources  `json:"sources,omitempty"`
 }
 
 // Meta contains profile metadata.
@@ -54,6 +55,21 @@ type SampleUnits struct {
 	Time           string `json:"time"`
 	EventDelay     string `json:"eventDelay"`
 	ThreadCPUDelta string `json:"threadCPUDelta"`
+}
+
+// Sources is the source table required by Gecko profile version 33+.
+type Sources struct {
+	Schema SourcesSchema `json:"schema"`
+	Data   []any         `json:"data"`
+}
+
+// SourcesSchema defines field positions in the sources table (v34 format).
+type SourcesSchema struct {
+	ID           int `json:"id"`
+	Filename     int `json:"filename"`
+	StartLine    int `json:"startLine"`
+	StartColumn  int `json:"startColumn"`
+	SourceMapURL int `json:"sourceMapURL"`
 }
 
 // Category defines a profiler category with color.
@@ -193,13 +209,17 @@ const (
 
 const (
 	catOther  = 0
-	catRuby   = 1
-	catIO     = 2
-	catGVL    = 3
-	catGC     = 4
-	catKernel = 5
-	catOTel   = 6
-	catIdle   = 7
+	catApp    = 1  // User application code — green
+	catRails  = 2  // Rails framework — red
+	catGem    = 3  // Third-party gems — lightblue
+	catRuby   = 4  // Ruby stdlib / core — purple
+	catCfunc  = 5  // C extension functions — yellow
+	catNative = 6  // Native C library code (.so/.dylib) — blue
+	catIO     = 7  // I/O markers — orange
+	catGVL    = 8  // GVL contention — magenta
+	catGC     = 9  // Garbage collection — brown
+	catOTel   = 10 // OTel spans — purple
+	catIdle   = 11 // Idle/waiting — grey
 )
 
 // Export converts a Capture proto to Gecko JSON and writes it to path.
@@ -245,7 +265,7 @@ func Build(capture *pb.Capture) *Profile {
 
 	return &Profile{
 		Meta: Meta{
-			Version:      33,
+			Version:      34,
 			Interval:     intervalMs,
 			StartTime:    startTimeMs,
 			ShutdownTime: nil,
@@ -264,6 +284,16 @@ func Build(capture *pb.Capture) *Profile {
 		Threads:      threads,
 		Processes:    []any{},
 		PausedRanges: []any{},
+		Sources: &Sources{
+			Schema: SourcesSchema{
+				ID:           0,
+				Filename:     1,
+				StartLine:    2,
+				StartColumn:  3,
+				SourceMapURL: 4,
+			},
+			Data: []any{},
+		},
 	}
 }
 
@@ -316,7 +346,7 @@ func (tb *threadBuilder) internFrame(rbFrameIdx uint32) int {
 		}
 		locIdx := tb.internString(label)
 		idx := len(tb.frameData)
-		tb.frameData = append(tb.frameData, []any{locIdx, false, nil, nil, nil, nil, catRuby, 0})
+		tb.frameData = append(tb.frameData, []any{locIdx, false, nil, nil, nil, nil, catOther, 0})
 		tb.frameKeys[key] = idx
 		return idx
 	}
@@ -325,14 +355,19 @@ func (tb *threadBuilder) internFrame(rbFrameIdx uint32) int {
 	funcName := lookupString(tb.capture.StringTable, frame.FunctionNameIdx)
 	fileName := lookupString(tb.capture.StringTable, frame.FileNameIdx)
 
-	// Build label: "ClassName#method (file.rb:42)"
+	// Build location string for function identity. Firefox Profiler's
+	// extractFuncsAndResourcesFromFrameLocations parses "name (file:line)"
+	// and uses the line number in the func dedup key. To ensure all frames
+	// from the same function merge in the flame graph, we use line 0 in
+	// the location string for all frames. The actual callsite line goes
+	// into frameTable.line for detail views and source annotations.
 	label := funcName
-	if fileName != "" && frame.LineNumber > 0 {
-		label = fmt.Sprintf("%s (%s:%d)", funcName, fileName, frame.LineNumber)
-	} else if fileName != "" {
-		label = fmt.Sprintf("%s (%s)", funcName, fileName)
+	if fileName != "" {
+		label = fmt.Sprintf("%s (%s:0)", funcName, fileName)
 	}
 
+	// Frame dedup key includes line — different callsites are separate frames
+	// but share a function via the location string above.
 	key := fmt.Sprintf("%s:%d", label, frame.LineNumber)
 	if idx, ok := tb.frameKeys[key]; ok {
 		return idx
@@ -344,14 +379,17 @@ func (tb *threadBuilder) internFrame(rbFrameIdx uint32) int {
 		line = int(frame.LineNumber)
 	}
 
+	// Determine category from file path (App, Rails, gem, Ruby, cfunc, Native)
+	cat, subcat := categorizeFrame(fileName)
+
 	idx := len(tb.frameData)
-	tb.frameData = append(tb.frameData, []any{locIdx, false, nil, nil, line, nil, catRuby, 0})
+	tb.frameData = append(tb.frameData, []any{locIdx, false, nil, nil, line, nil, cat, subcat})
 	tb.frameKeys[key] = idx
 	return idx
 }
 
 // internStack converts leaf-first frame IDs to a prefix-tree stack entry.
-// Stack tuple: [prefix, frame]  where prefix is null or a stack index.
+// Stack tuple: [frame, prefix]  where prefix is null or a stack index.
 func (tb *threadBuilder) internStack(frameIDs []uint32) int {
 	if len(frameIDs) == 0 {
 		return -1
@@ -375,7 +413,7 @@ func (tb *threadBuilder) internStack(frameIDs []uint32) int {
 		}
 
 		idx := len(tb.stackData)
-		tb.stackData = append(tb.stackData, []any{prefix, frameIdx})
+		tb.stackData = append(tb.stackData, []any{frameIdx, prefix})
 		tb.stackKeys[prefixKey] = idx
 		prefix = idx
 	}
@@ -417,7 +455,7 @@ func buildThread(capture *pb.Capture, tl *pb.ThreadTimeline, startTimeMs float64
 			Data: tb.frameData,
 		},
 		StackTable: StackTableData{
-			Schema: StackTupleSchema{Prefix: 0, Frame: 1},
+			Schema: StackTupleSchema{Frame: 0, Prefix: 1},
 			Data:   tb.stackData,
 		},
 		StringTable: tb.strings,
@@ -436,9 +474,24 @@ func buildSamples(tb *threadBuilder, tl *pb.ThreadTimeline) SamplesTable {
 
 		timeMs := tb.nsToMs(s.TimestampNs)
 
-		// For weighted samples, emit multiple entries or use eventDelay=0
-		data = append(data, []any{stackRef, timeMs, 0})
+		// Emit one entry per weight unit. The stack cache in the gem
+		// accumulates weight for consecutive identical stacks and sends
+		// a single probe event. We expand here so the call tree/flame
+		// graph correctly reflects the time spent.
+		w := int(s.Weight)
+		if w < 1 {
+			w = 1
+		}
+		for range w {
+			data = append(data, []any{stackRef, timeMs, 0})
+		}
 	}
+
+	// I/O events with native+Ruby context are synthesized into samples
+	// by timeline.Builder (synthesizeIOSamples). These appear in
+	// tl.Samples with IsIoSample=true. No special handling needed here —
+	// they flow through the same internStack path as regular samples,
+	// producing unified Ruby → C extension → syscall call trees.
 
 	return SamplesTable{
 		Schema: SampleTupleSchema{Stack: 0, Time: 1, EventDelay: 2},
@@ -461,16 +514,36 @@ func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) MarkersTable {
 		fdInfo := lookupString(tb.capture.StringTable, io.FdInfoIdx)
 
 		nameIdx := tb.internString("I/O")
+		payload := map[string]any{
+			"type":      "rbscope-io",
+			"syscall":   syscall,
+			"fd":        io.Fd,
+			"fdInfo":    fdInfo,
+			"bytes":     io.Bytes,
+			"latencyMs": float64(io.LatencyNs) / 1e6,
+		}
+
+		// Add native call stack from bpf_get_stack (e.g. read ← trilogy_sock_read ← trilogy_query)
+		if len(io.NativeFrameIds) > 0 {
+			var stackStr string
+			for i, fid := range io.NativeFrameIds {
+				if int(fid) < len(tb.capture.FrameTable) {
+					f := tb.capture.FrameTable[fid]
+					name := lookupString(tb.capture.StringTable, f.FunctionNameIdx)
+					if i > 0 {
+						stackStr += " ← "
+					}
+					stackStr += name
+				}
+			}
+			if stackStr != "" {
+				payload["nativeStack"] = stackStr
+			}
+		}
+
 		data = append(data, []any{
 			nameIdx, startMs, endMs, MarkerPhaseInterval, catIO,
-			map[string]any{
-				"type":      "rbscope-io",
-				"syscall":   syscall,
-				"fd":        io.Fd,
-				"fdInfo":    fdInfo,
-				"bytes":     io.Bytes,
-				"latencyMs": float64(io.LatencyNs) / 1e6,
-			},
+			payload,
 		})
 	}
 
@@ -484,11 +557,67 @@ func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) MarkersTable {
 
 		nameIdx := tb.internString("Off-CPU")
 		data = append(data, []any{
-			nameIdx, startMs, endMs, MarkerPhaseInterval, catKernel,
+			nameIdx, startMs, endMs, MarkerPhaseInterval, catNative,
 			map[string]any{
 				"type":     "rbscope-sched",
 				"offCpuMs": float64(sched.OffCpuNs) / 1e6,
 				"reason":   sched.Reason.String(),
+			},
+		})
+	}
+
+	// GVL wait markers (legacy — from EventGVLWait=6)
+	for _, gvl := range tl.GvlEvents {
+		endMs := tb.nsToMs(gvl.TimestampNs)
+		startMs := endMs - float64(gvl.WaitNs)/1e6
+		if startMs < 0 {
+			startMs = 0
+		}
+
+		nameIdx := tb.internString("GVL Wait")
+		data = append(data, []any{
+			nameIdx, startMs, endMs, MarkerPhaseInterval, catGVL,
+			map[string]any{
+				"type":   "rbscope-gvl",
+				"waitMs": float64(gvl.WaitNs) / 1e6,
+			},
+		})
+	}
+
+	// GVL state interval markers — barber-pole visualization.
+	// Uses marker-chart display for continuous colored bars per thread.
+	for _, iv := range tl.GvlIntervals {
+		startMs := tb.nsToMs(iv.StartNs)
+		endMs := tb.nsToMs(iv.EndNs)
+		if endMs <= startMs {
+			continue // skip zero-width intervals
+		}
+
+		var name, schemaType string
+		var cat int
+		switch iv.State {
+		case pb.GVLState_GVL_STATE_RUNNING:
+			name = "GVL Running"
+			schemaType = "rbscope-gvl-running"
+			cat = catApp // green
+		case pb.GVLState_GVL_STATE_STALLED:
+			name = "GVL Stalled"
+			schemaType = "rbscope-gvl-stalled"
+			cat = catGVL // magenta
+		case pb.GVLState_GVL_STATE_SUSPENDED:
+			name = "GVL Suspended"
+			schemaType = "rbscope-gvl-suspended"
+			cat = catOther // grey
+		default:
+			continue
+		}
+
+		nameIdx := tb.internString(name)
+		data = append(data, []any{
+			nameIdx, startMs, endMs, MarkerPhaseInterval, cat,
+			map[string]any{
+				"type":       schemaType,
+				"durationMs": endMs - startMs,
 			},
 		})
 	}
@@ -552,10 +681,94 @@ func lookupString(table []string, idx uint32) string {
 	return ""
 }
 
+// isNativeFrame returns true if the file path looks like a native library
+// rather than a Ruby source file.
+func isNativeFrame(path string) bool {
+	return strings.HasSuffix(path, ".so") ||
+		strings.Contains(path, ".so.") ||
+		strings.HasSuffix(path, ".dylib") ||
+		strings.HasPrefix(path, "[") // [vdso], [vsyscall]
+}
+
+// railsComponents lists all Rails framework gem names.
+var railsComponents = []string{
+	"activesupport", "activemodel", "activerecord", "actionview",
+	"actionpack", "activejob", "actionmailer", "actioncable",
+	"activestorage", "actionmailbox", "actiontext", "railties",
+}
+
+func railsSubcategories() []string {
+	subs := make([]string, len(railsComponents))
+	copy(subs, railsComponents)
+	return subs
+}
+
+// categorizeFrame determines the category and subcategory for a Ruby frame
+// based on its file path. Follows Vernier's PR #121 approach:
+//
+//	App code (app/, lib/, config/) → green
+//	Rails (activerecord, actionview, ...) → red
+//	Gems (/gems/) → lightblue
+//	Ruby stdlib → purple
+//	cfunc (<cfunc>) → yellow
+//	Native (.so, .dylib) → blue
+func categorizeFrame(fileName string) (cat, subcat int) {
+	if fileName == "" {
+		return catApp, 0
+	}
+
+	// Native C code — .so, .dylib, [vdso]
+	if isNativeFrame(fileName) {
+		return catNative, 0
+	}
+
+	// cfunc marker — Ruby C functions with no source file
+	if fileName == "<cfunc>" || fileName == "(unknown)" {
+		return catCfunc, 0
+	}
+
+	// GC
+	if fileName == "(gc)" || strings.HasPrefix(fileName, "<internal:gc") {
+		return catGC, 0
+	}
+
+	// Ruby internals: <internal:...>
+	if strings.HasPrefix(fileName, "<internal:") {
+		return catRuby, 1 // core
+	}
+
+	// Rails framework — check before generic gem path
+	for i, component := range railsComponents {
+		// Match paths like:
+		//   /gems/activerecord-8.1.0/lib/...  (production, bundler)
+		//   activerecord/lib/...               (dev/relative)
+		if strings.Contains(fileName, "/"+component+"-") ||
+			strings.Contains(fileName, "/"+component+"/") ||
+			strings.HasPrefix(fileName, component+"/") ||
+			strings.HasPrefix(fileName, component+"-") {
+			return catRails, i
+		}
+	}
+
+	// Third-party gems: /gems/ in path
+	if strings.Contains(fileName, "/gems/") ||
+		strings.Contains(fileName, "/bundler/") {
+		return catGem, 0
+	}
+
+	// Ruby stdlib: /lib/ruby/ in path
+	if strings.Contains(fileName, "/lib/ruby/") {
+		return catRuby, 0 // stdlib
+	}
+
+	// Application code — everything else (app/, lib/, config/, spec/, etc.)
+	return catApp, 0
+}
+
 func threadStateToCat(s pb.ThreadState) int {
 	switch s {
 	case pb.ThreadState_THREAD_STATE_RUNNING:
-		return catRuby
+		return catApp
 	case pb.ThreadState_THREAD_STATE_OFF_CPU_IO:
 		return catIO
 	case pb.ThreadState_THREAD_STATE_OFF_CPU_GVL:
@@ -566,7 +779,7 @@ func threadStateToCat(s pb.ThreadState) int {
 		return catIdle
 	case pb.ThreadState_THREAD_STATE_OFF_CPU_PREEMPTED,
 		pb.ThreadState_THREAD_STATE_OFF_CPU_UNKNOWN:
-		return catKernel
+		return catNative
 	default:
 		return catOther
 	}
@@ -600,13 +813,17 @@ func threadStateLabel(s pb.ThreadState) string {
 func defaultCategories() []Category {
 	return []Category{
 		{Name: "Other", Color: "grey", Subcategories: []string{"Other"}},
-		{Name: "Ruby", Color: "yellow", Subcategories: []string{"User Code"}},
+		{Name: "App", Color: "green", Subcategories: []string{"Controller", "Model", "Job", "Mailer", "View"}},
+		{Name: "Rails", Color: "red", Subcategories: railsSubcategories()},
+		{Name: "gem", Color: "lightblue", Subcategories: []string{"gem"}},
+		{Name: "Ruby", Color: "purple", Subcategories: []string{"stdlib", "core"}},
+		{Name: "cfunc", Color: "yellow", Subcategories: []string{"cfunc"}},
+		{Name: "Native", Color: "blue", Subcategories: []string{"C Extension", "System Library"}},
 		{Name: "I/O", Color: "orange", Subcategories: []string{"Network", "File"}},
-		{Name: "GVL", Color: "red", Subcategories: []string{"Wait"}},
-		{Name: "GC", Color: "grey", Subcategories: []string{"GC"}},
-		{Name: "Kernel", Color: "blue", Subcategories: []string{"Scheduler"}},
-		{Name: "OTel", Color: "purple", Subcategories: []string{"Span"}},
-		{Name: "Idle", Color: "lightblue", Subcategories: []string{"Idle"}},
+		{Name: "GVL", Color: "magenta", Subcategories: []string{"Wait"}},
+		{Name: "GC", Color: "brown", Subcategories: []string{"GC"}},
+		{Name: "OTel", Color: "lightgreen", Subcategories: []string{"Span"}},
+		{Name: "Idle", Color: "grey", Subcategories: []string{"Idle"}},
 	}
 }
 
@@ -625,6 +842,7 @@ func defaultMarkerSchemas() []MarkerSchema {
 				{Key: "fdInfo", Label: "Target", Format: "string", Searchable: &searchable},
 				{Key: "bytes", Label: "Bytes", Format: "bytes"},
 				{Key: "latencyMs", Label: "Latency", Format: "duration"},
+				{Key: "nativeStack", Label: "C Stack", Format: "string", Searchable: &searchable},
 			},
 		},
 		{
@@ -636,6 +854,16 @@ func defaultMarkerSchemas() []MarkerSchema {
 			Data: []SchemaField{
 				{Key: "offCpuMs", Label: "Duration", Format: "duration"},
 				{Key: "reason", Label: "Reason", Format: "string"},
+			},
+		},
+		{
+			Name:         "rbscope-gvl",
+			Display:      []string{"marker-chart", "marker-table", "timeline-overview"},
+			TooltipLabel: "GVL Wait: {marker.data.waitMs}ms",
+			TableLabel:   "GVL Wait {marker.data.waitMs}ms",
+			ChartLabel:   "GVL",
+			Data: []SchemaField{
+				{Key: "waitMs", Label: "Wait Duration", Format: "duration"},
 			},
 		},
 		{
@@ -660,6 +888,38 @@ func defaultMarkerSchemas() []MarkerSchema {
 			ChartLabel:   "{marker.data.state}",
 			Data: []SchemaField{
 				{Key: "state", Label: "State", Format: "string"},
+			},
+		},
+		// GVL barber-pole schemas — display: marker-chart only for
+		// continuous colored bars (Vernier-style thread state visualization)
+		{
+			Name:         "rbscope-gvl-running",
+			Display:      []string{"marker-chart"},
+			TooltipLabel: "GVL Running ({marker.data.durationMs}ms)",
+			TableLabel:   "GVL Running {marker.data.durationMs}ms",
+			ChartLabel:   "Running",
+			Data: []SchemaField{
+				{Key: "durationMs", Label: "Duration", Format: "duration"},
+			},
+		},
+		{
+			Name:         "rbscope-gvl-stalled",
+			Display:      []string{"marker-chart", "marker-table"},
+			TooltipLabel: "GVL Stalled — waiting for GVL ({marker.data.durationMs}ms)",
+			TableLabel:   "GVL Stalled {marker.data.durationMs}ms",
+			ChartLabel:   "Stalled",
+			Data: []SchemaField{
+				{Key: "durationMs", Label: "Duration", Format: "duration"},
+			},
+		},
+		{
+			Name:         "rbscope-gvl-suspended",
+			Display:      []string{"marker-chart"},
+			TooltipLabel: "GVL Suspended — thread released GVL ({marker.data.durationMs}ms)",
+			TableLabel:   "GVL Suspended {marker.data.durationMs}ms",
+			ChartLabel:   "Suspended",
+			Data: []SchemaField{
+				{Key: "durationMs", Label: "Duration", Format: "duration"},
 			},
 		},
 	}

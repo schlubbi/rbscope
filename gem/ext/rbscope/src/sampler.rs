@@ -54,6 +54,16 @@ extern "C" {
         lines: *mut std::os::raw::c_int,
     ) -> std::os::raw::c_int;
 
+    /// Like rb_profile_thread_frames but for the CURRENT thread.
+    /// Doesn't need a thread VALUE — uses the executing thread directly.
+    /// This is what Vernier uses in SUSPENDED callbacks.
+    fn rb_profile_frames(
+        start: std::os::raw::c_int,
+        limit: std::os::raw::c_int,
+        buff: *mut rb_sys::VALUE,
+        lines: *mut std::os::raw::c_int,
+    ) -> std::os::raw::c_int;
+
     fn rb_thread_current() -> rb_sys::VALUE;
 
     fn rb_profile_frame_full_label(frame: rb_sys::VALUE) -> rb_sys::VALUE;
@@ -62,13 +72,24 @@ extern "C" {
     // Use Ruby's own string accessor — bypasses rb-sys struct layout
     // which is broken on Ruby 4.0 (reads len field as embedded string data).
     fn rb_string_value_ptr(val_ptr: *mut rb_sys::VALUE) -> *const std::os::raw::c_char;
+
+    // Thread event hook API (Ruby 3.2+) for GVL profiling.
+    fn rb_internal_thread_add_event_hook(
+        func: unsafe extern "C" fn(
+            event: rb_sys::rb_event_flag_t,
+            event_data: *const rb_sys::rb_internal_thread_event_data_t,
+            user_data: *mut std::ffi::c_void,
+        ),
+        events: rb_sys::rb_event_flag_t,
+        data: *mut std::ffi::c_void,
+    ) -> *mut std::ffi::c_void; // rb_internal_thread_event_hook_t*
 }
 
 /// Maximum number of Ruby frames to capture per sample.
 const MAX_FRAMES: usize = 512;
 
 /// Maximum serialized stack size (must fit in BPF ring buffer event).
-const MAX_STACK_BYTES: usize = 4096;
+const MAX_STACK_BYTES: usize = 16384;
 
 /// Minimum sleep interval (100µs = max ~10kHz).
 const MIN_INTERVAL_NS: u64 = 100_000;
@@ -109,6 +130,11 @@ static CACHED_WEIGHT: AtomicU32 = AtomicU32::new(0);
 /// Number of samples skipped via cache hits (observable).
 static CACHE_HIT_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Whether GVL profiling is enabled (hook registered).
+static GVL_PROFILING_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Count of GVL events fired (observable).
+static GVL_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
+
 struct SamplerState {
     thread_handle: Option<thread::JoinHandle<()>>,
 }
@@ -118,6 +144,12 @@ static SAMPLER: Mutex<Option<SamplerState>> = Mutex::new(None);
 /// invocation is still in progress (e.g. under GC stress where string
 /// allocations in the callback trigger GC which could re-enter).
 static IN_CALLBACK: AtomicBool = AtomicBool::new(false);
+
+/// Separate reentrancy guard for GVL SUSPENDED stack capture.
+/// Must be independent from IN_CALLBACK because the postponed job timer
+/// fires at ~99Hz on any thread, and its IN_CALLBACK=true would block
+/// SUSPENDED stack capture on ALL other threads.
+static IN_GVL_STACK_CALLBACK: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Postponed job callback — runs on Ruby VM thread at safe point
@@ -182,20 +214,22 @@ unsafe fn postponed_job_callback_inner() {
     let prev_hash = LAST_STACK_HASH.load(Ordering::Relaxed);
 
     if stack_hash == prev_hash && prev_hash != 0 {
-        // Cache hit — same stack as last sample. Accumulate weight,
-        // skip expensive string extraction + serialization + USDT probe.
-        CACHED_WEIGHT.fetch_add(1, Ordering::Relaxed);
+        // Same stack as last time — but we still fire the probe.
+        // Incrementing cache stats for observability only.
         CACHE_HIT_COUNT.fetch_add(1, Ordering::Relaxed);
-        SAMPLE_COUNT.fetch_add(1, Ordering::Relaxed);
-        update_sample_duration_ewma(start_ns);
-        IN_CALLBACK.store(false, Ordering::Release);
-        return;
     }
-
-    // Cache miss — stack changed. Extract strings, serialize, fire probe.
-    // Include accumulated weight from previous consecutive hits.
-    let weight = CACHED_WEIGHT.swap(0, Ordering::Relaxed) + 1;
     LAST_STACK_HASH.store(stack_hash, Ordering::Relaxed);
+
+    // Stack caching disabled: always fire the probe. The cache saved
+    // ~65µs per sample by skipping string extraction for identical stacks,
+    // but it completely hid steady-state CPU work (like fibonacci) because
+    // the probe only fired on cache misses (stack transitions). Weight
+    // from cache hits was incorrectly attributed to the NEXT different
+    // stack, not the cached one.
+    //
+    // TODO: re-enable caching by storing the previous stack's serialized
+    // data and flushing it with accumulated weight on cache miss.
+    let weight: u32 = 1;
 
     // Build an InlineStack from the captured frames
     let mut stack = InlineStack::new();
@@ -426,6 +460,162 @@ pub fn register_postponed_job() {
     POSTPONED_JOB_HANDLE.store(handle, Ordering::SeqCst);
 }
 
+// ---------------------------------------------------------------------------
+// GVL event hook (Ruby 3.2+)
+// ---------------------------------------------------------------------------
+
+/// GVL thread event hook callback.
+///
+/// CRITICAL SAFETY CONSTRAINTS:
+/// - READY fires WITHOUT the GVL held — must NOT call any Ruby API
+/// - RESUMED fires just after GVL acquisition
+/// - SUSPENDED fires just before GVL release — we capture the Ruby stack here
+/// - Only reads registers/atomics and fires the USDT probe
+///
+/// On SUSPENDED, we call rb_profile_thread_frames() to capture the Ruby
+/// call stack at the exact moment the thread releases the GVL. This stack
+/// is correlated with subsequent I/O events on the same TID to produce
+/// unified Ruby + native C call trees.
+unsafe extern "C" fn gvl_event_callback(
+    event: rb_sys::rb_event_flag_t,
+    _event_data: *const rb_sys::rb_internal_thread_event_data_t,
+    _user_data: *mut std::ffi::c_void,
+) {
+    // Map Ruby event flags to our probe event types
+    let event_type = match event {
+        2 => probes::GVL_EVENT_READY,     // RUBY_INTERNAL_THREAD_EVENT_READY
+        4 => probes::GVL_EVENT_RESUMED,   // RUBY_INTERNAL_THREAD_EVENT_RESUMED
+        8 => probes::GVL_EVENT_SUSPENDED, // RUBY_INTERNAL_THREAD_EVENT_SUSPENDED
+        _ => return, // ignore STARTED/EXITED
+    };
+
+    // Get native thread ID and timestamp — no Ruby API calls needed
+    #[allow(clippy::unnecessary_cast)]
+    let tid = libc::gettid() as u32;
+
+    // Use wall-clock time (CLOCK_REALTIME) to match sample timestamps
+    // which use SystemTime::now(). CLOCK_MONOTONIC would produce timestamps
+    // relative to boot, misaligning with the capture header's epoch-based
+    // StartTimeNs and causing negative offsets in the Gecko exporter.
+    let timestamp_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+
+    // Thread VALUE — safe to read from event_data even without GVL
+    // (it's a pointer to a struct with a single VALUE field, and
+    // VALUE is just a usize/pointer that doesn't need GVL to read)
+    // Under miri, the type is opaque (c_void) so we skip this.
+    #[cfg(not(miri))]
+    let thread_value = if !_event_data.is_null() {
+        #[allow(clippy::unnecessary_cast)]
+        { (*_event_data).thread as u64 }
+    } else {
+        0
+    };
+    #[cfg(miri)]
+    let thread_value: u64 = 0;
+
+    probes::fire_gvl_event(event_type, tid, timestamp_ns, thread_value);
+    GVL_EVENT_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    // On SUSPENDED: capture the Ruby stack. The thread still holds the GVL
+    // at this point, so rb_profile_thread_frames is safe to call.
+    if event == 8 && RUNNING.load(Ordering::Relaxed) {
+        capture_gvl_suspended_stack(timestamp_ns);
+    }
+}
+
+/// Capture the Ruby call stack when a thread releases the GVL (SUSPENDED).
+/// This stack represents the Ruby code that initiated the I/O operation
+/// (e.g., Trilogy::Client#query → ActiveRecord → PostsController#index).
+///
+/// The collector correlates this with the subsequent I/O event's native C
+/// stack to produce unified call trees.
+unsafe fn capture_gvl_suspended_stack(timestamp_ns: u64) {
+    // Reentrancy guard — uses a separate flag from IN_CALLBACK so that
+    // the 99Hz postponed job timer on another thread doesn't block us.
+    if IN_GVL_STACK_CALLBACK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        return;
+    }
+
+    let mut frame_buf: [rb_sys::VALUE; MAX_FRAMES] = [0; MAX_FRAMES];
+    let mut line_buf: [std::os::raw::c_int; MAX_FRAMES] = [0; MAX_FRAMES];
+
+    // Use rb_profile_frames (not rb_profile_thread_frames) — captures the
+    // CURRENT thread's stack directly, same approach as Vernier. During
+    // SUSPENDED, the thread still holds the GVL and the Ruby stack is intact.
+    let num_frames = rb_profile_frames(
+        0,
+        MAX_FRAMES as std::os::raw::c_int,
+        frame_buf.as_mut_ptr(),
+        line_buf.as_mut_ptr(),
+    );
+
+    if num_frames <= 0 {
+        IN_GVL_STACK_CALLBACK.store(false, Ordering::Release);
+        return;
+    }
+
+    let nf = num_frames as usize;
+
+    // Build InlineStack from captured frames
+    let mut stack = crate::stack::InlineStack::new();
+    for i in 0..nf {
+        let label = ruby_value_to_string(rb_profile_frame_full_label(frame_buf[i]));
+        let path = ruby_value_to_string(rb_profile_frame_path(frame_buf[i]));
+        let line = if line_buf[i] > 0 { line_buf[i] as u32 } else { 0 };
+        stack.frames.push(crate::stack::InlineFrame { label, path, line });
+    }
+
+    // Serialize and fire the GVL stack probe
+    let mut buf = Vec::with_capacity(stack.serialized_size().min(MAX_STACK_BYTES));
+    if stack.serialize(&mut buf).is_ok() && buf.len() <= MAX_STACK_BYTES {
+        let thread_id = rb_thread_current() as u64;
+        probes::fire_gvl_stack(&buf, thread_id, timestamp_ns);
+    }
+
+    IN_GVL_STACK_CALLBACK.store(false, Ordering::Release);
+}
+
+/// Register the GVL event hook. Must be called from Ruby main thread.
+/// Safe to call multiple times — only registers once.
+pub fn enable_gvl_profiling() -> bool {
+    if GVL_PROFILING_ENABLED.load(Ordering::Relaxed) {
+        return true; // already enabled
+    }
+
+    // Register for READY (wants GVL), RESUMED (got GVL), SUSPENDED (released GVL)
+    let events: rb_sys::rb_event_flag_t =
+        (rb_sys::RUBY_INTERNAL_THREAD_EVENT_READY
+            | rb_sys::RUBY_INTERNAL_THREAD_EVENT_RESUMED
+            | rb_sys::RUBY_INTERNAL_THREAD_EVENT_SUSPENDED) as rb_sys::rb_event_flag_t;
+
+    unsafe {
+        let hook = rb_internal_thread_add_event_hook(
+            gvl_event_callback,
+            events,
+            std::ptr::null_mut(),
+        );
+        if hook.is_null() {
+            return false;
+        }
+    }
+
+    GVL_PROFILING_ENABLED.store(true, Ordering::Relaxed);
+    true
+}
+
+/// Check if GVL profiling is enabled.
+pub fn gvl_profiling_enabled() -> bool {
+    GVL_PROFILING_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Get the count of GVL events fired.
+pub fn gvl_event_count() -> u64 {
+    GVL_EVENT_COUNT.load(Ordering::Relaxed)
+}
+
 /// Check if we're in a forked child that inherited stale state.
 fn is_stale_after_fork() -> bool {
     let owner = OWNER_PID.load(Ordering::Relaxed);
@@ -466,6 +656,21 @@ pub fn start_sampling(frequency: u32) -> Result<bool, magnus::Error> {
     // Handle forked children that inherited stale parent state
     if is_stale_after_fork() {
         reset_after_fork();
+
+        // Re-register the postponed job in the child process.
+        // The handle from the parent (mold) may be stale after fork —
+        // Ruby's VM reinitializes internal structures and the old handle
+        // may not trigger correctly in the child.
+        unsafe {
+            let handle = rb_postponed_job_preregister(
+                0,
+                postponed_job_callback,
+                std::ptr::null_mut(),
+            );
+            if handle >= 0 {
+                POSTPONED_JOB_HANDLE.store(handle, Ordering::SeqCst);
+            }
+        }
     }
 
     if RUNNING.load(Ordering::SeqCst) {

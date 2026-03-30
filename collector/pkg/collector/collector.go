@@ -27,6 +27,10 @@ type BPFProgram interface {
 	AttachPID(pid uint32) error
 	DetachPID(pid uint32) error
 	ReadRingBuffer(buf []byte) (int, error)
+	// KtimeOffsetNs returns the offset to convert BPF's bpf_ktime_get_ns()
+	// (CLOCK_MONOTONIC) timestamps to wall clock nanoseconds since epoch.
+	// Add this value to any ktime-based timestamp.
+	KtimeOffsetNs() int64
 	Close() error
 }
 
@@ -184,6 +188,30 @@ func (c *Collector) eventLoop(ctx context.Context) {
 			continue
 		}
 
+		// Convert BPF ktime (CLOCK_MONOTONIC) timestamps to wall clock.
+		// IO and Sched events use bpf_ktime_get_ns(); Ruby samples and
+		// GVL events already use wall clock from the gem.
+		ktimeOffset := c.bpf.KtimeOffsetNs()
+		switch ev := event.(type) {
+		case *IOEvent:
+			ev.Timestamp = uint64(int64(ev.Timestamp) + ktimeOffset) // #nosec G115 -- ktime conversion
+		case *SchedEvent:
+			ev.Timestamp = uint64(int64(ev.Timestamp) + ktimeOffset) // #nosec G115 -- ktime conversion
+		}
+
+		// Auto-register PIDs for I/O tracing: when a ruby sample arrives
+		// from a forked child (different PID), add it to the BPF filter.
+		if ev, ok := event.(*RubySampleEvent); ok && ev.PID != 0 {
+			if _, known := c.pids[ev.PID]; !known {
+				c.pids[ev.PID] = struct{}{}
+				// Best-effort: attach uprobe + io filter. If the uprobe
+				// is already inherited from fork, AttachPID may fail but
+				// the target_pids entry still gets added.
+				_ = c.bpf.AttachPID(ev.PID)
+				c.log.Info("auto-registered forked worker for I/O tracing", "pid", ev.PID)
+			}
+		}
+
 		metricSamplesTotal.Inc()
 
 		timer := prometheus.NewTimer(metricExportLatency)
@@ -203,4 +231,5 @@ func (s *stubBPF) Load() error                          { return nil }
 func (s *stubBPF) AttachPID(_ uint32) error             { return nil }
 func (s *stubBPF) DetachPID(_ uint32) error             { return nil }
 func (s *stubBPF) ReadRingBuffer(_ []byte) (int, error) { return 0, nil }
+func (s *stubBPF) KtimeOffsetNs() int64                 { return 0 }
 func (s *stubBPF) Close() error                         { return nil }

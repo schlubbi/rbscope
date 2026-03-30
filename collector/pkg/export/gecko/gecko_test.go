@@ -100,17 +100,17 @@ func TestBuild_TopLevel(t *testing.T) {
 	capture := testCapture()
 	profile := Build(capture)
 
-	if profile.Meta.Version != 33 {
-		t.Errorf("version: got %d, want 33", profile.Meta.Version)
+	if profile.Meta.Version != 34 {
+		t.Errorf("version: got %d, want 34", profile.Meta.Version)
 	}
 	if profile.Meta.Product != "rbscope — test-app" {
 		t.Errorf("product: got %q", profile.Meta.Product)
 	}
-	if len(profile.Meta.Categories) != 8 {
-		t.Errorf("categories: got %d, want 8", len(profile.Meta.Categories))
+	if len(profile.Meta.Categories) != 12 {
+		t.Errorf("categories: got %d, want 12", len(profile.Meta.Categories))
 	}
-	if len(profile.Meta.MarkerSchema) != 4 {
-		t.Errorf("marker schemas: got %d, want 4", len(profile.Meta.MarkerSchema))
+	if len(profile.Meta.MarkerSchema) != 8 {
+		t.Errorf("marker schemas: got %d, want 8", len(profile.Meta.MarkerSchema))
 	}
 }
 
@@ -139,8 +139,9 @@ func TestBuild_Samples(t *testing.T) {
 	profile := Build(capture)
 
 	samples := profile.Threads[0].Samples
-	if len(samples.Data) != 2 {
-		t.Fatalf("samples.data length: got %d, want 2", len(samples.Data))
+	// 1 sample (weight=1) + 1 sample (weight=3, expanded to 3 entries) = 4
+	if len(samples.Data) != 4 {
+		t.Fatalf("samples.data length: got %d, want 4", len(samples.Data))
 	}
 
 	// First sample should have a stack reference (not nil)
@@ -176,9 +177,9 @@ func TestBuild_PerThreadTables(t *testing.T) {
 		t.Errorf("stack table: got %d entries, want >= 2", len(thread.StackTable.Data))
 	}
 
-	// First stack entry should have nil prefix (root)
-	if thread.StackTable.Data[0][0] != nil {
-		t.Errorf("stack[0] prefix: got %v, want nil", thread.StackTable.Data[0][0])
+	// First stack entry should have nil prefix (root) — tuple is [frame, prefix]
+	if thread.StackTable.Data[0][1] != nil {
+		t.Errorf("stack[0] prefix: got %v, want nil", thread.StackTable.Data[0][1])
 	}
 }
 
@@ -253,7 +254,7 @@ func TestBuild_Categories(t *testing.T) {
 	profile := Build(capture)
 
 	cats := profile.Meta.Categories
-	expected := []string{"Other", "Ruby", "I/O", "GVL", "GC", "Kernel", "OTel", "Idle"}
+	expected := []string{"Other", "App", "Rails", "gem", "Ruby", "cfunc", "Native", "I/O", "GVL", "GC", "OTel", "Idle"}
 	for i, want := range expected {
 		if i >= len(cats) || cats[i].Name != want {
 			t.Errorf("category[%d]: got %q, want %q", i, cats[i].Name, want)
@@ -403,4 +404,166 @@ func TestBuild_StackSharing(t *testing.T) {
 	if idx0 != idx1 {
 		t.Errorf("identical stacks got different indices: %v vs %v", idx0, idx1)
 	}
+}
+
+func TestCategorizeFrame(t *testing.T) {
+	tests := []struct {
+		path    string
+		wantCat int
+		desc    string
+	}{
+		// App code
+		{"app/controllers/posts_controller.rb", catApp, "app controller"},
+		{"app/models/post.rb", catApp, "app model"},
+		{"lib/my_service.rb", catApp, "app lib"},
+		{"config/initializers/foo.rb", catApp, "app config"},
+		{"", catApp, "empty path"},
+
+		// Rails
+		{"/gems/activerecord-8.1.0/lib/active_record/base.rb", catRails, "activerecord gem path"},
+		{"activerecord/lib/active_record/base.rb", catRails, "activerecord relative path"},
+		{"/gems/actionview-8.1.0/lib/action_view/template.rb", catRails, "actionview"},
+		{"/gems/activesupport-8.1.0/lib/active_support/core_ext.rb", catRails, "activesupport"},
+		{"/gems/railties-8.1.0/lib/rails.rb", catRails, "railties"},
+
+		// Gems
+		{"/gems/trilogy-2.9.0/lib/trilogy.rb", catGem, "trilogy gem"},
+		{"/gems/nokogiri-1.16.0/lib/nokogiri.rb", catGem, "nokogiri gem"},
+		{"/gems/puma-6.0.0/lib/puma/server.rb", catGem, "puma gem"},
+		{"/bundler/gems/sidekiq-abc123/lib/sidekiq.rb", catGem, "bundler gem"},
+
+		// Ruby stdlib/core
+		{"/lib/ruby/3.3.0/json.rb", catRuby, "stdlib"},
+		{"/lib/ruby/4.0.0/net/http.rb", catRuby, "stdlib net/http"},
+		{"<internal:kernel>", catRuby, "internal kernel"},
+		{"<internal:io>", catRuby, "internal io"},
+
+		// GC
+		{"(gc)", catGC, "gc"},
+		{"<internal:gc>", catGC, "internal gc"},
+
+		// cfunc
+		{"<cfunc>", catCfunc, "cfunc"},
+		{"(unknown)", catCfunc, "cfunc (unknown)"},
+
+		// Native
+		{"libtrilogy.so", catNative, "native .so"},
+		{"libc.so.6", catNative, "libc"},
+		{"bcrypt_ext.so", catNative, "native ext"},
+		{"libxml2.dylib", catNative, "native .dylib"},
+		{"[vdso]", catNative, "vdso"},
+	}
+
+	for _, tt := range tests {
+		cat, _ := categorizeFrame(tt.path)
+		if cat != tt.wantCat {
+			t.Errorf("%s (%q): got category %d, want %d", tt.desc, tt.path, cat, tt.wantCat)
+		}
+	}
+}
+
+func TestBuild_IOSamplesInFlameGraph(t *testing.T) {
+	// Build a Capture with I/O synthetic samples (IsIoSample=true)
+	capture := &pb.Capture{
+		Header: &pb.CaptureHeader{
+			Version:           2,
+			ServiceName:       "io-test",
+			Hostname:          "host",
+			Pid:               42,
+			StartTimeNs:       1_000_000_000_000,
+			EndTimeNs:         1_001_000_000_000,
+			SampleFrequencyHz: 99,
+		},
+		StringTable: []string{
+			"",                    // 0
+			"worker",              // 1
+			"Trilogy#query",       // 2
+			"lib/trilogy.rb",      // 3
+			"rb_trilogy_query",    // 4
+			"/usr/lib/trilogy.so", // 5
+			"write",               // 6
+			"/usr/lib/libc.so.6",  // 7
+		},
+		FrameTable: []*pb.StackFrame{
+			{FunctionNameIdx: 2, FileNameIdx: 3, LineNumber: 20}, // 0: Trilogy#query (Ruby)
+			{FunctionNameIdx: 4, FileNameIdx: 5, LineNumber: 0},  // 1: rb_trilogy_query (native)
+			{FunctionNameIdx: 6, FileNameIdx: 7, LineNumber: 0},  // 2: write (native)
+		},
+		Threads: []*pb.ThreadTimeline{
+			{
+				ThreadId:      100,
+				ThreadNameIdx: 1,
+				Samples: []*pb.Sample{
+					{
+						// Regular timer sample
+						TimestampNs: 1_000_010_000_000,
+						FrameIds:    []uint32{0}, // Trilogy#query
+						Weight:      1,
+					},
+					{
+						// Synthetic I/O sample: write → rb_trilogy_query → Trilogy#query
+						TimestampNs: 1_000_015_000_000,
+						FrameIds:    []uint32{2, 1, 0}, // leaf-first: write, rb_trilogy_query, Trilogy#query
+						Weight:      1,
+						IsIoSample:  true,
+					},
+				},
+			},
+		},
+	}
+
+	profile := Build(capture)
+
+	if len(profile.Threads) != 1 {
+		t.Fatalf("expected 1 thread, got %d", len(profile.Threads))
+	}
+
+	thread := profile.Threads[0]
+
+	// Should have 2 samples total
+	if len(thread.Samples.Data) != 2 {
+		t.Fatalf("expected 2 samples, got %d", len(thread.Samples.Data))
+	}
+
+	// Both should have non-nil stack references
+	for i, s := range thread.Samples.Data {
+		if s[0] == nil {
+			t.Errorf("sample[%d] has nil stack", i)
+		}
+	}
+
+	// Verify the I/O sample creates a deeper stack than the regular sample
+	regularStackIdx := thread.Samples.Data[0][0].(int)
+	ioStackIdx := thread.Samples.Data[1][0].(int)
+
+	// Count stack depth for each
+	regularDepth := stackDepth(thread.StackTable.Data, regularStackIdx)
+	ioDepth := stackDepth(thread.StackTable.Data, ioStackIdx)
+
+	if ioDepth <= regularDepth {
+		t.Errorf("I/O sample stack depth (%d) should be deeper than regular (%d)", ioDepth, regularDepth)
+	}
+
+	// I/O sample should have native frames categorized correctly
+	// The leaf frame (write from libc.so.6) should be catNative
+	leafStackEntry := thread.StackTable.Data[ioStackIdx]
+	leafFrameIdx := leafStackEntry[0].(int)
+	leafFrame := thread.FrameTable.Data[leafFrameIdx]
+	leafCat := leafFrame[6].(int) // category field
+	if leafCat != catNative {
+		t.Errorf("I/O leaf frame category: got %d, want %d (catNative)", leafCat, catNative)
+	}
+}
+
+func stackDepth(stackData [][]any, idx int) int {
+	depth := 0
+	for idx >= 0 && idx < len(stackData) {
+		depth++
+		entry := stackData[idx]
+		if entry[1] == nil {
+			break
+		}
+		idx = entry[1].(int)
+	}
+	return depth
 }

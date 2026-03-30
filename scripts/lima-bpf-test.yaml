@@ -1,0 +1,73 @@
+# Lima VM for rbscope BPF testing with a standard kernel
+# This VM uses a real Ubuntu kernel (not OrbStack's custom kernel)
+# to verify BPF behavior with correct PID namespace semantics.
+
+images:
+  - location: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+cpus: 4
+memory: "4GiB"
+disk: "20GiB"
+
+# Mount the rbscope source
+mounts:
+  - location: "~/src/github.com/schlubbi/rbscope"
+    mountPoint: "/rbscope"
+    writable: true
+  - location: "/tmp"
+    mountPoint: "/host-tmp"
+    writable: true
+
+# Provision: install Go, Rust, Ruby 4.0, BPF tools
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -ex
+      
+      # System deps
+      apt-get update -qq
+      apt-get install -qq -y \
+        build-essential git curl wget \
+        clang llvm libelf-dev \
+        bpftrace linux-tools-generic \
+        ruby ruby-dev libyaml-dev \
+        python3 jq \
+        pkg-config libssl-dev
+      
+      # Go 1.26
+      curl -sL https://go.dev/dl/go1.26.0.linux-arm64.tar.gz | tar -C /usr/local -xzf -
+      ln -sf /usr/local/go/bin/go /usr/local/bin/go
+      ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+      
+      # Rust
+      su - $(whoami) -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
+
+  - mode: user
+    script: |
+      #!/bin/bash
+      # Verify kernel
+      echo "Kernel: $(uname -r)"
+      echo "BTF: $(ls -la /sys/kernel/btf/vmlinux 2>/dev/null || echo 'NOT FOUND')"
+      
+      # Verify Go
+      go version
+      
+      # Verify Rust
+      source "$HOME/.cargo/env"
+      rustc --version
+      
+      # Test BPF PID namespace
+      cat > /tmp/test_target.c << 'EOF'
+      #include <unistd.h>
+      #include <stdio.h>
+      __attribute__((noinline))
+      void probe_me(void) { volatile int x = 42; (void)x; }
+      int main() {
+        printf("PID: %d\n", getpid());
+        fflush(stdout);
+        while(1) { probe_me(); usleep(100000); }
+      }
+      EOF
+      gcc -o /tmp/test_target /tmp/test_target.c

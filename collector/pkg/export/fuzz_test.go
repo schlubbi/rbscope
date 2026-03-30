@@ -1,30 +1,40 @@
 package export
 
-import "testing"
+import (
+	"testing"
 
-// FuzzPprofBuilder tests the pprof builder against random inputs.
-// Run: go test -fuzz=FuzzPprofBuilder -fuzztime=30s ./pkg/export/
-func FuzzPprofBuilder(f *testing.F) {
-	f.Add(uint32(1), "trace123", int64(1))
-	f.Add(uint32(0), "", int64(0))
-	f.Add(uint32(65535), "very-long-trace-id-value-1234567890", int64(999))
+	pb "github.com/schlubbi/rbscope/collector/pkg/proto/rbscopepb"
+)
 
-	f.Fuzz(func(t *testing.T, stackID uint32, traceID string, value int64) {
-		b := NewPprofBuilder(int64(52631578))
+// FuzzCaptureToProfile tests the Capture→pprof converter with random inputs.
+// Run: go test -fuzz=FuzzCaptureToProfile -fuzztime=30s ./pkg/export/
+func FuzzCaptureToProfile(f *testing.F) {
+	f.Add(uint32(0), uint32(0), uint32(1))
+	f.Add(uint32(1), uint32(2), uint32(3))
+	f.Add(uint32(100), uint32(50), uint32(10))
 
-		labels := map[string]string{}
-		if traceID != "" {
-			labels["trace_id"] = traceID
+	f.Fuzz(func(t *testing.T, nameIdx, fileIdx, weight uint32) {
+		capture := &pb.Capture{
+			StringTable: []string{"", "func_a", "file.rb", "func_b"},
+			FrameTable: []*pb.StackFrame{
+				{FunctionNameIdx: nameIdx % 4, FileNameIdx: fileIdx % 4},
+			},
+			Threads: []*pb.ThreadTimeline{
+				{
+					ThreadId: 1,
+					Samples: []*pb.Sample{
+						{FrameIds: []uint32{0}, Weight: weight},
+					},
+				},
+			},
 		}
-		b.AddSample(stackID, labels, value)
-		b.AddSample(stackID, nil, value)
 
-		p := b.Flush()
-		if p == nil {
-			t.Fatal("Flush returned nil")
+		prof := CaptureToProfile(capture)
+		if prof == nil {
+			t.Fatal("CaptureToProfile returned nil")
 		}
-		if len(p.Sample) != 2 {
-			t.Fatalf("expected 2 samples, got %d", len(p.Sample))
+		if len(prof.Sample) != 1 {
+			t.Fatalf("expected 1 sample, got %d", len(prof.Sample))
 		}
 	})
 }
