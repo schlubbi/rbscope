@@ -19,8 +19,9 @@ type LibrubyInfo struct {
 	BaseAddr uint64
 }
 
-// FindLibruby scans /proc/{pid}/maps to locate libruby.so and its load address.
-// Returns the library info or an error if libruby is not found.
+// FindLibruby scans /proc/{pid}/maps to locate libruby.so (or a statically-linked
+// ruby binary) and its load address.
+// Returns the library info or an error if neither is found.
 func FindLibruby(pid uint32) (*LibrubyInfo, error) {
 	mapsPath := fmt.Sprintf("/proc/%d/maps", pid)
 	f, err := os.Open(mapsPath) // #nosec G304 -- path derived from PID
@@ -30,6 +31,7 @@ func FindLibruby(pid uint32) (*LibrubyInfo, error) {
 	defer func() { _ = f.Close() }()
 
 	var info *LibrubyInfo
+	var staticInfo *LibrubyInfo // fallback for statically-linked ruby binary
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -42,8 +44,10 @@ func FindLibruby(pid uint32) (*LibrubyInfo, error) {
 		pathname := fields[len(fields)-1]
 		base := filepath.Base(pathname)
 
-		// Look for libruby shared library
-		if !strings.HasPrefix(base, "libruby") || !strings.Contains(base, ".so") {
+		isDynamic := strings.HasPrefix(base, "libruby") && strings.Contains(base, ".so")
+		isStatic := !isDynamic && isRubyBinary(base)
+
+		if !isDynamic && !isStatic {
 			continue
 		}
 
@@ -63,16 +67,24 @@ func FindLibruby(pid uint32) (*LibrubyInfo, error) {
 			continue
 		}
 
-		// We want the first mapping (file offset 0) for the base address
-		if info == nil || fileOffset == 0 {
-			info = &LibrubyInfo{
-				ContainerPath: pathname,
-				HostPath:      fmt.Sprintf("/proc/%d/root%s", pid, pathname),
-				BaseAddr:      startAddr - fileOffset,
+		entry := &LibrubyInfo{
+			ContainerPath: pathname,
+			HostPath:      fmt.Sprintf("/proc/%d/root%s", pid, pathname),
+			BaseAddr:      startAddr - fileOffset,
+		}
+
+		if isDynamic {
+			// Dynamic libruby.so — prefer this over static binary
+			if info == nil || fileOffset == 0 {
+				info = entry
+				if fileOffset == 0 {
+					break
+				}
 			}
-			if fileOffset == 0 {
-				// Found the base mapping, stop looking
-				break
+		} else if isStatic {
+			// Static ruby binary — keep as fallback
+			if staticInfo == nil || fileOffset == 0 {
+				staticInfo = entry
 			}
 		}
 	}
@@ -81,11 +93,31 @@ func FindLibruby(pid uint32) (*LibrubyInfo, error) {
 		return nil, fmt.Errorf("scan %s: %w", mapsPath, err)
 	}
 
-	if info == nil {
-		return nil, fmt.Errorf("libruby not found in %s", mapsPath)
+	// Prefer dynamic libruby.so, fall back to static ruby binary
+	if info != nil {
+		return info, nil
+	}
+	if staticInfo != nil {
+		return staticInfo, nil
 	}
 
-	return info, nil
+	return nil, fmt.Errorf("libruby not found in %s", mapsPath)
+}
+
+// isRubyBinary returns true if the filename looks like a Ruby interpreter binary
+// (for statically-linked Ruby where libruby is compiled into the executable).
+func isRubyBinary(base string) bool {
+	if base == "ruby" {
+		return true
+	}
+	// Match versioned binaries like ruby3.3, ruby4.0
+	if strings.HasPrefix(base, "ruby") {
+		rest := base[4:]
+		if len(rest) > 0 && rest[0] >= '0' && rest[0] <= '9' {
+			return true
+		}
+	}
+	return false
 }
 
 // ReadECAddress reads the Ruby execution context address for a process by

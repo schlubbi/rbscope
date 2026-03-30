@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -36,6 +38,8 @@ type StackWalkerBPF struct {
 	schedReader *ringbuf.Reader
 	schedLinks  []link.Link
 	readToggle  int
+	// pidMapping tracks container PID → host PID for namespace support
+	pidMapping  map[uint32]uint32
 }
 
 var _ collector.BPFProgram = (*StackWalkerBPF)(nil)
@@ -153,20 +157,36 @@ func (s *StackWalkerBPF) AttachPID(pid uint32) error {
 	}
 	fmt.Fprintf(os.Stderr, "rbscope: pid %d EC=0x%x\n", pid, ec)
 
-	// Write to BPF map
+	// Write to BPF map.
+	// In containerized environments, bpf_get_current_pid_tgid() returns the
+	// host-namespace PID, not the container PID. Discover the host PID so the
+	// BPF map lookup matches correctly.
+	mapKey, err := discoverHostPID(pid)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rbscope: host PID discovery failed, using container PID: %v\n", err)
+		mapKey = pid
+	}
+
+	// Cache the mapping for DetachPID
+	if s.pidMapping == nil {
+		s.pidMapping = make(map[uint32]uint32)
+	}
+	s.pidMapping[pid] = mapKey
+
 	// pid_config struct: ec_addr(8) + libruby_base(8) = 16 bytes
 	var cfg [16]byte
 	binary.LittleEndian.PutUint64(cfg[0:8], ec)
 	binary.LittleEndian.PutUint64(cfg[8:16], info.BaseAddr)
-	if err := s.objs.PidConfigs.Put(pid, cfg); err != nil {
-		return fmt.Errorf("write pid config for %d: %w", pid, err)
+	if err := s.objs.PidConfigs.Put(mapKey, cfg); err != nil {
+		return fmt.Errorf("write pid config for %d: %w", mapKey, err)
 	}
 
-	// Register with io_tracer
+	// Register with io_tracer — must use host PID because io_tracer.c
+	// checks bpf_get_current_pid_tgid() which returns host-namespace PIDs.
 	if s.ioObjs != nil {
 		val := uint8(1)
-		if err := s.ioObjs.TargetPids.Put(pid, val); err != nil {
-			fmt.Fprintf(os.Stderr, "rbscope: add pid %d to io target_pids: %v\n", pid, err)
+		if err := s.ioObjs.TargetPids.Put(mapKey, val); err != nil {
+			fmt.Fprintf(os.Stderr, "rbscope: add pid %d to io target_pids: %v\n", mapKey, err)
 		}
 	}
 
@@ -175,11 +195,11 @@ func (s *StackWalkerBPF) AttachPID(pid uint32) error {
 		s.rubyOffsets.GlobalSymbolsAddr += info.BaseAddr
 	}
 
-	// Register with sched_tracer
+	// Register with sched_tracer — same host PID requirement.
 	if s.schedObjs != nil {
 		val := uint8(1)
-		if err := s.schedObjs.TargetPids.Put(pid, val); err != nil {
-			fmt.Fprintf(os.Stderr, "rbscope: add pid %d to sched target_pids: %v\n", pid, err)
+		if err := s.schedObjs.TargetPids.Put(mapKey, val); err != nil {
+			fmt.Fprintf(os.Stderr, "rbscope: add pid %d to sched target_pids: %v\n", mapKey, err)
 		}
 	}
 
@@ -188,14 +208,22 @@ func (s *StackWalkerBPF) AttachPID(pid uint32) error {
 
 // DetachPID removes a PID from the stack walker.
 func (s *StackWalkerBPF) DetachPID(pid uint32) error {
+	// Use the host PID (which may differ from container PID in namespaced environments)
+	mapKey := pid
+	if s.pidMapping != nil {
+		if hostPid, ok := s.pidMapping[pid]; ok {
+			mapKey = hostPid
+			delete(s.pidMapping, pid)
+		}
+	}
 	if s.objs != nil {
-		_ = s.objs.PidConfigs.Delete(pid)
+		_ = s.objs.PidConfigs.Delete(mapKey)
 	}
 	if s.ioObjs != nil {
-		_ = s.ioObjs.TargetPids.Delete(pid)
+		_ = s.ioObjs.TargetPids.Delete(mapKey)
 	}
 	if s.schedObjs != nil {
-		_ = s.schedObjs.TargetPids.Delete(pid)
+		_ = s.schedObjs.TargetPids.Delete(mapKey)
 	}
 	return nil
 }
@@ -359,4 +387,46 @@ func (s *StackWalkerBPF) loadSchedTracer() error {
 // Offsets returns the DWARF-extracted Ruby offsets for frame resolution.
 func (s *StackWalkerBPF) Offsets() *offsets.RubyOffsets {
 	return s.rubyOffsets
+}
+
+// PIDMapping returns the container→host PID mappings discovered during
+// AttachPID. Callers can invert this to translate host PIDs in BPF events
+// back to container PIDs for /proc access.
+func (s *StackWalkerBPF) PIDMapping() map[uint32]uint32 {
+	return s.pidMapping
+}
+
+// discoverHostPID returns the init-namespace (host) PID for a given container PID.
+//
+// In containerized environments (Docker, Codespaces, OrbStack), bpf_get_current_pid_tgid()
+// returns the host-namespace PID, which may differ from the PID seen inside the
+// container.
+//
+// /proc/<pid>/sched always reports the init-namespace PID on its first line:
+//
+//	ruby (12345, #threads: 3)
+//
+// This is deterministic and available on all kernels with CONFIG_SCHED_DEBUG
+// (enabled by default on Ubuntu, Fedora, RHEL, Debian, Codespace kernels).
+func discoverHostPID(containerPid uint32) (uint32, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/sched", containerPid))
+	if err != nil {
+		return containerPid, err
+	}
+	// First line: "command (hostpid, #threads: N)"
+	line := strings.SplitN(string(data), "\n", 2)[0]
+	start := strings.Index(line, "(")
+	comma := strings.Index(line, ",")
+	if start < 0 || comma < 0 || comma <= start+1 {
+		return containerPid, nil
+	}
+	hostPid, err := strconv.ParseUint(strings.TrimSpace(line[start+1:comma]), 10, 32)
+	if err != nil {
+		return containerPid, nil
+	}
+	if uint32(hostPid) != containerPid && hostPid != 0 {
+		fmt.Fprintf(os.Stderr, "rbscope: PID namespace detected: container PID %d -> host PID %d\n",
+			containerPid, uint32(hostPid))
+	}
+	return uint32(hostPid), nil
 }

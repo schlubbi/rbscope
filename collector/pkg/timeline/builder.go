@@ -36,6 +36,10 @@ type Builder struct {
 	idleClassifier *IdleClassifier
 	resolver       *symbols.Resolver      // for native stack symbol resolution
 	frameResolver  *offsets.FrameResolver // for BPF stack walker iseq resolution
+
+	// hostToContainerPID maps host PIDs (from BPF events) back to container
+	// PIDs (visible in /proc) for PID-namespace environments.
+	hostToContainerPID map[uint32]uint32
 }
 
 // NewBuilder creates a Builder for a new capture window.
@@ -66,6 +70,16 @@ func (b *Builder) SetResolver(r *symbols.Resolver) {
 // SetFrameResolver sets the BPF stack walker frame resolver for iseq → method/path resolution.
 func (b *Builder) SetFrameResolver(r *offsets.FrameResolver) {
 	b.frameResolver = r
+}
+
+// SetHostToContainerPID registers a host→container PID mapping so the
+// frame resolver reads /proc/<containerPID>/mem instead of the host PID
+// that BPF events carry. Required when running inside a PID namespace.
+func (b *Builder) SetHostToContainerPID(hostPID, containerPID uint32) {
+	if b.hostToContainerPID == nil {
+		b.hostToContainerPID = make(map[uint32]uint32)
+	}
+	b.hostToContainerPID[hostPID] = containerPID
 }
 
 // Ingest processes a decoded BPF event, routing it to the correct thread.
@@ -200,6 +214,12 @@ func (b *Builder) Ingest(event any) {
 		if b.frameResolver == nil {
 			break
 		}
+		// In PID namespaces, BPF events carry host PIDs but /proc uses
+		// container PIDs. Translate for all /proc/pid/mem reads.
+		procPID := ev.PID
+		if mapped, ok := b.hostToContainerPID[ev.PID]; ok {
+			procPID = mapped
+		}
 		b.ensureThreadName(ev.TID, ev.PID)
 		tb := b.thread(ev.TID)
 
@@ -211,8 +231,8 @@ func (b *Builder) Ingest(event any) {
 				cfuncName := ""
 				className := ""
 				if b.frameResolver != nil {
-					cfuncName = b.frameResolver.ResolveCfuncName(ev.PID, frame.PC)
-					className = b.frameResolver.ResolveClassName(ev.PID, frame.SelfVal)
+					cfuncName = b.frameResolver.ResolveCfuncName(procPID, frame.PC)
+					className = b.frameResolver.ResolveClassName(procPID, frame.SelfVal)
 				}
 				label := "[cfunc]"
 				if className != "" && cfuncName != "" {
@@ -225,7 +245,7 @@ func (b *Builder) Ingest(event any) {
 				frameIDs = append(frameIDs, b.frames.Intern(label, "", 0))
 				continue
 			}
-			info, err := b.frameResolver.Resolve(ev.PID, frame.IseqAddr)
+			info, err := b.frameResolver.Resolve(procPID, frame.IseqAddr)
 			if err != nil {
 				frameIDs = append(frameIDs, b.frames.Intern("[unknown]", "", 0))
 				continue
@@ -238,7 +258,7 @@ func (b *Builder) Ingest(event any) {
 
 			// Resolve class name from cfp->self for qualified method names.
 			// e.g. "call" → "Rack::Logger#call"
-			className := b.frameResolver.ResolveClassName(ev.PID, frame.SelfVal)
+			className := b.frameResolver.ResolveClassName(procPID, frame.SelfVal)
 			if className != "" {
 				label = className + "#" + label
 			} else if ambiguousNames[label] && path != "" {

@@ -222,6 +222,7 @@ func runCapture(_ *cobra.Command, _ []string) error {
 	}
 
 	var bpfProg collector.BPFProgram
+	var sw *bpf.StackWalkerBPF // hoisted for post-AttachPID PID mapping
 	switch flagCaptureMode {
 	case "gem":
 		realBPF, err := bpf.NewRealBPF(flagCaptureBPFObj)
@@ -240,7 +241,8 @@ func runCapture(_ *cobra.Command, _ []string) error {
 			rubyPath = info.HostPath
 			logger.Info("auto-discovered libruby", "path", rubyPath)
 		}
-		sw, err := bpf.NewStackWalkerBPF(rubyPath, 99)
+		var err error
+		sw, err = bpf.NewStackWalkerBPF(rubyPath, 99)
 		if err != nil {
 			return fmt.Errorf("create stack walker: %w", err)
 		}
@@ -265,6 +267,14 @@ func runCapture(_ *cobra.Command, _ []string) error {
 
 	if err := c.AttachPID(flagCapturePID); err != nil {
 		return err
+	}
+
+	// Register PID namespace mappings (must happen after AttachPID which
+	// discovers the host PID) so the frame resolver reads /proc/<containerPID>/mem.
+	if tb != nil && sw != nil {
+		for containerPID, hostPID := range sw.PIDMapping() {
+			tb.SetHostToContainerPID(hostPID, containerPID)
+		}
 	}
 
 	// Also add sibling processes to the I/O tracer's target_pids map.
