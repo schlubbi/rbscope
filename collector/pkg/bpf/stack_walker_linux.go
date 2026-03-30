@@ -23,23 +23,19 @@ import (
 type StackWalkerBPF struct {
 	objs          *stackwalkerObjects
 	reader        *ringbuf.Reader
-	perfFDs       []int    // perf_event file descriptors (one per CPU)
+	perfFDs       []int       // perf_event file descriptors (one per CPU)
 	perfLinks     []link.Link // perf_event → BPF program links
 	rubyOffsets   *offsets.RubyOffsets
 	ktimeOffsetNs int64
 	frequencyHz   int
 	// IO/GVL/sched tracers (shared with gem mode)
-	ioObjs         *iotracerObjects
-	ioReader       *ringbuf.Reader
-	ioLinks        []link.Link
-	gvlObjs        *gvltracerObjects
-	gvlReader      *ringbuf.Reader
-	gvlStackReader *ringbuf.Reader
-	gvlLinks       []link.Link
-	schedObjs      *schedtracerObjects
-	schedReader    *ringbuf.Reader
-	schedLinks     []link.Link
-	readToggle     int
+	ioObjs      *iotracerObjects
+	ioReader    *ringbuf.Reader
+	ioLinks     []link.Link
+	schedObjs   *schedtracerObjects
+	schedReader *ringbuf.Reader
+	schedLinks  []link.Link
+	readToggle  int
 }
 
 var _ collector.BPFProgram = (*StackWalkerBPF)(nil)
@@ -113,7 +109,7 @@ func (s *StackWalkerBPF) attachPerfEvents() error {
 			Type:   unix.PERF_TYPE_SOFTWARE,
 			Config: unix.PERF_COUNT_SW_CPU_CLOCK,
 			Size:   uint32(unsafe.Sizeof(unix.PerfEventAttr{})),
-			Sample: uint64(s.frequencyHz),
+			Sample: uint64(s.frequencyHz), //nolint:gosec // frequencyHz is always small positive (e.g. 99)
 			Bits:   unix.PerfBitFreq,
 		}
 

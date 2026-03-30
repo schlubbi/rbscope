@@ -129,7 +129,7 @@ func (r *FrameResolver) resolveFromMem(pid uint32, iseqAddr uint64) (FrameInfo, 
 	if err == nil && lineVal != 0 {
 		// Ruby fixnum: value is (n << 1) | 1
 		if lineVal&1 == 1 {
-			info.Line = uint32(lineVal >> 1)
+			info.Line = uint32(lineVal >> 1) //nolint:gosec // line numbers fit in uint32
 		}
 	}
 
@@ -192,7 +192,7 @@ func readRString(f *os.File, addr uint64, off *RubyOffsets) string {
 
 	// Read the actual string bytes
 	buf := make([]byte, strLen)
-	n, err := f.ReadAt(buf, int64(dataAddr))
+	n, err := f.ReadAt(buf, int64(dataAddr)) //nolint:gosec // process addresses are valid offsets
 	if err != nil || n == 0 {
 		return ""
 	}
@@ -253,7 +253,7 @@ func readPathobj(f *os.File, addr uint64, off *RubyOffsets) string {
 // readUint64 reads a uint64 from the given address in a file.
 func readUint64(f *os.File, addr uint64, out *uint64) error {
 	var buf [8]byte
-	n, err := f.ReadAt(buf[:], int64(addr))
+	n, err := f.ReadAt(buf[:], int64(addr)) //nolint:gosec // process addresses are valid offsets
 	if err != nil || n != 8 {
 		return fmt.Errorf("read at 0x%x: %w", addr, err)
 	}

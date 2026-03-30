@@ -70,57 +70,58 @@ type RubyOffsets struct {
 // Layout must match struct ruby_offsets in ruby_stack_walker.c exactly.
 // All fields are little-endian on the target architecture.
 type BPFRubyOffsets struct {
-	ECVMStack       uint32 // 0
-	ECVMStackSize   uint32 // 4
-	ECCFP           uint32 // 8
-	CFPPC           uint32 // 12
-	CFPSP           uint32 // 16
-	CFPIseq         uint32 // 20
-	CFPSelf         uint32 // 24
-	CFPEP           uint32 // 28
-	CFPSizeof       uint32 // 32
-	IseqBody        uint32 // 36
-	BodyLocation    uint32 // 40
-	BodyIseqEncoded uint32 // 44
-	LocPathobj      uint32 // 48
-	LocBaseLabel    uint32 // 52
-	LocLabel        uint32 // 56
-	LocFirstLineno  uint32 // 60
-	ThreadEC            uint32 // 64
-	VMRactorMainThread  uint32 // 68
-	RStringLen      uint32 // 72
-	RStringHeapPtr  uint32 // 76
-	RStringEmbedStart uint32 // 80
-	_pad            uint32 // 84 (alignment padding)
-	RStringNoEmbed  uint64 // 88
+	ECVMStack          uint32 // 0
+	ECVMStackSize      uint32 // 4
+	ECCFP              uint32 // 8
+	CFPPC              uint32 // 12
+	CFPSP              uint32 // 16
+	CFPIseq            uint32 // 20
+	CFPSelf            uint32 // 24
+	CFPEP              uint32 // 28
+	CFPSizeof          uint32 // 32
+	IseqBody           uint32 // 36
+	BodyLocation       uint32 // 40
+	BodyIseqEncoded    uint32 // 44
+	LocPathobj         uint32 // 48
+	LocBaseLabel       uint32 // 52
+	LocLabel           uint32 // 56
+	LocFirstLineno     uint32 // 60
+	ThreadEC           uint32 // 64
+	VMRactorMainThread uint32 // 68
+	RStringLen         uint32 // 72
+	RStringHeapPtr     uint32 // 76
+	RStringEmbedStart  uint32 // 80
+	_                  uint32 // 84 (alignment padding)
+	RStringNoEmbed     uint64 // 88
 }
+
 // Total: 96 bytes
 
 // ToBPF converts RubyOffsets to the packed BPF map format.
 func (o *RubyOffsets) ToBPF() BPFRubyOffsets {
 	return BPFRubyOffsets{
-		ECVMStack:         o.ECVMStack,
-		ECVMStackSize:     o.ECVMStackSize,
-		ECCFP:             o.ECCFP,
-		CFPPC:             o.CFPPC,
-		CFPSP:             o.CFPSP,
-		CFPIseq:           o.CFPIseq,
-		CFPSelf:           o.CFPSelf,
-		CFPEP:             o.CFPEP,
-		CFPSizeof:         o.CFPSizeof,
-		IseqBody:          o.IseqBody,
-		BodyLocation:      o.BodyLocation,
-		BodyIseqEncoded:   o.BodyIseqEncoded,
-		LocPathobj:        o.LocPathobj,
-		LocBaseLabel:      o.LocBaseLabel,
-		LocLabel:          o.LocLabel,
-		LocFirstLineno:    o.LocFirstLineno,
-		ThreadEC:            o.ThreadEC,
+		ECVMStack:          o.ECVMStack,
+		ECVMStackSize:      o.ECVMStackSize,
+		ECCFP:              o.ECCFP,
+		CFPPC:              o.CFPPC,
+		CFPSP:              o.CFPSP,
+		CFPIseq:            o.CFPIseq,
+		CFPSelf:            o.CFPSelf,
+		CFPEP:              o.CFPEP,
+		CFPSizeof:          o.CFPSizeof,
+		IseqBody:           o.IseqBody,
+		BodyLocation:       o.BodyLocation,
+		BodyIseqEncoded:    o.BodyIseqEncoded,
+		LocPathobj:         o.LocPathobj,
+		LocBaseLabel:       o.LocBaseLabel,
+		LocLabel:           o.LocLabel,
+		LocFirstLineno:     o.LocFirstLineno,
+		ThreadEC:           o.ThreadEC,
 		VMRactorMainThread: o.VMRactorMainThread,
-		RStringLen:        o.RStringLen,
-		RStringHeapPtr:    o.RStringHeapPtr,
-		RStringEmbedStart: o.RStringEmbedStart,
-		RStringNoEmbed:    o.RStringNoEmbed,
+		RStringLen:         o.RStringLen,
+		RStringHeapPtr:     o.RStringHeapPtr,
+		RStringEmbedStart:  o.RStringEmbedStart,
+		RStringNoEmbed:     o.RStringNoEmbed,
 	}
 }
 

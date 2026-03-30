@@ -80,7 +80,7 @@ func ExtractFromDWARF(elfPath string) (*RubyOffsets, error) {
 			members: make(map[string]uint32),
 		}
 		if sz, ok := entry.Val(dwarf.AttrByteSize).(int64); ok {
-			si.size = uint32(sz)
+			si.size = uint32(sz) //nolint:gosec // DWARF struct sizes are always small
 		}
 
 		if entry.Children {
@@ -199,10 +199,7 @@ func resolveNestedOffsets(dw *dwarf.Data, off *RubyOffsets) error {
 	needRString := off.RStringHeapPtr == 0
 	needClass := off.ClassClasspath == 0
 
-	for {
-		if !needVM && !needRString && !needThread && !needClass {
-			break
-		}
+	for needVM || needRString || needThread || needClass {
 		entry, err := reader.Next()
 		if err != nil || entry == nil {
 			break
@@ -236,7 +233,7 @@ func resolveNestedOffsets(dw *dwarf.Data, off *RubyOffsets) error {
 				}
 				for _, ff := range inner.Field {
 					if ff.Name == "main_thread" {
-						off.VMRactorMainThread = uint32(f.ByteOffset + ff.ByteOffset)
+						off.VMRactorMainThread = uint32(f.ByteOffset + ff.ByteOffset) //nolint:gosec // DWARF offsets are small
 						needVM = false
 					}
 				}
@@ -254,7 +251,7 @@ func resolveNestedOffsets(dw *dwarf.Data, off *RubyOffsets) error {
 			}
 			for _, f := range st.Field {
 				if f.Name == "ec" {
-					off.ThreadEC = uint32(f.ByteOffset)
+					off.ThreadEC = uint32(f.ByteOffset) //nolint:gosec // DWARF offsets are small
 					needThread = false
 					break
 				}

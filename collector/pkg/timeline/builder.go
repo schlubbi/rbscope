@@ -34,8 +34,8 @@ type Builder struct {
 	frequency uint32
 
 	idleClassifier *IdleClassifier
-	resolver       *symbols.Resolver         // for native stack symbol resolution
-	frameResolver  *offsets.FrameResolver     // for BPF stack walker iseq resolution
+	resolver       *symbols.Resolver      // for native stack symbol resolution
+	frameResolver  *offsets.FrameResolver // for BPF stack walker iseq resolution
 }
 
 // NewBuilder creates a Builder for a new capture window.
@@ -269,17 +269,17 @@ func (b *Builder) Ingest(event any) {
 // without file context. Generated from Rails middleware stacks where
 // every layer has a `call` method.
 var ambiguousNames = map[string]bool{
-	"call":              true,
-	"new":               true,
-	"initialize":        true,
-	"each":              true,
-	"map":               true,
-	"select":            true,
-	"block in call":     true,
-	"block in new":      true,
-	"block in each":     true,
-	"block (2 levels)":  true,
-	"block (3 levels)":  true,
+	"call":             true,
+	"new":              true,
+	"initialize":       true,
+	"each":             true,
+	"map":              true,
+	"select":           true,
+	"block in call":    true,
+	"block in new":     true,
+	"block in each":    true,
+	"block (2 levels)": true,
+	"block (3 levels)": true,
 }
 
 // qualifyMethodName adds a short file context to ambiguous method names

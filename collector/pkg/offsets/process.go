@@ -140,7 +140,7 @@ func ReadECAddress(pid uint32, offsets *RubyOffsets, librubyBase uint64) (uint64
 // readPtr reads an 8-byte pointer from the given address in a /proc/pid/mem file.
 func readPtr(f *os.File, addr uint64) (uint64, error) {
 	var buf [8]byte
-	n, err := f.ReadAt(buf[:], int64(addr))
+	n, err := f.ReadAt(buf[:], int64(addr)) //nolint:gosec // process addresses are valid offsets
 	if err != nil {
 		return 0, fmt.Errorf("read at 0x%x: %w", addr, err)
 	}
