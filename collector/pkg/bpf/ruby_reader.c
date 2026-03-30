@@ -49,6 +49,12 @@ struct ruby_sample_event {
     // Native stack IPs follow (native_stack_len bytes, each u64)
 };
 
+// Maximum object type name length for alloc events.
+#define MAX_TYPE_NAME_LEN 256
+
+// Alloc metadata size: type_len(4) + alloc_size(8) + type_name(MAX_TYPE_NAME_LEN)
+#define ALLOC_META_SIZE (4 + 8 + MAX_TYPE_NAME_LEN)
+
 // Ring buffer for sending events to userspace
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -56,12 +62,12 @@ struct {
 } events SEC(".maps");
 
 // Per-CPU scratch space for building events with inline stack data.
-// Sized for header + max Ruby stack + max native stack.
+// Sized for header + max Ruby stack + max native stack + alloc metadata.
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __uint(max_entries, 1);
     __type(key, u32);
-    __type(value, u8[sizeof(struct ruby_sample_event) + MAX_STACK_SIZE + MAX_NATIVE_STACK_SIZE]);
+    __type(value, u8[sizeof(struct ruby_sample_event) + MAX_STACK_SIZE + MAX_NATIVE_STACK_SIZE + ALLOC_META_SIZE]);
 } scratch SEC(".maps");
 
 // USDT probe handler: __rbscope_probe_ruby_sample
@@ -133,6 +139,95 @@ int handle_ruby_sample(struct pt_regs *ctx) {
     // offset 40) → native stack (native_stack_len bytes from offset
     // 40 + MAX_STACK_SIZE = 4136).
     u32 total_size = native_offset + native_len;
+    bpf_ringbuf_output(&events, scratch_buf, total_size, 0);
+    return 0;
+}
+
+// USDT probe handler: __rbscope_probe_ruby_alloc
+//
+// Fired by rbscope gem's allocation tracker when a sampled allocation occurs.
+// Different argument layout from ruby_sample.
+//
+// Arguments (from function parameters, read via registers):
+//   arg0: pointer to object type name string
+//   arg1: object type name length
+//   arg2: allocation size in bytes
+//   arg3: pointer to stack data (format v2 inline strings)
+//   arg4: stack data length
+//
+// Wire format (fixed offsets for BPF verifier):
+//   [0..40)   ruby_sample_event header (event_type=3=ALLOC)
+//   [40..40+MAX_STACK_SIZE)  Ruby stack data
+//   [40+MAX_STACK_SIZE..40+MAX_STACK_SIZE+MAX_NATIVE_STACK_SIZE)  Native IPs
+//   [ALLOC_META_OFF..ALLOC_META_OFF+ALLOC_META_SIZE)  Alloc metadata
+//
+// Alloc metadata layout:
+//   type_name_len (4 bytes, u32)
+//   alloc_size    (8 bytes, u64)
+//   type_name     (type_name_len bytes, max 256)
+#define ALLOC_META_OFF (sizeof(struct ruby_sample_event) + MAX_STACK_SIZE + MAX_NATIVE_STACK_SIZE)
+
+SEC("uprobe/ruby_alloc")
+int handle_ruby_alloc(struct pt_regs *ctx) {
+    u64 type_ptr = PT_REGS_PARM1(ctx);
+    u32 type_len = (u32)PT_REGS_PARM2(ctx);
+    u64 alloc_size = PT_REGS_PARM3(ctx);
+    u64 stack_ptr = PT_REGS_PARM4(ctx);
+    u32 stack_len = (u32)PT_REGS_PARM5(ctx);
+
+    if (stack_len == 0 || stack_len > MAX_STACK_SIZE)
+        return 0;
+
+    // Cap type name length
+    if (type_len > MAX_TYPE_NAME_LEN)
+        type_len = MAX_TYPE_NAME_LEN;
+
+    u32 zero = 0;
+    u8 *scratch_buf = bpf_map_lookup_elem(&scratch, &zero);
+    if (!scratch_buf) return 0;
+
+    // Build header
+    struct ruby_sample_event *event = (struct ruby_sample_event *)scratch_buf;
+    event->event_type = EVENT_RUBY_ALLOC;
+    event->pid = bpf_get_current_pid_tgid() >> 32;
+    event->tid = (u32)bpf_get_current_pid_tgid();
+    event->weight = 1;
+    event->timestamp_ns = bpf_ktime_get_ns();
+    event->thread_id = 0;
+    event->stack_data_len = stack_len;
+    event->native_stack_len = 0;
+
+    // Copy Ruby stack data after header
+    u32 hdr_size = sizeof(struct ruby_sample_event);
+    u32 bounded_len = stack_len & (MAX_STACK_SIZE - 1);
+    if (bpf_probe_read_user(scratch_buf + hdr_size, bounded_len, (void *)stack_ptr) < 0)
+        return 0;
+
+    // Capture native user-space call stack
+    u32 native_offset = hdr_size + MAX_STACK_SIZE;
+    long native_ret = bpf_get_stack(ctx, scratch_buf + native_offset,
+                                    MAX_NATIVE_STACK_SIZE, BPF_F_USER_STACK);
+    u32 native_len = 0;
+    if (native_ret > 0)
+        native_len = (u32)native_ret;
+    event->native_stack_len = native_len;
+
+    // Write alloc metadata at fixed offset
+    *(u32 *)(scratch_buf + ALLOC_META_OFF) = type_len;
+    *(u64 *)(scratch_buf + ALLOC_META_OFF + 4) = alloc_size;
+
+    // Read type name from userspace
+    if (type_len > 0) {
+        u32 bounded_type_len = type_len & (MAX_TYPE_NAME_LEN - 1);
+        if (bounded_type_len > 0) {
+            bpf_probe_read_user(scratch_buf + ALLOC_META_OFF + 12,
+                                bounded_type_len, (void *)type_ptr);
+        }
+    }
+
+    u32 total_size = ALLOC_META_OFF + 12 + (type_len & (MAX_TYPE_NAME_LEN - 1));
+    if (total_size > sizeof(struct ruby_sample_event) + MAX_STACK_SIZE + MAX_NATIVE_STACK_SIZE + ALLOC_META_SIZE)
+        total_size = sizeof(struct ruby_sample_event) + MAX_STACK_SIZE + MAX_NATIVE_STACK_SIZE + ALLOC_META_SIZE;
     bpf_ringbuf_output(&events, scratch_buf, total_size, 0);
     return 0;
 }

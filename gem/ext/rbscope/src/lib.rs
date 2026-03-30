@@ -1,6 +1,7 @@
 // Allow dead code in probe and stack modules — these are public APIs
 // used by the collector (Phase 2) and future phases. Only the sampler
 // is wired up in Phase 1.
+mod allocation_tracker;
 #[allow(dead_code)]
 mod probes;
 mod sampler;
@@ -63,6 +64,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     native.define_singleton_method("enable_gvl_profiling", function!(sampler::enable_gvl_profiling, 0))?;
     native.define_singleton_method("gvl_profiling_enabled?", function!(sampler::gvl_profiling_enabled, 0))?;
     native.define_singleton_method("gvl_event_count", function!(sampler::gvl_event_count, 0))?;
+    native.define_singleton_method("start_allocation_tracking", function!(allocation_tracker::start_allocation_tracking, 1))?;
+    native.define_singleton_method("stop_allocation_tracking", function!(allocation_tracker::stop_allocation_tracking, 0))?;
+    native.define_singleton_method("allocation_tracking_enabled?", function!(allocation_tracker::allocation_tracking_enabled, 0))?;
+    native.define_singleton_method("allocation_stats", function!(allocation_tracker::allocation_stats, 0))?;
 
     // Register the postponed job with the Ruby VM. This must happen on
     // the main thread during init — the handle is used later by the

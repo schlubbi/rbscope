@@ -21,5 +21,6 @@ after_worker_fork do |_server, worker|
   if defined?(Rbscope) && ENV["RBSCOPE_ENABLE"] == "1"
     Rbscope.start
     Rbscope.enable_gvl_profiling
+    Rbscope.enable_allocation_tracking(sample_interval: 256)
   end
 end

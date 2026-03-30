@@ -41,6 +41,12 @@ func NewPyroscopeExporter(cfg PyroscopeConfig) *PyroscopeExporter {
 
 // Push serialises the profile and sends it to the Pyroscope /ingest endpoint.
 func (e *PyroscopeExporter) Push(ctx context.Context, prof *profile.Profile) error {
+	return e.PushWithName(ctx, prof, e.labeledAppName())
+}
+
+// PushWithName pushes a pprof profile to Pyroscope with a custom app name.
+// Used for different profile types (e.g., "rbscope.cpu.alloc_objects").
+func (e *PyroscopeExporter) PushWithName(ctx context.Context, prof *profile.Profile, name string) error {
 	var buf bytes.Buffer
 	if err := prof.Write(&buf); err != nil {
 		return fmt.Errorf("pyroscope: serialize profile: %w", err)
@@ -53,7 +59,7 @@ func (e *PyroscopeExporter) Push(ctx context.Context, prof *profile.Profile) err
 	u.Path = "/ingest"
 
 	q := u.Query()
-	q.Set("name", e.labeledAppName())
+	q.Set("name", name)
 	q.Set("format", "pprof")
 	q.Set("sampleRate", "19")
 	u.RawQuery = q.Encode()

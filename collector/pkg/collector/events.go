@@ -39,7 +39,7 @@ const rubySampleHeaderSize = 40
 // maxRubyStackSize matches MAX_STACK_SIZE in ruby_reader.c.
 // Native stack IPs are stored at a fixed offset (header + maxRubyStackSize)
 // to avoid BPF verifier issues with dynamic offsets.
-const maxRubyStackSize = 4096
+const maxRubyStackSize = 16384
 
 // RubySampleEvent represents a Ruby stack sample captured by the BPF program.
 // The stack data is serialized in format v2 (inline strings) by the gem.
@@ -52,6 +52,15 @@ type RubySampleEvent struct {
 	NativeStackLen uint32   // bytes of native IPs (0 if not captured)
 	StackData      []byte   // inline format v2 stack data
 	NativeStackIPs []uint64 // user-space instruction pointers from bpf_get_stack
+}
+
+// RubyAllocEvent represents a sampled allocation captured by the BPF program.
+// Uses the same wire format as RubySampleEvent but with additional alloc metadata
+// at a fixed offset after the native stack area.
+type RubyAllocEvent struct {
+	RubySampleEvent        // embedded sample data (stack, native IPs)
+	ObjectType      string // class name of allocated object (e.g., "String", "Array")
+	SizeBytes       uint64 // rb_obj_memsize_of() result
 }
 
 // InlineFrame represents a single frame parsed from format v2 stack data.
@@ -168,9 +177,10 @@ func ParseEvent(data []byte) (any, error) {
 	eventType := EventType(binary.LittleEndian.Uint32(data[0:4]))
 
 	switch eventType {
-	case EventRubySample, EventRubyAlloc:
-		// Ruby sample events use the new 40-byte header layout
+	case EventRubySample:
 		return parseRubySampleFromRaw(data)
+	case EventRubyAlloc:
+		return parseRubyAllocFromRaw(data)
 	case EventRubySpan:
 		hdr := parseHeader(data)
 		return parseRubySpan(hdr, data)
@@ -232,7 +242,7 @@ func parseRubySampleFromRaw(data []byte) (*RubySampleEvent, error) {
 		copy(ev.StackData, data[off:off+sdLen])
 	}
 
-	// Parse native stack IPs (fixed offset at header + MAX_STACK_SIZE = 40 + 4096 = 4136)
+	// Parse native stack IPs (fixed offset at header + MAX_STACK_SIZE = 40 + 16384 = 16424)
 	nsLen := int(ev.NativeStackLen)
 	if nsLen > 0 {
 		nativeOff := rubySampleHeaderSize + maxRubyStackSize
@@ -473,6 +483,43 @@ func IoOpName(op uint32) string {
 func formatIPv4(addr uint32) string {
 	return fmt.Sprintf("%d.%d.%d.%d",
 		addr&0xff, (addr>>8)&0xff, (addr>>16)&0xff, (addr>>24)&0xff)
+}
+
+// parseGVLWaitEvent parses a GVL wait event from the BPF ring buffer.
+// Layout: event_type(4) + pid(4) + tid(4) + pad(4) + wait_ns(8) + timestamp_ns(8) + thread_value(8) = 40 bytes
+// allocMetaOffset is the fixed byte offset in the BPF scratch buffer where
+// alloc metadata (type name + size) is written. Matches ALLOC_META_OFF in ruby_reader.c.
+const allocMetaOffset = rubySampleHeaderSize + maxRubyStackSize + maxNativeStackSize
+
+// maxNativeStackSize matches MAX_NATIVE_STACK_SIZE in ruby_reader.c (64 IPs × 8 bytes).
+const maxNativeStackSize = 512
+
+// parseRubyAllocFromRaw parses a ruby alloc event with additional metadata.
+// Wire format:
+//
+//	[0..40)   ruby_sample_event header (event_type=3)
+//	[40..40+maxRubyStackSize)   Ruby stack data
+//	[40+maxRubyStackSize..allocMetaOffset)   Native IPs
+//	[allocMetaOffset..)   Alloc metadata: type_len(4) + alloc_size(8) + type_name(type_len)
+func parseRubyAllocFromRaw(data []byte) (*RubyAllocEvent, error) {
+	sample, err := parseRubySampleFromRaw(data)
+	if err != nil {
+		return nil, err
+	}
+
+	ev := &RubyAllocEvent{RubySampleEvent: *sample}
+
+	// Parse alloc metadata if present
+	if len(data) > allocMetaOffset+12 {
+		typeLen := binary.LittleEndian.Uint32(data[allocMetaOffset : allocMetaOffset+4])
+		ev.SizeBytes = binary.LittleEndian.Uint64(data[allocMetaOffset+4 : allocMetaOffset+12])
+
+		if typeLen > 0 && typeLen <= 256 && allocMetaOffset+12+int(typeLen) <= len(data) {
+			ev.ObjectType = string(data[allocMetaOffset+12 : allocMetaOffset+12+int(typeLen)])
+		}
+	}
+
+	return ev, nil
 }
 
 // parseGVLWaitEvent parses a GVL wait event from the BPF ring buffer.
