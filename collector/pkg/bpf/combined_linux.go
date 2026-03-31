@@ -4,6 +4,7 @@ package bpf
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/cilium/ebpf/ringbuf"
@@ -19,21 +20,30 @@ import (
 //   - I/O markers from kernel tracepoints
 //   - Scheduler state from sched tracepoints
 //
-// The gem's own CPU sampler is redundant — BPF provides higher-frequency,
-// zero-instrumentation stack walking. The gem is used only for allocation
-// and GVL hooks that require in-process instrumentation.
+// Architecture: each kernel ring buffer gets a dedicated drain goroutine
+// that reads as fast as the kernel provides data and pushes raw events
+// into a shared Go channel. This decouples ring buffer draining from
+// event processing (frame resolution, symbol lookup, etc.) — the
+// collector can spend milliseconds resolving a stack walk frame without
+// starving high-volume readers like GVL.
+//
+// Backpressure: the Go channel (64K deep) absorbs bursts. Drain goroutines
+// only block when the channel is full AND the kernel ring buffer is full,
+// requiring tens of seconds of sustained backlog.
 type CombinedBPF struct {
-	gem     *RealBPF
-	walker  *StackWalkerBPF
-	toggle  int
-	readers []*ringbuf.Reader // all readers to poll
-	pending [][]byte          // batch-drained events waiting for delivery
+	gem    *RealBPF
+	walker *StackWalkerBPF
+
+	readers []*ringbuf.Reader
+
+	eventCh chan []byte     // drained events for the collector
+	stopCh  chan struct{}   // signals drain goroutines to exit
+	wg      sync.WaitGroup // tracks drain goroutines
+
+	readTimer *time.Timer // reused by ReadRingBuffer to avoid alloc per call
 }
 
 // NewCombinedBPF creates a combined profiler.
-//   - bpfObj: path to the gem's compiled BPF object
-//   - rubyPath: path to libruby (or statically-linked ruby binary)
-//   - cpuHz: sampling frequency for BPF stack walker (typically 99)
 func NewCombinedBPF(bpfObj, rubyPath string, cpuHz int) (*CombinedBPF, error) {
 	gem, err := NewRealBPF(bpfObj)
 	if err != nil {
@@ -46,8 +56,6 @@ func NewCombinedBPF(bpfObj, rubyPath string, cpuHz int) (*CombinedBPF, error) {
 		return nil, fmt.Errorf("create stack walker: %w", err)
 	}
 
-	// In combined mode, BPF stack walker handles CPU sampling and I/O+sched tracing.
-	// Disable these in the gem to avoid redundant overhead and event duplication.
 	gem.SkipCPUSampler = true
 	gem.SkipIOSched = true
 
@@ -70,29 +78,20 @@ func (c *CombinedBPF) Load() error {
 		return fmt.Errorf("walker load: %w", err)
 	}
 
-	// Collect all non-nil readers for round-robin polling.
-	// Walker provides: CPU stack walks, I/O, sched
-	// Gem provides: alloc probes, GVL state, GVL stacks
-	// We DON'T include the gem's primary reader (ruby samples) —
-	// BPF stack walker handles CPU sampling. We also skip the gem's
-	// I/O and sched readers since the walker already has them.
+	// Collect all non-nil readers.
 	c.readers = nil
-	// Primary: BPF stack walker (CPU samples)
 	if c.walker.reader != nil {
 		c.readers = append(c.readers, c.walker.reader)
 	}
-	// Gem alloc probes (the gem's primary ring buffer carries alloc events)
 	if c.gem.reader != nil {
 		c.readers = append(c.readers, c.gem.reader)
 	}
-	// GVL from gem
 	if c.gem.gvlReader != nil {
 		c.readers = append(c.readers, c.gem.gvlReader)
 	}
 	if c.gem.gvlStackReader != nil {
 		c.readers = append(c.readers, c.gem.gvlStackReader)
 	}
-	// I/O + sched from walker (not gem — avoid duplicates)
 	if c.walker.ioReader != nil {
 		c.readers = append(c.readers, c.walker.ioReader)
 	}
@@ -100,15 +99,55 @@ func (c *CombinedBPF) Load() error {
 		c.readers = append(c.readers, c.walker.schedReader)
 	}
 
+	// 64K-deep channel. At ~5000 GVL events/sec + ~100 CPU + ~500 I/O,
+	// this holds ~10 seconds of events before drain goroutines block.
+	c.eventCh = make(chan []byte, 1<<16)
+	c.stopCh = make(chan struct{})
+
+	// One drain goroutine per reader. Each reads from its kernel ring buffer
+	// as fast as epoll delivers events and pushes into the shared channel.
+	for _, rd := range c.readers {
+		c.wg.Add(1)
+		go c.drainReader(rd)
+	}
+
 	return nil
 }
 
+// drainReader continuously reads from a single kernel ring buffer and pushes
+// raw event copies into the shared channel.
+func (c *CombinedBPF) drainReader(rd *ringbuf.Reader) {
+	defer c.wg.Done()
+
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		default:
+		}
+
+		rd.SetDeadline(time.Now().Add(50 * time.Millisecond))
+		record, err := rd.Read()
+		if err != nil {
+			continue
+		}
+
+		// Copy — the reader reuses its internal buffer on next Read().
+		data := make([]byte, len(record.RawSample))
+		copy(data, record.RawSample)
+
+		select {
+		case c.eventCh <- data:
+		case <-c.stopCh:
+			return
+		}
+	}
+}
+
 func (c *CombinedBPF) AttachPID(pid uint32) error {
-	// Attach gem probes (alloc + GVL USDT uprobes)
 	if err := c.gem.AttachPID(pid); err != nil {
 		return fmt.Errorf("gem attach: %w", err)
 	}
-	// Attach stack walker (perf_event CPU sampling + EC discovery)
 	if err := c.walker.AttachPID(pid); err != nil {
 		return fmt.Errorf("walker attach: %w", err)
 	}
@@ -120,57 +159,34 @@ func (c *CombinedBPF) DetachPID(pid uint32) error {
 	return c.walker.DetachPID(pid)
 }
 
+// ReadRingBuffer returns the next event from the channel, or 0 if none
+// are available within 10ms. Uses a reusable timer to avoid per-call
+// allocations under high throughput.
 func (c *CombinedBPF) ReadRingBuffer(buf []byte) (int, error) {
-	if len(c.readers) == 0 {
+	// Fast path: non-blocking check first.
+	select {
+	case data := <-c.eventCh:
+		return copy(buf, data), nil
+	default:
+	}
+
+	// Slow path: wait up to 10ms.
+	t := c.readTimer
+	if t == nil {
+		t = time.NewTimer(10 * time.Millisecond)
+		c.readTimer = t
+	} else {
+		t.Reset(10 * time.Millisecond)
+	}
+	select {
+	case data := <-c.eventCh:
+		if !t.Stop() {
+			<-t.C
+		}
+		return copy(buf, data), nil
+	case <-t.C:
 		return 0, nil
 	}
-
-	// Drain pending events from the backlog first (batch-drained from
-	// high-volume readers to prevent ring buffer overflow).
-	if len(c.pending) > 0 {
-		n := copy(buf, c.pending[0])
-		c.pending = c.pending[1:]
-		return n, nil
-	}
-
-	// Round-robin across all readers. When a reader has data, batch-drain
-	// up to maxBatch events to prevent high-volume ring buffers (GVL, alloc)
-	// from overflowing while the event loop processes expensive operations
-	// like frame resolution.
-	const maxBatch = 64
-	start := c.toggle
-	for attempt := 0; attempt < 2; attempt++ {
-		deadline := 1 * time.Millisecond
-		if attempt == 1 {
-			deadline = 5 * time.Millisecond
-		}
-		for i := 0; i < len(c.readers); i++ {
-			idx := (start + i) % len(c.readers)
-			rd := c.readers[idx]
-			rd.SetDeadline(time.Now().Add(deadline))
-			record, err := rd.Read()
-			if err == nil {
-				c.toggle = (idx + 1) % len(c.readers)
-				n := copy(buf, record.RawSample)
-
-				// Batch-drain: pull more events from this reader while available.
-				for j := 0; j < maxBatch; j++ {
-					rd.SetDeadline(time.Now().Add(100 * time.Microsecond))
-					extra, err := rd.Read()
-					if err != nil {
-						break
-					}
-					dup := make([]byte, len(extra.RawSample))
-					copy(dup, extra.RawSample)
-					c.pending = append(c.pending, dup)
-				}
-
-				return n, nil
-			}
-		}
-	}
-
-	return 0, nil
 }
 
 func (c *CombinedBPF) KtimeOffsetNs() int64 {
@@ -178,6 +194,14 @@ func (c *CombinedBPF) KtimeOffsetNs() int64 {
 }
 
 func (c *CombinedBPF) Close() error {
+	close(c.stopCh)
+	c.wg.Wait()
+
+	// Drain remaining channel events.
+	close(c.eventCh)
+	for range c.eventCh {
+	}
+
 	_ = c.gem.Close()
 	return c.walker.Close()
 }
