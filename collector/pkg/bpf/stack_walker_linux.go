@@ -160,7 +160,7 @@ func (s *StackWalkerBPF) AttachPID(pid uint32) error {
 	// In containerized environments, bpf_get_current_pid_tgid() returns the
 	// host-namespace PID, not the container PID. Discover the host PID so the
 	// BPF map lookup matches correctly.
-	mapKey, err := discoverHostPID(pid)
+	mapKey, err := DiscoverHostPID(pid)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rbscope: host PID discovery failed, using container PID: %v\n", err)
 		mapKey = pid
@@ -395,7 +395,7 @@ func (s *StackWalkerBPF) PIDMapping() map[uint32]uint32 {
 	return s.pidMapping
 }
 
-// discoverHostPID returns the init-namespace (host) PID for a given container PID.
+// DiscoverHostPID returns the init-namespace (host) PID for a given container PID.
 //
 // In containerized environments (Docker, Codespaces, etc.), bpf_get_current_pid_tgid()
 // returns the host-namespace PID, which may differ from the PID seen inside the
@@ -406,7 +406,7 @@ func (s *StackWalkerBPF) PIDMapping() map[uint32]uint32 {
 // perf_event_open() with a specific pid handles namespace translation internally,
 // so the event fires for the correct task. The BPF helper then returns the
 // init-namespace PID which is what the main stack walker BPF will see.
-func discoverHostPID(containerPid uint32) (uint32, error) {
+func DiscoverHostPID(containerPid uint32) (uint32, error) {
 	// Create a small array map to receive the result from BPF
 	resultMap, err := ebpf.NewMap(&ebpf.MapSpec{
 		Type:       ebpf.Array,

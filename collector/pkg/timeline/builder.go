@@ -41,6 +41,12 @@ type Builder struct {
 	// PIDs (visible in /proc) for PID-namespace environments.
 	hostToContainerPID map[uint32]uint32
 
+	// pidDiscoverer, when set, maps a host PID (from BPF events) to its
+	// container PID (visible in /proc). Used to discover PID namespace
+	// mappings for dynamically forked workers. The function is provided
+	// by the caller (e.g., bpf.DiscoverHostPID reversed).
+	pidDiscoverer func(hostPID uint32) (containerPID uint32, ok bool)
+
 	allocResolveLogCount int // throttle diagnostic log messages
 	seenPIDs             map[uint32]struct{} // PIDs we've eagerly opened mem for
 }
@@ -83,6 +89,32 @@ func (b *Builder) CloseFrameResolver() {
 	}
 }
 
+// SetPIDDiscoverer registers a function that resolves host PIDs to container
+// PIDs for dynamically forked workers. Called lazily when a new PID is seen.
+func (b *Builder) SetPIDDiscoverer(fn func(hostPID uint32) (containerPID uint32, ok bool)) {
+	b.pidDiscoverer = fn
+}
+
+// discoverPIDMapping checks if the given PID needs host→container mapping.
+// If /proc/<pid> doesn't exist and a pidDiscoverer is set, it tries to
+// find the container PID by scanning /proc for sibling processes.
+func (b *Builder) discoverPIDMapping(hostPID uint32) {
+	if _, ok := b.hostToContainerPID[hostPID]; ok {
+		return // already mapped
+	}
+	// Check if /proc/<hostPID> exists — if so, no mapping needed
+	if _, err := os.Stat(fmt.Sprintf("/proc/%d", hostPID)); err == nil {
+		return
+	}
+	// PID doesn't exist in our namespace — try the discoverer
+	if b.pidDiscoverer != nil {
+		if containerPID, ok := b.pidDiscoverer(hostPID); ok {
+			b.SetHostToContainerPID(hostPID, containerPID)
+			fmt.Fprintf(os.Stderr, "rbscope: discovered PID mapping: host %d → container %d\n", hostPID, containerPID)
+		}
+	}
+}
+
 // SetHostToContainerPID registers a host→container PID mapping so the
 // frame resolver reads /proc/<containerPID>/mem instead of the host PID
 // that BPF events carry. Required when running inside a PID namespace.
@@ -107,7 +139,15 @@ func (b *Builder) Ingest(event any) {
 		// The cached fd keeps the address space alive even after worker death.
 		if _, seen := b.seenPIDs[ev.PID]; !seen && b.frameResolver != nil {
 			b.seenPIDs[ev.PID] = struct{}{}
-			b.frameResolver.EagerOpenMem(ev.PID)
+			// For PID namespace environments: discover the container PID
+			// for this host PID so /proc access works.
+			b.discoverPIDMapping(ev.PID)
+			// Open mem with the (possibly mapped) PID
+			pid := ev.PID
+			if mapped, ok := b.hostToContainerPID[ev.PID]; ok {
+				pid = mapped
+			}
+			b.frameResolver.EagerOpenMem(pid)
 		}
 
 		var frameIDs []uint32
@@ -162,7 +202,12 @@ func (b *Builder) Ingest(event any) {
 		b.ensureThreadName(ev.TID, ev.PID)
 		if _, seen := b.seenPIDs[ev.PID]; !seen && b.frameResolver != nil {
 			b.seenPIDs[ev.PID] = struct{}{}
-			b.frameResolver.EagerOpenMem(ev.PID)
+			b.discoverPIDMapping(ev.PID)
+			pid := ev.PID
+			if mapped, ok := b.hostToContainerPID[ev.PID]; ok {
+				pid = mapped
+			}
+			b.frameResolver.EagerOpenMem(pid)
 		}
 		tb := b.thread(ev.TID)
 		frames := collector.ParseInlineStack(ev.StackData)
@@ -269,7 +314,12 @@ func (b *Builder) Ingest(event any) {
 		b.ensureThreadName(ev.TID, ev.PID)
 		if _, seen := b.seenPIDs[ev.PID]; !seen && b.frameResolver != nil {
 			b.seenPIDs[ev.PID] = struct{}{}
-			b.frameResolver.EagerOpenMem(ev.PID)
+			b.discoverPIDMapping(ev.PID)
+			pid := ev.PID
+			if mapped, ok := b.hostToContainerPID[ev.PID]; ok {
+				pid = mapped
+			}
+			b.frameResolver.EagerOpenMem(pid)
 		}
 		// BPF stack walker event — resolve iseq addresses to method/path/line.
 		if b.frameResolver == nil {

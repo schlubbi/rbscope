@@ -296,18 +296,37 @@ func runCapture(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// Register PID namespace mappings (must happen after AttachPID which
-	// discovers the host PID) so the frame resolver reads /proc/<containerPID>/mem.
+	// Register PID namespace mappings so the frame resolver reads
+	// /proc/<containerPID>/mem instead of the host PID from BPF events.
 	if tb != nil && sw != nil {
+		// BPF mode: stack walker already discovered mappings.
 		for containerPID, hostPID := range sw.PIDMapping() {
 			tb.SetHostToContainerPID(hostPID, containerPID)
+		}
+	}
+	if tb != nil && sw == nil {
+		// Gem mode: discover host PID for the target process.
+		hostPID, err := bpf.DiscoverHostPID(flagCapturePID)
+		if err == nil && hostPID != flagCapturePID {
+			tb.SetHostToContainerPID(hostPID, flagCapturePID)
+			logger.Info("PID namespace detected (gem mode)", "container", flagCapturePID, "host", hostPID)
 		}
 	}
 
 	// Also add sibling processes to the I/O tracer's target_pids map.
 	// Pitchfork forks worker processes that inherit the uprobe but have
 	// different PIDs. The I/O tracepoints need all PIDs in the filter.
-	attachSiblingPIDs(c, flagCapturePID, logger)
+	attachSiblingPIDs(c, flagCapturePID, logger, tb)
+
+	// Set up PID discoverer for dynamically forked workers.
+	// When the builder sees a host PID that doesn't exist in /proc,
+	// it scans siblings to find the matching container PID.
+	if tb != nil {
+		ppid := readPPID(flagCapturePID)
+		tb.SetPIDDiscoverer(func(hostPID uint32) (uint32, bool) {
+			return findContainerPIDForHost(hostPID, ppid)
+		})
+	}
 
 	<-ctx.Done()
 
@@ -361,7 +380,7 @@ func (e *timelineExporter) Close() error                  { return nil }
 // target PID and have rbscope.so loaded, then adds them to the I/O tracer's
 // target_pids map. This is needed because Pitchfork forks workers that
 // inherit the uprobe but the I/O tracepoints need explicit PID filtering.
-func attachSiblingPIDs(c *collector.Collector, targetPID uint32, logger *slog.Logger) {
+func attachSiblingPIDs(c *collector.Collector, targetPID uint32, logger *slog.Logger, tb *timeline.Builder) {
 	// Read target's PPID
 	ppid := readPPID(targetPID)
 	if ppid == 0 {
@@ -388,6 +407,13 @@ func attachSiblingPIDs(c *collector.Collector, targetPID uint32, logger *slog.Lo
 			} else {
 				logger.Info("attached sibling worker", "pid", pid)
 			}
+			// Register PID namespace mapping for frame resolution
+			if tb != nil {
+				hostPID, err := bpf.DiscoverHostPID(uint32(pid))
+				if err == nil && hostPID != uint32(pid) {
+					tb.SetHostToContainerPID(hostPID, uint32(pid))
+				}
+			}
 		}
 	}
 }
@@ -407,6 +433,32 @@ func readPPID(pid uint32) uint32 {
 		}
 	}
 	return 0
+}
+
+// findContainerPIDForHost scans /proc for a sibling process whose host PID
+// (discovered via BPF) matches the given hostPID. Returns the container PID.
+// This handles dynamically forked workers in PID namespace environments.
+func findContainerPIDForHost(hostPID, ppid uint32) (uint32, bool) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0, false
+	}
+	for _, e := range entries {
+		pid, err := strconv.ParseUint(e.Name(), 10, 32)
+		if err != nil {
+			continue
+		}
+		containerPID := uint32(pid)
+		// Only check siblings (same parent) to limit BPF calls
+		if ppid != 0 && readPPID(containerPID) != ppid {
+			continue
+		}
+		discovered, err := bpf.DiscoverHostPID(containerPID)
+		if err == nil && discovered == hostPID {
+			return containerPID, true
+		}
+	}
+	return 0, false
 }
 
 func hasRbscopeLoaded(pid uint32) bool {
