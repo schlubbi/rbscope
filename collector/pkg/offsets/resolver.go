@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 )
 
 // FrameInfo holds the resolved method name, file path, and line number
@@ -26,6 +27,8 @@ type FrameResolver struct {
 	cfuncMu    sync.RWMutex
 	cfuncCache map[cfuncKey]string
 	offsets    *RubyOffsets
+
+	resolveLogCount int32 // throttle diagnostic messages
 }
 
 type frameKey struct {
@@ -50,6 +53,15 @@ func NewFrameResolver(off *RubyOffsets) *FrameResolver {
 		classCache: make(map[classKey]string),
 		cfuncCache: make(map[cfuncKey]string),
 		offsets:    off,
+	}
+}
+
+// logResolveFailure logs diagnostic info for frame resolution failures,
+// throttled to the first 10 messages.
+func (r *FrameResolver) logResolveFailure(format string, args ...any) {
+	count := atomic.AddInt32(&r.resolveLogCount, 1)
+	if count <= 10 {
+		fmt.Fprintf(os.Stderr, "rbscope: resolve: "+format+"\n", args...)
 	}
 }
 
@@ -331,6 +343,7 @@ const (
 // For cfunc frames: reads called_id from the method entry → symbol table
 func (r *FrameResolver) ResolveProfileFrame(pid uint32, frameVal uint64, line int32) FrameInfo {
 	if frameVal == 0 || frameVal&0x7 != 0 || frameVal < 0x1000 {
+		r.logResolveFailure("bad value 0x%x", frameVal)
 		return FrameInfo{}
 	}
 
@@ -350,6 +363,7 @@ func (r *FrameResolver) ResolveProfileFrame(pid uint32, frameVal uint64, line in
 	memPath := fmt.Sprintf("/proc/%d/mem", pid)
 	f, err := os.Open(memPath) // #nosec G304
 	if err != nil {
+		r.logResolveFailure("open %s: %v", memPath, err)
 		return FrameInfo{}
 	}
 	defer func() { _ = f.Close() }()
@@ -357,11 +371,13 @@ func (r *FrameResolver) ResolveProfileFrame(pid uint32, frameVal uint64, line in
 	// Read RBasic flags to determine imemo subtype
 	var flags uint64
 	if err := readUint64(f, frameVal, &flags); err != nil {
+		r.logResolveFailure("read flags at 0x%x: %v", frameVal, err)
 		return FrameInfo{}
 	}
 
 	// Must be T_IMEMO
 	if flags&0x1f != tIMEMO {
+		r.logResolveFailure("not T_IMEMO: flags=0x%x type=0x%x at 0x%x", flags, flags&0x1f, frameVal)
 		return FrameInfo{}
 	}
 

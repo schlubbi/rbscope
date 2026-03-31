@@ -40,6 +40,8 @@ type Builder struct {
 	// hostToContainerPID maps host PIDs (from BPF events) back to container
 	// PIDs (visible in /proc) for PID-namespace environments.
 	hostToContainerPID map[uint32]uint32
+
+	allocResolveLogCount int // throttle diagnostic log messages
 }
 
 // NewBuilder creates a Builder for a new capture window.
@@ -95,7 +97,8 @@ func (b *Builder) Ingest(event any) {
 		var frameIDs []uint32
 
 		// Try format v3 (raw frame addresses) first, fall back to v2 (inline strings).
-		if rawFrames := collector.ParseRawFrameStack(ev.StackData); rawFrames != nil && b.frameResolver != nil {
+		rawFrames := collector.ParseRawFrameStack(ev.StackData)
+		if rawFrames != nil && b.frameResolver != nil {
 			// Format v3: resolve raw VALUE pointers via /proc/pid/mem.
 			// This is the low-overhead path — the gem sent raw rb_profile_frames
 			// VALUEs instead of resolved strings.
@@ -104,15 +107,25 @@ func (b *Builder) Ingest(event any) {
 				procPID = mapped
 			}
 			frameIDs = make([]uint32, 0, len(rawFrames))
-			for _, rf := range rawFrames {
+			for i, rf := range rawFrames {
 				info := b.frameResolver.ResolveProfileFrame(procPID, rf.Value, rf.Line)
 				if info.Label == "" {
+					if b.allocResolveLogCount < 5 {
+						b.allocResolveLogCount++
+						fmt.Fprintf(os.Stderr, "rbscope: alloc frame resolve failed: pid=%d frame[%d] value=0x%x line=%d (total frames=%d)\n",
+							procPID, i, rf.Value, rf.Line, len(rawFrames))
+					}
 					continue // skip unresolvable frames
 				}
 				path := shortenRubyPath(info.Path)
 				frameIDs = append(frameIDs, b.frames.Intern(info.Label, path, info.Line))
 			}
-		} else {
+		} else if rawFrames == nil && len(ev.StackData) > 0 {
+			if b.allocResolveLogCount < 3 {
+				b.allocResolveLogCount++
+				fmt.Fprintf(os.Stderr, "rbscope: alloc stack not v3: first byte=%d len=%d resolver=%v\n",
+					ev.StackData[0], len(ev.StackData), b.frameResolver != nil)
+			}
 			// Format v2 fallback: inline strings already resolved by the gem.
 			frames := collector.ParseInlineStack(ev.StackData)
 			frameIDs = make([]uint32, 0, len(frames))
@@ -556,8 +569,20 @@ func shouldFilterNativeFrame(funcName, libPath string, isRubyVM bool) bool {
 	if strings.HasPrefix(funcName, "0x") {
 		return true
 	}
-	// rbscope's own USDT probe functions
+	// Library+offset unresolved frames — partially resolved (library name known
+	// but symbol unknown). Appear as "libname+0xNNNN" or "/path/to/lib.so+0xNNNN".
+	if strings.Contains(funcName, "+0x") {
+		return true
+	}
+	// rbscope's own USDT probe functions and Rust internals
 	if strings.HasPrefix(funcName, "__rbscope_probe_") {
+		return true
+	}
+	if strings.Contains(libPath, "rbscope.so") {
+		return true
+	}
+	// uprobe trampolines — BPF infrastructure, not application code
+	if strings.HasPrefix(funcName, "[uprobes]") || strings.Contains(libPath, "[uprobes]") {
 		return true
 	}
 	// JIT-compiled Ruby code — anonymous memory regions from the JIT compiler.
@@ -569,6 +594,13 @@ func shouldFilterNativeFrame(funcName, libPath string, isRubyVM bool) bool {
 	}
 	// Process startup frames (ld-linux, _start) — noise at bottom of stack
 	if funcName == "_start" || strings.HasPrefix(funcName, "_dl_") {
+		return true
+	}
+	// C runtime and allocator internals below the Ruby entry point
+	if funcName == "free" || funcName == "malloc" || funcName == "calloc" || funcName == "realloc" {
+		return true
+	}
+	if funcName == "clock_gettime" || funcName == "__clock_gettime" {
 		return true
 	}
 	return false
