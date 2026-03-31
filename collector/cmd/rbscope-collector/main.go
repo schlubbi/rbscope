@@ -325,6 +325,7 @@ func runCapture(_ *cobra.Command, _ []string) error {
 		}
 
 		capture := tb.Build()
+		tb.CloseFrameResolver() // release cached /proc/pid/mem fds
 		switch flagCaptureFormat {
 		case "gecko":
 			if err := gecko.Export(capture, flagCaptureOutput); err != nil {

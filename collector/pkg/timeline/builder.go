@@ -42,6 +42,7 @@ type Builder struct {
 	hostToContainerPID map[uint32]uint32
 
 	allocResolveLogCount int // throttle diagnostic log messages
+	seenPIDs             map[uint32]struct{} // PIDs we've eagerly opened mem for
 }
 
 // NewBuilder creates a Builder for a new capture window.
@@ -59,6 +60,7 @@ func NewBuilder(service, hostname string, pid, frequencyHz uint32) *Builder {
 		hostname:        hostname,
 		frequency:       frequencyHz,
 		idleClassifier:  NewIdleClassifier(),
+		seenPIDs:        make(map[uint32]struct{}),
 	}
 }
 
@@ -72,6 +74,13 @@ func (b *Builder) SetResolver(r *symbols.Resolver) {
 // SetFrameResolver sets the BPF stack walker frame resolver for iseq → method/path resolution.
 func (b *Builder) SetFrameResolver(r *offsets.FrameResolver) {
 	b.frameResolver = r
+}
+
+// CloseFrameResolver releases cached /proc/pid/mem file handles.
+func (b *Builder) CloseFrameResolver() {
+	if b.frameResolver != nil {
+		b.frameResolver.Close()
+	}
 }
 
 // SetHostToContainerPID registers a host→container PID mapping so the
@@ -93,6 +102,13 @@ func (b *Builder) Ingest(event any) {
 	case *collector.RubyAllocEvent:
 		b.ensureThreadName(ev.TID, ev.PID)
 		tb := b.thread(ev.TID)
+
+		// Eagerly open /proc/pid/mem on first sight of a new PID.
+		// The cached fd keeps the address space alive even after worker death.
+		if _, seen := b.seenPIDs[ev.PID]; !seen && b.frameResolver != nil {
+			b.seenPIDs[ev.PID] = struct{}{}
+			b.frameResolver.EagerOpenMem(ev.PID)
+		}
 
 		var frameIDs []uint32
 
@@ -144,6 +160,10 @@ func (b *Builder) Ingest(event any) {
 
 	case *collector.RubySampleEvent:
 		b.ensureThreadName(ev.TID, ev.PID)
+		if _, seen := b.seenPIDs[ev.PID]; !seen && b.frameResolver != nil {
+			b.seenPIDs[ev.PID] = struct{}{}
+			b.frameResolver.EagerOpenMem(ev.PID)
+		}
 		tb := b.thread(ev.TID)
 		frames := collector.ParseInlineStack(ev.StackData)
 		frameIDs := make([]uint32, 0, len(frames)+len(ev.NativeStackIPs))
@@ -246,6 +266,11 @@ func (b *Builder) Ingest(event any) {
 		b.suspendedStacks[ev.TID] = append(b.suspendedStacks[ev.TID], ev)
 
 	case *collector.StackWalkEvent:
+		b.ensureThreadName(ev.TID, ev.PID)
+		if _, seen := b.seenPIDs[ev.PID]; !seen && b.frameResolver != nil {
+			b.seenPIDs[ev.PID] = struct{}{}
+			b.frameResolver.EagerOpenMem(ev.PID)
+		}
 		// BPF stack walker event — resolve iseq addresses to method/path/line.
 		if b.frameResolver == nil {
 			break

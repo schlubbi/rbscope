@@ -28,6 +28,13 @@ type FrameResolver struct {
 	cfuncCache map[cfuncKey]string
 	offsets    *RubyOffsets
 
+	// memFiles caches open /proc/pid/mem file handles.
+	// Keeping fds open prevents the kernel from releasing the process's
+	// mm_struct — even after the process exits, the address space remains
+	// readable. This is critical for Pitchfork workers that die mid-capture.
+	memMu    sync.Mutex
+	memFiles map[uint32]*os.File // pid → open /proc/pid/mem fd
+
 	resolveLogCount int32 // throttle diagnostic messages
 }
 
@@ -52,8 +59,45 @@ func NewFrameResolver(off *RubyOffsets) *FrameResolver {
 		cache:      make(map[frameKey]FrameInfo),
 		classCache: make(map[classKey]string),
 		cfuncCache: make(map[cfuncKey]string),
+		memFiles:   make(map[uint32]*os.File),
 		offsets:    off,
 	}
+}
+
+// Close releases all cached /proc/pid/mem file handles.
+func (r *FrameResolver) Close() {
+	r.memMu.Lock()
+	defer r.memMu.Unlock()
+	for pid, f := range r.memFiles {
+		_ = f.Close()
+		delete(r.memFiles, pid)
+	}
+}
+
+// openMem returns a cached /proc/pid/mem file handle, opening it on first access.
+// The cached fd keeps the mm_struct alive even after the process exits.
+func (r *FrameResolver) openMem(pid uint32) (*os.File, error) {
+	r.memMu.Lock()
+	defer r.memMu.Unlock()
+
+	if f, ok := r.memFiles[pid]; ok {
+		return f, nil
+	}
+
+	memPath := fmt.Sprintf("/proc/%d/mem", pid)
+	f, err := os.Open(memPath) // #nosec G304
+	if err != nil {
+		return nil, err
+	}
+	r.memFiles[pid] = f
+	return f, nil
+}
+
+// EagerOpenMem opens /proc/pid/mem proactively for a PID we expect to see
+// events from. Call this when discovering new worker PIDs to ensure the fd
+// is cached before the worker might die.
+func (r *FrameResolver) EagerOpenMem(pid uint32) {
+	_, _ = r.openMem(pid)
 }
 
 // logResolveFailure logs diagnostic info for frame resolution failures,
@@ -94,12 +138,11 @@ func (r *FrameResolver) Resolve(pid uint32, iseqAddr uint64) (FrameInfo, error) 
 // Chain: iseq → body → location → {label, pathobj}
 // Each VALUE string is either embedded or heap-allocated.
 func (r *FrameResolver) resolveFromMem(pid uint32, iseqAddr uint64) (FrameInfo, error) {
-	memPath := fmt.Sprintf("/proc/%d/mem", pid)
-	f, err := os.Open(memPath) // #nosec G304
+	f, err := r.openMem(pid)
 	if err != nil {
-		return FrameInfo{}, fmt.Errorf("open %s: %w", memPath, err)
+		return FrameInfo{}, fmt.Errorf("open /proc/%d/mem: %w", pid, err)
 	}
-	defer func() { _ = f.Close() }()
+	// Do NOT close f — it's cached in memFiles
 
 	off := r.offsets
 	info := FrameInfo{}
@@ -282,12 +325,10 @@ func (r *FrameResolver) ResolveClassName(pid uint32, selfVal uint64) string {
 	}
 
 	// Read klass from self (RBasic.klass at offset 8)
-	memPath := fmt.Sprintf("/proc/%d/mem", pid)
-	f, err := os.Open(memPath) // #nosec G304
+	f, err := r.openMem(pid)
 	if err != nil {
 		return ""
 	}
-	defer func() { _ = f.Close() }()
 
 	var klassVal uint64
 	if err := readUint64(f, selfVal+8, &klassVal); err != nil {
@@ -360,13 +401,13 @@ func (r *FrameResolver) ResolveProfileFrame(pid uint32, frameVal uint64, line in
 	}
 	r.mu.RUnlock()
 
-	memPath := fmt.Sprintf("/proc/%d/mem", pid)
-	f, err := os.Open(memPath) // #nosec G304
+	f, err := r.openMem(pid)
 	if err != nil {
-		r.logResolveFailure("open %s: %v", memPath, err)
+		r.logResolveFailure("open /proc/%d/mem: %v", pid, err)
 		return FrameInfo{}
 	}
-	defer func() { _ = f.Close() }()
+	// Do NOT close f — it's cached in memFiles
+	// Do NOT close f — it's cached in memFiles
 
 	// Read RBasic flags to determine imemo subtype
 	var flags uint64
@@ -469,12 +510,10 @@ func (r *FrameResolver) ResolveCfuncName(pid uint32, ep uint64) string {
 	}
 	r.cfuncMu.RUnlock()
 
-	memPath := fmt.Sprintf("/proc/%d/mem", pid)
-	f, err := os.Open(memPath) // #nosec G304
+	f, err := r.openMem(pid)
 	if err != nil {
 		return ""
 	}
-	defer func() { _ = f.Close() }()
 
 	// Read ep[-2] → method entry (or cref)
 	var meVal uint64
@@ -528,12 +567,10 @@ func (r *FrameResolver) resolveID(pid uint32, id uint64) string {
 		return ""
 	}
 
-	memPath := fmt.Sprintf("/proc/%d/mem", pid)
-	f, err := os.Open(memPath) // #nosec G304
+	f, err := r.openMem(pid)
 	if err != nil {
 		return ""
 	}
-	defer func() { _ = f.Close() }()
 
 	serial := id >> 3
 	pageIdx := serial / idEntryUnit
