@@ -32,6 +32,14 @@ type RealBPF struct {
 	objPath        string
 	objs           bpfObjects
 	reader         *ringbuf.Reader
+
+	// SkipCPUSampler disables the ruby_sample uprobe attachment.
+	// Set to true in combined mode where StackWalkerBPF handles CPU sampling.
+	SkipCPUSampler bool
+
+	// SkipIOSched disables I/O and sched tracer loading.
+	// Set to true in combined mode where StackWalkerBPF handles these.
+	SkipIOSched bool
 	links          []link.Link
 	ioObjs         *iotracerObjects
 	ioReader       *ringbuf.Reader
@@ -85,10 +93,12 @@ func (r *RealBPF) Load() error {
 	}
 	r.reader = rd
 
-	// Load io_tracer for enriched I/O events with FD resolution
-	if err := r.loadIOTracer(); err != nil {
-		// IO tracing is optional — log but don't fail
-		fmt.Fprintf(os.Stderr, "rbscope: io_tracer load skipped: %v\n", err)
+	// Load io_tracer for enriched I/O events with FD resolution.
+	// In combined mode (SkipIOSched=true), the stack walker handles these.
+	if !r.SkipIOSched {
+		if err := r.loadIOTracer(); err != nil {
+			fmt.Fprintf(os.Stderr, "rbscope: io_tracer load skipped: %v\n", err)
+		}
 	}
 
 	// Load gvl_tracer for GVL state change events
@@ -97,10 +107,12 @@ func (r *RealBPF) Load() error {
 		fmt.Fprintf(os.Stderr, "rbscope: gvl_tracer load skipped: %v\n", err)
 	}
 
-	// Load sched_tracer for off-CPU tracking and idle detection
-	if err := r.loadSchedTracer(); err != nil {
-		// Sched tracing is optional — log but don't fail
-		fmt.Fprintf(os.Stderr, "rbscope: sched_tracer load skipped: %v\n", err)
+	// Load sched_tracer for off-CPU tracking and idle detection.
+	// In combined mode, the stack walker handles this.
+	if !r.SkipIOSched {
+		if err := r.loadSchedTracer(); err != nil {
+			fmt.Fprintf(os.Stderr, "rbscope: sched_tracer load skipped: %v\n", err)
+		}
 	}
 
 	// Record the wall clock ↔ ktime offset for timestamp conversion.
@@ -256,11 +268,15 @@ func (r *RealBPF) AttachPID(pid uint32) error {
 
 	// Attach uprobe to __rbscope_probe_ruby_sample — the USDT probe site
 	// fired by the gem's postponed job callback with serialized stack data.
-	l, err := ex.Uprobe("__rbscope_probe_ruby_sample", r.objs.HandleRubySample, &link.UprobeOptions{PID: int(pid)})
-	if err != nil {
-		return fmt.Errorf("attach uprobe pid %d: %w", pid, err)
+	// In combined mode (SkipCPUSampler=true), BPF stack walker handles CPU
+	// sampling — skip this to avoid redundant overhead.
+	if !r.SkipCPUSampler {
+		l, err := ex.Uprobe("__rbscope_probe_ruby_sample", r.objs.HandleRubySample, &link.UprobeOptions{PID: int(pid)})
+		if err != nil {
+			return fmt.Errorf("attach uprobe pid %d: %w", pid, err)
+		}
+		r.links = append(r.links, l)
 	}
-	r.links = append(r.links, l)
 
 	// Attach allocation tracking uprobe (optional — only fires if gem enables allocation tracking)
 	if r.objs.HandleRubyAlloc != nil {

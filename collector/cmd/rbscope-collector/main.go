@@ -257,6 +257,7 @@ func runCapture(_ *cobra.Command, _ []string) error {
 				}
 			}
 		}
+
 	case "bpf":
 		rubyPath := flagCaptureRubyPath
 		if rubyPath == "" {
@@ -278,8 +279,30 @@ func runCapture(_ *cobra.Command, _ []string) error {
 		if tb != nil {
 			tb.SetFrameResolver(offsets.NewFrameResolver(sw.Offsets()))
 		}
+
+	case "combined":
+		rubyPath := flagCaptureRubyPath
+		if rubyPath == "" {
+			info, err := offsets.FindLibruby(flagCapturePID)
+			if err != nil {
+				return fmt.Errorf("auto-discover libruby for pid %d: %w (use --ruby-path)", flagCapturePID, err)
+			}
+			rubyPath = info.HostPath
+			logger.Info("auto-discovered libruby", "path", rubyPath)
+		}
+		combined, err := bpf.NewCombinedBPF(flagCaptureBPFObj, rubyPath, 99)
+		if err != nil {
+			return fmt.Errorf("create combined BPF: %w", err)
+		}
+		bpfProg = combined
+		sw = combined.Walker()
+		if tb != nil {
+			tb.SetFrameResolver(offsets.NewFrameResolver(sw.Offsets()))
+		}
+		logger.Info("combined mode: BPF CPU sampling + gem alloc/GVL tracking")
+
 	default:
-		return fmt.Errorf("unknown mode: %q (use gem or bpf)", flagCaptureMode)
+		return fmt.Errorf("unknown mode: %q (use gem, bpf, or combined)", flagCaptureMode)
 	}
 
 	c := collector.New(cfg, bpfProg)
@@ -306,7 +329,10 @@ func runCapture(_ *cobra.Command, _ []string) error {
 			tb.SetHostToContainerPID(hostPID, flagCapturePID)
 			logger.Info("PID namespace detected (gem mode)", "container", flagCapturePID, "host", hostPID)
 		}
-		// Set up lazy PID discoverer for dynamically forked workers
+	}
+	// Set up lazy PID discoverer for dynamically forked workers.
+	// Needed in both gem and combined modes (any mode with alloc tracking).
+	if tb != nil {
 		ppid := readPPID(flagCapturePID)
 		tb.SetPIDDiscoverer(func(hostPID uint32) (uint32, bool) {
 			return findContainerPIDForHost(hostPID, ppid)
