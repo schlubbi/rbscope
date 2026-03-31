@@ -292,24 +292,35 @@ func runCapture(_ *cobra.Command, _ []string) error {
 	}
 	defer func() { _ = c.Stop() }()
 
-	if err := c.AttachPID(flagCapturePID); err != nil {
-		return err
-	}
-
-	// Register PID namespace mappings so the frame resolver reads
-	// /proc/<containerPID>/mem instead of the host PID from BPF events.
+	// Register PID namespace mappings BEFORE attaching (events flow immediately
+	// after AttachPID, so mappings must be ready first).
 	if tb != nil && sw != nil {
-		// BPF mode: stack walker already discovered mappings.
-		for containerPID, hostPID := range sw.PIDMapping() {
-			tb.SetHostToContainerPID(hostPID, containerPID)
-		}
+		// BPF mode: stack walker discovers mappings during its own AttachPID.
+		// We register them after AttachPID below.
 	}
 	if tb != nil && sw == nil {
-		// Gem mode: discover host PID for the target process.
+		// Gem mode: discover host PID for the target process and all siblings
+		// before events start flowing.
 		hostPID, err := bpf.DiscoverHostPID(flagCapturePID)
 		if err == nil && hostPID != flagCapturePID {
 			tb.SetHostToContainerPID(hostPID, flagCapturePID)
 			logger.Info("PID namespace detected (gem mode)", "container", flagCapturePID, "host", hostPID)
+		}
+		// Set up lazy PID discoverer for dynamically forked workers
+		ppid := readPPID(flagCapturePID)
+		tb.SetPIDDiscoverer(func(hostPID uint32) (uint32, bool) {
+			return findContainerPIDForHost(hostPID, ppid)
+		})
+	}
+
+	if err := c.AttachPID(flagCapturePID); err != nil {
+		return err
+	}
+
+	// BPF mode: register mappings after stack walker's AttachPID discovers them.
+	if tb != nil && sw != nil {
+		for containerPID, hostPID := range sw.PIDMapping() {
+			tb.SetHostToContainerPID(hostPID, containerPID)
 		}
 	}
 
@@ -317,16 +328,6 @@ func runCapture(_ *cobra.Command, _ []string) error {
 	// Pitchfork forks worker processes that inherit the uprobe but have
 	// different PIDs. The I/O tracepoints need all PIDs in the filter.
 	attachSiblingPIDs(c, flagCapturePID, logger, tb)
-
-	// Set up PID discoverer for dynamically forked workers.
-	// When the builder sees a host PID that doesn't exist in /proc,
-	// it scans siblings to find the matching container PID.
-	if tb != nil {
-		ppid := readPPID(flagCapturePID)
-		tb.SetPIDDiscoverer(func(hostPID uint32) (uint32, bool) {
-			return findContainerPIDForHost(hostPID, ppid)
-		})
-	}
 
 	<-ctx.Done()
 
