@@ -299,6 +299,7 @@ func (b *Builder) Ingest(event any) {
 		tb.gvlEvents = append(tb.gvlEvents, gvlEvent)
 
 	case *collector.GVLStateChangeEvent:
+		b.ensureThreadName(ev.TID, ev.PID)
 		tb := b.thread(ev.TID)
 		tb.gvlStateChanges = append(tb.gvlStateChanges, &pb.GVLStateChange{
 			TimestampNs: ev.TimestampNs,
@@ -306,6 +307,7 @@ func (b *Builder) Ingest(event any) {
 		})
 
 	case *collector.GVLStackEvent:
+		b.ensureThreadName(ev.TID, ev.PID)
 		// Store all Ruby stacks captured at GVL SUSPENDED for this TID.
 		// They're correlated with I/O events by timestamp during Build().
 		b.suspendedStacks[ev.TID] = append(b.suspendedStacks[ev.TID], ev)

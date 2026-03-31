@@ -62,10 +62,13 @@ struct gvl_state_event {
     u64 thread_value;
 };
 
-// Ring buffer for state change events (4MB)
+// Ring buffer for state change events (16MB).
+// github/github workers generate thousands of GVL transitions per second
+// (every I/O syscall triggers SUSPENDED→STALLED→RUNNING). The ring buffer
+// must be large enough to absorb bursts while the collector drains events.
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 1 << 22);
+    __uint(max_entries, 1 << 24);
 } gvl_events SEC(".maps");
 
 // Separate ring buffer for GVL stack events (8MB).

@@ -27,6 +27,7 @@ type CombinedBPF struct {
 	walker  *StackWalkerBPF
 	toggle  int
 	readers []*ringbuf.Reader // all readers to poll
+	pending [][]byte          // batch-drained events waiting for delivery
 }
 
 // NewCombinedBPF creates a combined profiler.
@@ -124,9 +125,19 @@ func (c *CombinedBPF) ReadRingBuffer(buf []byte) (int, error) {
 		return 0, nil
 	}
 
-	// Round-robin across all readers. First pass with short deadline
-	// to find any ready data. Second pass with slightly longer wait
-	// if nothing found.
+	// Drain pending events from the backlog first (batch-drained from
+	// high-volume readers to prevent ring buffer overflow).
+	if len(c.pending) > 0 {
+		n := copy(buf, c.pending[0])
+		c.pending = c.pending[1:]
+		return n, nil
+	}
+
+	// Round-robin across all readers. When a reader has data, batch-drain
+	// up to maxBatch events to prevent high-volume ring buffers (GVL, alloc)
+	// from overflowing while the event loop processes expensive operations
+	// like frame resolution.
+	const maxBatch = 64
 	start := c.toggle
 	for attempt := 0; attempt < 2; attempt++ {
 		deadline := 1 * time.Millisecond
@@ -141,6 +152,19 @@ func (c *CombinedBPF) ReadRingBuffer(buf []byte) (int, error) {
 			if err == nil {
 				c.toggle = (idx + 1) % len(c.readers)
 				n := copy(buf, record.RawSample)
+
+				// Batch-drain: pull more events from this reader while available.
+				for j := 0; j < maxBatch; j++ {
+					rd.SetDeadline(time.Now().Add(100 * time.Microsecond))
+					extra, err := rd.Read()
+					if err != nil {
+						break
+					}
+					dup := make([]byte, len(extra.RawSample))
+					copy(dup, extra.RawSample)
+					c.pending = append(c.pending, dup)
+				}
+
 				return n, nil
 			}
 		}

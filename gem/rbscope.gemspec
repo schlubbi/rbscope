@@ -22,7 +22,7 @@ Gem::Specification.new do |spec|
   spec.metadata["source_code_uri"] = spec.homepage
 
   spec.files = Dir[
-    "lib/**/*.rb",
+    "lib/**/*.{rb,so}",
     "ext/**/*.{rs,toml,rb,lock}",
     "LICENSE.txt",
     "README.md"
