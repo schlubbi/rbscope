@@ -11,34 +11,25 @@ import (
 )
 
 // CombinedBPF runs both the gem's USDT probe reader (RealBPF) and the BPF
-// stack walker (StackWalkerBPF) simultaneously. This produces a unified
-// profile with:
-//
-//   - CPU samples from BPF perf_event stack walking (99 Hz)
-//   - Allocation tracking from gem USDT probes (sampled)
-//   - GVL state markers from gem USDT probes
-//   - I/O markers from kernel tracepoints
-//   - Scheduler state from sched tracepoints
+// stack walker (StackWalkerBPF) simultaneously.
 //
 // Architecture: each kernel ring buffer gets a dedicated drain goroutine
-// that reads as fast as the kernel provides data and pushes raw events
-// into a shared Go channel. This decouples ring buffer draining from
-// event processing (frame resolution, symbol lookup, etc.) — the
-// collector can spend milliseconds resolving a stack walk frame without
-// starving high-volume readers like GVL.
+// that pushes into a per-reader Go channel. The consumer (ReadRingBuffer)
+// uses fair round-robin across channels so no single high-volume source
+// (like GVL) can starve others (like CPU samples).
 //
-// Backpressure: the Go channel (64K deep) absorbs bursts. Drain goroutines
-// only block when the channel is full AND the kernel ring buffer is full,
-// requiring tens of seconds of sustained backlog.
+// With BPF-side hysteresis (100µs minimum state duration), GVL event
+// volume is manageable (~500/sec). The per-reader channels + async drain
+// goroutines decouple kernel ring buffer draining from event processing
+// (frame resolution takes milliseconds per stack walk event).
 type CombinedBPF struct {
 	gem    *RealBPF
 	walker *StackWalkerBPF
 
-	readers []*ringbuf.Reader
-
-	eventCh chan []byte     // drained events for the collector
-	stopCh  chan struct{}   // signals drain goroutines to exit
-	wg      sync.WaitGroup // tracks drain goroutines
+	chans  []chan []byte   // per-reader channels
+	stopCh chan struct{}   // signals drain goroutines to exit
+	wg     sync.WaitGroup // tracks drain goroutines
+	toggle int             // round-robin state
 
 	readTimer *time.Timer // reused by ReadRingBuffer to avoid alloc per call
 }
@@ -78,45 +69,47 @@ func (c *CombinedBPF) Load() error {
 		return fmt.Errorf("walker load: %w", err)
 	}
 
-	// Collect all non-nil readers.
-	c.readers = nil
-	if c.walker.reader != nil {
-		c.readers = append(c.readers, c.walker.reader)
-	}
-	if c.gem.reader != nil {
-		c.readers = append(c.readers, c.gem.reader)
-	}
-	if c.gem.gvlReader != nil {
-		c.readers = append(c.readers, c.gem.gvlReader)
-	}
-	if c.gem.gvlStackReader != nil {
-		c.readers = append(c.readers, c.gem.gvlStackReader)
-	}
-	if c.walker.ioReader != nil {
-		c.readers = append(c.readers, c.walker.ioReader)
-	}
-	if c.walker.schedReader != nil {
-		c.readers = append(c.readers, c.walker.schedReader)
-	}
-
-	// 64K-deep channel. At ~5000 GVL events/sec + ~100 CPU + ~500 I/O,
-	// this holds ~10 seconds of events before drain goroutines block.
-	c.eventCh = make(chan []byte, 1<<16)
 	c.stopCh = make(chan struct{})
 
-	// One drain goroutine per reader. Each reads from its kernel ring buffer
-	// as fast as epoll delivers events and pushes into the shared channel.
-	for _, rd := range c.readers {
+	// Each reader gets a dedicated channel and drain goroutine.
+	type readerEntry struct {
+		rd   *ringbuf.Reader
+		size int
+	}
+	var entries []readerEntry
+
+	if c.walker.reader != nil {
+		entries = append(entries, readerEntry{c.walker.reader, 4096})
+	}
+	if c.gem.reader != nil {
+		entries = append(entries, readerEntry{c.gem.reader, 8192})
+	}
+	if c.walker.ioReader != nil {
+		entries = append(entries, readerEntry{c.walker.ioReader, 4096})
+	}
+	if c.walker.schedReader != nil {
+		entries = append(entries, readerEntry{c.walker.schedReader, 2048})
+	}
+	if c.gem.gvlReader != nil {
+		entries = append(entries, readerEntry{c.gem.gvlReader, 1 << 18}) // 256K
+	}
+	if c.gem.gvlStackReader != nil {
+		entries = append(entries, readerEntry{c.gem.gvlStackReader, 8192})
+	}
+
+	c.chans = make([]chan []byte, len(entries))
+	for i, e := range entries {
+		c.chans[i] = make(chan []byte, e.size)
 		c.wg.Add(1)
-		go c.drainReader(rd)
+		go c.drainReader(e.rd, c.chans[i])
 	}
 
 	return nil
 }
 
 // drainReader continuously reads from a single kernel ring buffer and pushes
-// raw event copies into the shared channel.
-func (c *CombinedBPF) drainReader(rd *ringbuf.Reader) {
+// raw event copies into its dedicated channel.
+func (c *CombinedBPF) drainReader(rd *ringbuf.Reader, ch chan []byte) {
 	defer c.wg.Done()
 
 	for {
@@ -132,12 +125,11 @@ func (c *CombinedBPF) drainReader(rd *ringbuf.Reader) {
 			continue
 		}
 
-		// Copy — the reader reuses its internal buffer on next Read().
 		data := make([]byte, len(record.RawSample))
 		copy(data, record.RawSample)
 
 		select {
-		case c.eventCh <- data:
+		case ch <- data:
 		case <-c.stopCh:
 			return
 		}
@@ -159,18 +151,27 @@ func (c *CombinedBPF) DetachPID(pid uint32) error {
 	return c.walker.DetachPID(pid)
 }
 
-// ReadRingBuffer returns the next event from the channel, or 0 if none
-// are available within 10ms. Uses a reusable timer to avoid per-call
-// allocations under high throughput.
+// ReadRingBuffer returns the next event using fair round-robin across
+// per-reader channels. With BPF-side hysteresis filtering, GVL event
+// volume is ~500/sec (down from ~5000/sec), making simple round-robin
+// sufficient for balanced consumption.
 func (c *CombinedBPF) ReadRingBuffer(buf []byte) (int, error) {
-	// Fast path: non-blocking check first.
-	select {
-	case data := <-c.eventCh:
-		return copy(buf, data), nil
-	default:
+	if len(c.chans) == 0 {
+		return 0, nil
 	}
 
-	// Slow path: wait up to 10ms.
+	// Fast path: round-robin non-blocking check.
+	for i := 0; i < len(c.chans); i++ {
+		idx := (c.toggle + i) % len(c.chans)
+		select {
+		case data := <-c.chans[idx]:
+			c.toggle = (idx + 1) % len(c.chans)
+			return copy(buf, data), nil
+		default:
+		}
+	}
+
+	// Slow path: wait up to 10ms for any channel.
 	t := c.readTimer
 	if t == nil {
 		t = time.NewTimer(10 * time.Millisecond)
@@ -178,14 +179,28 @@ func (c *CombinedBPF) ReadRingBuffer(buf []byte) (int, error) {
 	} else {
 		t.Reset(10 * time.Millisecond)
 	}
-	select {
-	case data := <-c.eventCh:
-		if !t.Stop() {
-			<-t.C
+	for {
+		for i := 0; i < len(c.chans); i++ {
+			idx := (c.toggle + i) % len(c.chans)
+			select {
+			case data := <-c.chans[idx]:
+				if !t.Stop() {
+					select {
+					case <-t.C:
+					default:
+					}
+				}
+				c.toggle = (idx + 1) % len(c.chans)
+				return copy(buf, data), nil
+			default:
+			}
 		}
-		return copy(buf, data), nil
-	case <-t.C:
-		return 0, nil
+		select {
+		case <-t.C:
+			return 0, nil
+		default:
+			time.Sleep(100 * time.Microsecond)
+		}
 	}
 }
 
@@ -197,9 +212,10 @@ func (c *CombinedBPF) Close() error {
 	close(c.stopCh)
 	c.wg.Wait()
 
-	// Drain remaining channel events.
-	close(c.eventCh)
-	for range c.eventCh {
+	for _, ch := range c.chans {
+		close(ch)
+		for range ch {
+		}
 	}
 
 	_ = c.gem.Close()

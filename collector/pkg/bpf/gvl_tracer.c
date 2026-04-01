@@ -29,10 +29,12 @@
 #define GVL_STATE_STALLED   2
 #define GVL_STATE_SUSPENDED 3
 
-// Minimum state duration for hysteresis (10µs).
-// STALLED→RUNNING transitions shorter than this are suppressed to avoid
-// flooding the ring buffer with uncontended GVL acquisitions.
-#define MIN_STATE_DURATION_NS 10000
+// Minimum state duration for hysteresis (100µs).
+// github/github generates thousands of GVL transitions per second — every
+// I/O syscall triggers SUSPENDED→STALLED→RUNNING. Most of these sub-100µs
+// transitions are invisible at any practical zoom level in the profiler.
+// Filtering them in BPF reduces ring buffer volume by ~10x.
+#define MIN_STATE_DURATION_NS 100000
 
 // Per-thread last state tracking for hysteresis
 struct gvl_thread_key {
@@ -140,41 +142,27 @@ int handle_gvl_event(struct pt_regs *ctx) {
 
     struct gvl_thread_key key = { .pid = pid, .tid = tid };
 
-    // Hysteresis: suppress STALLED→RUNNING transitions < 10µs.
-    // These are uncontended GVL acquisitions that produce thousands of
-    // zero-width barber-pole slivers nobody can see.
+    // Hysteresis: suppress ANY state transition where the previous state
+    // lasted less than MIN_STATE_DURATION_NS. This dramatically reduces
+    // event volume for high-throughput Ruby apps where thousands of brief
+    // GVL transitions happen per second.
     struct gvl_last_state *last = bpf_map_lookup_elem(&gvl_thread_state, &key);
     if (last) {
-        if (new_state == GVL_STATE_RUNNING && last->state == GVL_STATE_STALLED) {
-            u64 stalled_duration = 0;
-            if (timestamp_ns > last->timestamp_ns)
-                stalled_duration = timestamp_ns - last->timestamp_ns;
+        // Skip duplicate consecutive states
+        if (new_state == last->state)
+            return 0;
 
-            if (stalled_duration < MIN_STATE_DURATION_NS) {
-                // Too short — suppress the STALLED that was already emitted
-                // by not emitting this RUNNING either. Update state to
-                // whatever was before STALLED (we don't track that, so just
-                // skip both and let the Go state machine handle the gap).
-                //
-                // Actually: we can't un-emit the STALLED. Instead, just
-                // don't emit this RUNNING, and update last_state to STALLED
-                // still. The Go state machine will see STALLED with no
-                // following RUNNING and treat the next real event as the
-                // interval boundary.
-                //
-                // Better approach: don't emit STALLED immediately. Buffer it
-                // and only emit on the next event if duration >= threshold.
-                // But BPF can't do deferred emission easily.
-                //
-                // Simplest correct approach: emit RUNNING without the
-                // intermediate STALLED. Delete the STALLED state and set
-                // directly to RUNNING from whatever was before.
-                last->state = GVL_STATE_RUNNING;
-                last->timestamp_ns = timestamp_ns;
-                // Don't emit — the short STALLED was already emitted but
-                // Go-side can merge adjacent RUNNING intervals.
-                return 0;
-            }
+        u64 prev_duration = 0;
+        if (timestamp_ns > last->timestamp_ns)
+            prev_duration = timestamp_ns - last->timestamp_ns;
+
+        if (prev_duration < MIN_STATE_DURATION_NS) {
+            // Previous state was too brief to be meaningful. Don't emit
+            // the transition; just update the timestamp so the NEXT state
+            // change can measure from the right baseline.
+            last->state = new_state;
+            last->timestamp_ns = timestamp_ns;
+            return 0;
         }
     }
 

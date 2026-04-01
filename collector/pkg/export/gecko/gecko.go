@@ -919,6 +919,8 @@ func threadStateLabel(s pb.ThreadState) string {
 // --- Default categories and marker schemas ---
 
 func defaultCategories() []Category {
+	// Color names must match Firefox Profiler's palette:
+	// transparent, blue, green, grey, lightblue, magenta, orange, purple, red, yellow
 	return []Category{
 		{Name: "Other", Color: "grey", Subcategories: []string{"Other"}},
 		{Name: "App", Color: "green", Subcategories: []string{"Controller", "Model", "Job", "Mailer", "View"}},
@@ -929,10 +931,10 @@ func defaultCategories() []Category {
 		{Name: "Native", Color: "blue", Subcategories: []string{"C Extension", "System Library"}},
 		{Name: "I/O", Color: "orange", Subcategories: []string{"Network", "File"}},
 		{Name: "GVL", Color: "magenta", Subcategories: []string{"Wait"}},
-		{Name: "GC", Color: "brown", Subcategories: []string{"GC"}},
-		{Name: "OTel", Color: "lightgreen", Subcategories: []string{"Span"}},
+		{Name: "GC", Color: "red", Subcategories: []string{"GC"}},
+		{Name: "OTel", Color: "lightblue", Subcategories: []string{"Span"}},
 		{Name: "Idle", Color: "grey", Subcategories: []string{"Idle"}},
-		{Name: "Alloc", Color: "darkgreen", Subcategories: []string{"Allocation"}},
+		{Name: "Alloc", Color: "green", Subcategories: []string{"Allocation"}},
 	}
 }
 

@@ -313,7 +313,6 @@ func runCapture(_ *cobra.Command, _ []string) error {
 	if err := c.Start(ctx); err != nil {
 		return err
 	}
-	defer func() { _ = c.Stop() }()
 
 	// Register PID namespace mappings BEFORE attaching (events flow immediately
 	// after AttachPID, so mappings must be ready first).
@@ -356,6 +355,12 @@ func runCapture(_ *cobra.Command, _ []string) error {
 	attachSiblingPIDs(c, flagCapturePID, logger, tb)
 
 	<-ctx.Done()
+
+	// Stop the collector event loop before accessing the builder.
+	// The event loop goroutine ingests into the builder's maps — we must
+	// ensure it has exited before reading those maps to avoid concurrent
+	// map read/write panics.
+	_ = c.Stop()
 
 	// For timeline-based formats, build the capture and export.
 	if tb != nil {
