@@ -362,7 +362,11 @@ func (tb *threadBuilder) internFrame(rbFrameIdx uint32) int {
 	// line number means each callsite gets its own Call Tree node.
 	label := funcName
 	if fileName != "" {
-		label = fmt.Sprintf("%s (%s:%d)", funcName, fileName, frame.LineNumber)
+		if frame.LineNumber > 0 {
+			label = fmt.Sprintf("%s (%s:%d)", funcName, fileName, frame.LineNumber)
+		} else {
+			label = fmt.Sprintf("%s (%s)", funcName, fileName)
+		}
 	}
 
 	// Frame dedup key — with real line numbers in the location string,

@@ -184,7 +184,12 @@ func (r *FrameResolver) resolveFromMem(pid uint32, iseqAddr uint64) (FrameInfo, 
 	if err == nil && lineVal != 0 {
 		// Ruby fixnum: value is (n << 1) | 1
 		if lineVal&1 == 1 {
-			info.Line = uint32(lineVal >> 1) //nolint:gosec // line numbers fit in uint32
+			decoded := uint32(lineVal >> 1)
+			// Sanity check: line numbers above 1M are almost certainly
+			// misinterpreted pointer values, not real line numbers.
+			if decoded > 0 && decoded < 1_000_000 {
+				info.Line = decoded
+			}
 		}
 	}
 
@@ -394,7 +399,7 @@ func (r *FrameResolver) ResolveProfileFrame(pid uint32, frameVal uint64, line in
 	if info, ok := r.cache[key]; ok {
 		r.mu.RUnlock()
 		// Override line with the actual call-site line from rb_profile_frames
-		if line > 0 {
+		if line > 0 && line < 1_000_000 {
 			info.Line = uint32(line)
 		}
 		return info
