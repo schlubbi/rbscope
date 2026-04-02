@@ -23,18 +23,33 @@
 #endif
 
 // I/O operation types (matches Go IoOp* constants)
-#define IO_OP_READ    1
-#define IO_OP_WRITE   2
-#define IO_OP_SENDTO  3
-#define IO_OP_RECVFROM 4
-#define IO_OP_CONNECT 5
+#define IO_OP_READ       1
+#define IO_OP_WRITE      2
+#define IO_OP_SENDTO     3
+#define IO_OP_RECVFROM   4
+#define IO_OP_CONNECT    5
+#define IO_OP_POLL       6
+#define IO_OP_PPOLL      7
+#define IO_OP_EPOLL_WAIT 8
+#define IO_OP_PSELECT6   9
+#define IO_OP_ACCEPT4    10
 
-// Syscall numbers (x86_64)
-#define SYS_READ     0
-#define SYS_WRITE    1
-#define SYS_CONNECT  42
-#define SYS_SENDTO   44
-#define SYS_RECVFROM 45
+// Syscall tags — arbitrary identifiers used to distinguish syscalls
+// in the inflight map. Not actual NR values.
+#define SYS_READ       0
+#define SYS_WRITE      1
+#define SYS_CONNECT    42
+#define SYS_SENDTO     44
+#define SYS_RECVFROM   45
+#define SYS_POLL       100
+#define SYS_PPOLL      101
+#define SYS_EPOLL_WAIT 102
+#define SYS_PSELECT6   103
+#define SYS_ACCEPT4    104
+
+// Minimum latency (in ns) to emit poll-family events.
+// Polls shorter than this are readiness checks, not blocking waits.
+#define POLL_MIN_LATENCY_NS 1000000  // 1ms
 
 // ---- maps ----------------------------------------------------------------
 
@@ -117,12 +132,17 @@ static __always_inline int pid_allowed(void) {
 
 static __always_inline u32 syscall_to_op(u32 nr) {
     switch (nr) {
-    case SYS_READ:     return IO_OP_READ;
-    case SYS_WRITE:    return IO_OP_WRITE;
-    case SYS_SENDTO:   return IO_OP_SENDTO;
-    case SYS_RECVFROM: return IO_OP_RECVFROM;
-    case SYS_CONNECT:  return IO_OP_CONNECT;
-    default:           return 0;
+    case SYS_READ:       return IO_OP_READ;
+    case SYS_WRITE:      return IO_OP_WRITE;
+    case SYS_SENDTO:     return IO_OP_SENDTO;
+    case SYS_RECVFROM:   return IO_OP_RECVFROM;
+    case SYS_CONNECT:    return IO_OP_CONNECT;
+    case SYS_POLL:       return IO_OP_POLL;
+    case SYS_PPOLL:      return IO_OP_PPOLL;
+    case SYS_EPOLL_WAIT: return IO_OP_EPOLL_WAIT;
+    case SYS_PSELECT6:   return IO_OP_PSELECT6;
+    case SYS_ACCEPT4:    return IO_OP_ACCEPT4;
+    default:             return 0;
     }
 }
 
@@ -144,6 +164,16 @@ static __always_inline void record_exit(void *ctx, long ret) {
 
     u64 now = bpf_ktime_get_ns();
     u64 latency = now - entry->timestamp_ns;
+    u32 syscall_nr = entry->syscall_nr;
+    u32 fd = entry->fd;
+
+    // For poll-family syscalls, suppress events shorter than 1ms.
+    // Zero-timeout polls are readiness checks, not blocking waits.
+    if (syscall_nr >= SYS_POLL && syscall_nr <= SYS_PSELECT6 &&
+        latency < POLL_MIN_LATENCY_NS) {
+        bpf_map_delete_elem(&inflight, &tid);
+        return;
+    }
 
     struct rbscope_io_event *ev = bpf_ringbuf_reserve(&io_events, sizeof(*ev), 0);
     if (!ev) {
@@ -161,8 +191,8 @@ static __always_inline void record_exit(void *ctx, long ret) {
     ev->timestamp_ns = now;
 
     // I/O fields
-    ev->op           = syscall_to_op(entry->syscall_nr);
-    ev->fd           = (s32)entry->fd;
+    ev->op           = syscall_to_op(syscall_nr);
+    ev->fd           = (s32)fd;
     ev->bytes        = ret;
     ev->latency_ns   = latency;
 
@@ -281,6 +311,102 @@ int tp_sys_enter_connect(struct trace_event_raw_sys_enter *ctx) {
 
 SEC("tp/syscalls/sys_exit_connect")
 int tp_sys_exit_connect(struct trace_event_raw_sys_exit *ctx) {
+    if (!pid_allowed()) return 0;
+    record_exit(ctx, ctx->ret);
+    return 0;
+}
+
+// ---- tracepoints: ppoll --------------------------------------------------
+// ppoll(struct pollfd *fds, nfds_t nfds, ...)
+// Read the first pollfd to get the primary fd being waited on.
+
+SEC("tp/syscalls/sys_enter_ppoll")
+int tp_sys_enter_ppoll(struct trace_event_raw_sys_enter *ctx) {
+    if (!pid_allowed()) return 0;
+    // Read first pollfd.fd from userspace (struct pollfd = {int fd; short events; short revents;})
+    u32 fd = 0;
+    void *fds_ptr = (void *)ctx->args[0];
+    if (fds_ptr)
+        bpf_probe_read_user(&fd, sizeof(u32), fds_ptr);
+    record_enter(SYS_PPOLL, fd);
+    return 0;
+}
+
+SEC("tp/syscalls/sys_exit_ppoll")
+int tp_sys_exit_ppoll(struct trace_event_raw_sys_exit *ctx) {
+    if (!pid_allowed()) return 0;
+    record_exit(ctx, ctx->ret);
+    return 0;
+}
+
+// ---- tracepoints: poll ---------------------------------------------------
+// poll(struct pollfd *fds, nfds_t nfds, int timeout)
+
+SEC("tp/syscalls/sys_enter_poll")
+int tp_sys_enter_poll(struct trace_event_raw_sys_enter *ctx) {
+    if (!pid_allowed()) return 0;
+    u32 fd = 0;
+    void *fds_ptr = (void *)ctx->args[0];
+    if (fds_ptr)
+        bpf_probe_read_user(&fd, sizeof(u32), fds_ptr);
+    record_enter(SYS_POLL, fd);
+    return 0;
+}
+
+SEC("tp/syscalls/sys_exit_poll")
+int tp_sys_exit_poll(struct trace_event_raw_sys_exit *ctx) {
+    if (!pid_allowed()) return 0;
+    record_exit(ctx, ctx->ret);
+    return 0;
+}
+
+// ---- tracepoints: epoll_wait ---------------------------------------------
+// epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
+
+SEC("tp/syscalls/sys_enter_epoll_wait")
+int tp_sys_enter_epoll_wait(struct trace_event_raw_sys_enter *ctx) {
+    if (!pid_allowed()) return 0;
+    record_enter(SYS_EPOLL_WAIT, (u32)ctx->args[0]);
+    return 0;
+}
+
+SEC("tp/syscalls/sys_exit_epoll_wait")
+int tp_sys_exit_epoll_wait(struct trace_event_raw_sys_exit *ctx) {
+    if (!pid_allowed()) return 0;
+    record_exit(ctx, ctx->ret);
+    return 0;
+}
+
+// ---- tracepoints: pselect6 -----------------------------------------------
+// pselect6(int nfds, fd_set *readfds, ...)
+// nfds is highest fd+1, not a specific fd. Store it as the "fd" for context.
+
+SEC("tp/syscalls/sys_enter_pselect6")
+int tp_sys_enter_pselect6(struct trace_event_raw_sys_enter *ctx) {
+    if (!pid_allowed()) return 0;
+    record_enter(SYS_PSELECT6, (u32)ctx->args[0]);
+    return 0;
+}
+
+SEC("tp/syscalls/sys_exit_pselect6")
+int tp_sys_exit_pselect6(struct trace_event_raw_sys_exit *ctx) {
+    if (!pid_allowed()) return 0;
+    record_exit(ctx, ctx->ret);
+    return 0;
+}
+
+// ---- tracepoints: accept4 ------------------------------------------------
+// accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags)
+
+SEC("tp/syscalls/sys_enter_accept4")
+int tp_sys_enter_accept4(struct trace_event_raw_sys_enter *ctx) {
+    if (!pid_allowed()) return 0;
+    record_enter(SYS_ACCEPT4, (u32)ctx->args[0]);
+    return 0;
+}
+
+SEC("tp/syscalls/sys_exit_accept4")
+int tp_sys_exit_accept4(struct trace_event_raw_sys_exit *ctx) {
     if (!pid_allowed()) return 0;
     record_exit(ctx, ctx->ret);
     return 0;
