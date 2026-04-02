@@ -47,7 +47,7 @@ type Builder struct {
 	// by the caller (e.g., bpf.DiscoverHostPID reversed).
 	pidDiscoverer func(hostPID uint32) (containerPID uint32, ok bool)
 
-	allocResolveLogCount int // throttle diagnostic log messages
+	allocResolveLogCount int                 // throttle diagnostic log messages
 	seenPIDs             map[uint32]struct{} // PIDs we've eagerly opened mem for
 }
 

@@ -333,7 +333,7 @@ func ParseRawFrameStack(data []byte) []RawFrame {
 	frames := make([]RawFrame, 0, numFrames)
 	for i := 0; i < numFrames && off+12 <= len(data); i++ {
 		val := binary.LittleEndian.Uint64(data[off:])
-		line := int32(binary.LittleEndian.Uint32(data[off+8:]))
+		line := int32(binary.LittleEndian.Uint32(data[off+8:])) //nolint:gosec // line numbers fit in int32
 		off += 12
 		frames = append(frames, RawFrame{Value: val, Line: line})
 	}

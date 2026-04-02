@@ -316,10 +316,8 @@ func runCapture(_ *cobra.Command, _ []string) error {
 
 	// Register PID namespace mappings BEFORE attaching (events flow immediately
 	// after AttachPID, so mappings must be ready first).
-	if tb != nil && sw != nil {
-		// BPF mode: stack walker discovers mappings during its own AttachPID.
-		// We register them after AttachPID below.
-	}
+	// BPF/combined mode: stack walker discovers mappings during its own AttachPID.
+	// We register them after AttachPID below.
 	if tb != nil && sw == nil {
 		// Gem mode: discover host PID for the target process and all siblings
 		// before events start flowing.

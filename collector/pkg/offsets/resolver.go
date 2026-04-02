@@ -184,7 +184,7 @@ func (r *FrameResolver) resolveFromMem(pid uint32, iseqAddr uint64) (FrameInfo, 
 	if err == nil && lineVal != 0 {
 		// Ruby fixnum: value is (n << 1) | 1
 		if lineVal&1 == 1 {
-			decoded := uint32(lineVal >> 1)
+			decoded := uint32(lineVal >> 1) //nolint:gosec // clamped to <1M below
 			// Sanity check: line numbers above 1M are almost certainly
 			// misinterpreted pointer values, not real line numbers.
 			if decoded > 0 && decoded < 1_000_000 {
@@ -458,7 +458,7 @@ func (r *FrameResolver) ResolveProfileFrame(pid uint32, frameVal uint64, line in
 
 		// Read def->type (first byte, bitfield)
 		typeBuf := make([]byte, 1)
-		if _, err := f.ReadAt(typeBuf, int64(defPtr+uint64(off.DefType))); err != nil {
+		if _, err := f.ReadAt(typeBuf, int64(defPtr+uint64(off.DefType))); err != nil { //nolint:gosec // defPtr is a userspace address, always positive
 			return FrameInfo{}
 		}
 		defType := typeBuf[0] & 0x0f // lower nibble holds the method type

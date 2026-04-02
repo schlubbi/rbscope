@@ -26,10 +26,10 @@ type CombinedBPF struct {
 	gem    *RealBPF
 	walker *StackWalkerBPF
 
-	chans  []chan []byte   // per-reader channels
-	stopCh chan struct{}   // signals drain goroutines to exit
+	chans  []chan []byte  // per-reader channels
+	stopCh chan struct{}  // signals drain goroutines to exit
 	wg     sync.WaitGroup // tracks drain goroutines
-	toggle int             // round-robin state
+	toggle int            // round-robin state
 
 	readTimer *time.Timer // reused by ReadRingBuffer to avoid alloc per call
 }
@@ -43,7 +43,7 @@ func NewCombinedBPF(bpfObj, rubyPath string, cpuHz int) (*CombinedBPF, error) {
 
 	walker, err := NewStackWalkerBPF(rubyPath, cpuHz)
 	if err != nil {
-		gem.Close()
+		_ = gem.Close()
 		return nil, fmt.Errorf("create stack walker: %w", err)
 	}
 
@@ -61,6 +61,7 @@ func (c *CombinedBPF) Walker() *StackWalkerBPF {
 	return c.walker
 }
 
+// Load initializes both BPF programs and starts drain goroutines.
 func (c *CombinedBPF) Load() error {
 	if err := c.gem.Load(); err != nil {
 		return fmt.Errorf("gem load: %w", err)
@@ -136,6 +137,7 @@ func (c *CombinedBPF) drainReader(rd *ringbuf.Reader, ch chan []byte) {
 	}
 }
 
+// AttachPID attaches both gem and walker probes to the target process.
 func (c *CombinedBPF) AttachPID(pid uint32) error {
 	if err := c.gem.AttachPID(pid); err != nil {
 		return fmt.Errorf("gem attach: %w", err)
@@ -146,6 +148,7 @@ func (c *CombinedBPF) AttachPID(pid uint32) error {
 	return nil
 }
 
+// DetachPID detaches probes from the target process.
 func (c *CombinedBPF) DetachPID(pid uint32) error {
 	_ = c.gem.DetachPID(pid)
 	return c.walker.DetachPID(pid)
@@ -204,17 +207,19 @@ func (c *CombinedBPF) ReadRingBuffer(buf []byte) (int, error) {
 	}
 }
 
+// KtimeOffsetNs returns the ktime-to-wallclock offset from the stack walker.
 func (c *CombinedBPF) KtimeOffsetNs() int64 {
 	return c.walker.KtimeOffsetNs()
 }
 
+// Close stops drain goroutines and releases both BPF programs.
 func (c *CombinedBPF) Close() error {
 	close(c.stopCh)
 	c.wg.Wait()
 
 	for _, ch := range c.chans {
 		close(ch)
-		for range ch {
+		for range ch { //nolint:revive // drain remaining buffered events
 		}
 	}
 

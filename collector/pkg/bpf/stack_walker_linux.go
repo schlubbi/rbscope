@@ -38,7 +38,7 @@ type StackWalkerBPF struct {
 	schedLinks  []link.Link
 	readToggle  int
 	// pidMapping tracks container PID → host PID for namespace support
-	pidMapping  map[uint32]uint32
+	pidMapping map[uint32]uint32
 }
 
 var _ collector.BPFProgram = (*StackWalkerBPF)(nil)
@@ -417,7 +417,7 @@ func DiscoverHostPID(containerPid uint32) (uint32, error) {
 	if err != nil {
 		return containerPid, fmt.Errorf("create discovery map: %w", err)
 	}
-	defer resultMap.Close()
+	defer resultMap.Close() //nolint:errcheck // cleanup in defer
 
 	// Minimal BPF program: call bpf_get_current_pid_tgid(), store to map
 	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
@@ -443,7 +443,7 @@ func DiscoverHostPID(containerPid uint32) (uint32, error) {
 	if err != nil {
 		return containerPid, fmt.Errorf("load discovery prog: %w", err)
 	}
-	defer prog.Close()
+	defer prog.Close() //nolint:errcheck // cleanup in defer
 
 	// Attach perf events targeted at containerPid on all CPUs.
 	nCPU := runtime.NumCPU()
@@ -468,17 +468,17 @@ func DiscoverHostPID(containerPid uint32) (uint32, error) {
 			Attach:  ebpf.AttachPerfEvent,
 		})
 		if err != nil {
-			unix.Close(fd)
+			_ = unix.Close(fd)
 			continue
 		}
 		discoveryLinks = append(discoveryLinks, l)
 	}
 	defer func() {
 		for _, l := range discoveryLinks {
-			l.Close()
+			_ = l.Close()
 		}
 		for _, fd := range discoveryFDs {
-			unix.Close(fd)
+			_ = unix.Close(fd)
 		}
 	}()
 

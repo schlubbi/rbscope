@@ -492,7 +492,7 @@ func findDebugFile(f *elf.File, elfPath string) (string, error) {
 			}
 		}
 		for _, path := range candidates {
-			if _, err := os.Stat(path); err == nil {
+			if _, err := os.Stat(path); err == nil { //nolint:gosec // paths from build-id, not user input
 				return path, nil
 			}
 		}
@@ -514,7 +514,7 @@ func findDebugFile(f *elf.File, elfPath string) (string, error) {
 				filepath.Join("/usr/lib/debug", dir, debugName),
 			}
 			for _, path := range candidates {
-				if _, err := os.Stat(path); err == nil {
+				if _, err := os.Stat(path); err == nil { //nolint:gosec // paths from ELF debug sections
 					return path, nil
 				}
 			}

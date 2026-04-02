@@ -29,9 +29,9 @@ type bpfObjects = rbscopeObjects
 
 // RealBPF is the Linux eBPF-backed implementation of collector.BPFProgram.
 type RealBPF struct {
-	objPath        string
-	objs           bpfObjects
-	reader         *ringbuf.Reader
+	objPath string
+	objs    bpfObjects
+	reader  *ringbuf.Reader
 
 	// SkipCPUSampler disables the ruby_sample uprobe attachment.
 	// Set to true in combined mode where StackWalkerBPF handles CPU sampling.
@@ -39,7 +39,7 @@ type RealBPF struct {
 
 	// SkipIOSched disables I/O and sched tracer loading.
 	// Set to true in combined mode where StackWalkerBPF handles these.
-	SkipIOSched bool
+	SkipIOSched    bool
 	links          []link.Link
 	ioObjs         *iotracerObjects
 	ioReader       *ringbuf.Reader
