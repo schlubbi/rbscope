@@ -198,8 +198,8 @@ unsafe fn on_newobj_event_inner(val: rb_sys::VALUE) {
     buf.push(RAW_FORMAT_VERSION);
     buf.extend_from_slice(&(nf as u16).to_le_bytes());
     for i in 0..nf {
-        buf.extend_from_slice(&(frame_buf[i] as u64).to_le_bytes());
-        buf.extend_from_slice(&(line_buf[i] as i32).to_le_bytes());
+        buf.extend_from_slice(&frame_buf[i].to_le_bytes());
+        buf.extend_from_slice(&line_buf[i].to_le_bytes());
     }
 
     probes::fire_ruby_alloc(&object_type, size, &buf);
