@@ -44,13 +44,14 @@ var (
 
 // capture flags
 var (
-	flagCapturePID      uint32
-	flagCaptureDuration time.Duration
-	flagCaptureOutput   string
-	flagCaptureBPFObj   string
-	flagCaptureFormat   string
-	flagCaptureMode     string
-	flagCaptureRubyPath string
+	flagCapturePID          uint32
+	flagCaptureDuration     time.Duration
+	flagCaptureOutput       string
+	flagCaptureBPFObj       string
+	flagCaptureFormat       string
+	flagCaptureMode         string
+	flagCaptureRubyPath     string
+	flagCapturePyroscopeURL string
 )
 
 func main() {
@@ -98,10 +99,11 @@ func captureCmd() *cobra.Command {
 	f.Uint32Var(&flagCapturePID, "pid", 0, "Target PID (required)")
 	f.DurationVar(&flagCaptureDuration, "duration", 10*time.Second, "Capture duration")
 	f.StringVar(&flagCaptureOutput, "output", "capture.pb", "Output file path")
-	f.StringVar(&flagCaptureFormat, "format", "pb", "Output format: pb (protobuf), gecko (Firefox Profiler JSON), or csv (DuckDB-ready)")
+	f.StringVar(&flagCaptureFormat, "format", "pb", "Output format: pb, gecko, csv, or pyroscope")
 	f.StringVar(&flagCaptureBPFObj, "bpf-obj", "", "Path to compiled BPF ELF object")
 	f.StringVar(&flagCaptureMode, "mode", "gem", "Profiling mode: gem (USDT probes) or bpf (zero-instrumentation)")
 	f.StringVar(&flagCaptureRubyPath, "ruby-path", "", "Path to libruby.so with DWARF (required for --mode=bpf)")
+	f.StringVar(&flagCapturePyroscopeURL, "pyroscope-url", "http://localhost:4040", "Pyroscope server URL (for --format=pyroscope)")
 	_ = cmd.MarkFlagRequired("pid")
 
 	return cmd
@@ -192,8 +194,8 @@ func runCapture(_ *cobra.Command, _ []string) error {
 	var tb *timeline.Builder
 
 	switch flagCaptureFormat {
-	case "gecko", "csv":
-		// Both formats: accumulate into timeline builder, export at end.
+	case "gecko", "csv", "pyroscope":
+		// Timeline-based formats: accumulate into timeline builder, export at end.
 		hostname, _ := os.Hostname()
 		tb = timeline.NewBuilder("capture", hostname, flagCapturePID, 99)
 		// Set up symbol resolver for native stack resolution
@@ -212,7 +214,7 @@ func runCapture(_ *cobra.Command, _ []string) error {
 		defer func() { _ = fe.Close() }()
 		exporters = append(exporters, fe)
 	default:
-		return fmt.Errorf("unknown format: %q (use pb, gecko, or csv)", flagCaptureFormat)
+		return fmt.Errorf("unknown format: %q (use pb, gecko, csv, or pyroscope)", flagCaptureFormat)
 	}
 
 	cfg := collector.Config{
@@ -396,6 +398,29 @@ func runCapture(_ *cobra.Command, _ []string) error {
 				return fmt.Errorf("export csv: %w", err)
 			}
 			logger.Info("csv export complete", "output", flagCaptureOutput)
+		case "pyroscope":
+			pyro := export.NewPyroscopeExporter(export.PyroscopeConfig{
+				ServerURL: flagCapturePyroscopeURL,
+				AppName:   "rbscope.cpu",
+			})
+			cpuProf := export.CaptureToProfile(capture)
+			cpuProf.DurationNanos = flagCaptureDuration.Nanoseconds()
+			cpuProf.TimeNanos = time.Now().UnixNano()
+			if err := pyro.Push(context.Background(), cpuProf); err != nil {
+				return fmt.Errorf("push cpu profile to pyroscope: %w", err)
+			}
+			logger.Info("pushed cpu profile to pyroscope", "url", flagCapturePyroscopeURL)
+
+			allocProf := export.CaptureToAllocProfile(capture)
+			if allocProf != nil {
+				allocProf.DurationNanos = flagCaptureDuration.Nanoseconds()
+				allocProf.TimeNanos = time.Now().UnixNano()
+				if err := pyro.PushWithName(context.Background(), allocProf, "rbscope.alloc"); err != nil {
+					logger.Warn("push alloc profile to pyroscope failed", "err", err)
+				} else {
+					logger.Info("pushed alloc profile to pyroscope", "url", flagCapturePyroscopeURL)
+				}
+			}
 		}
 	}
 
