@@ -577,8 +577,14 @@ func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) MarkersTable {
 
 		// Use the syscall name as the marker name for poll-family and accept4,
 		// keep "I/O" for read/write/sendto/recvfrom/connect.
-		markerName := "I/O"
+		markerName := syscall // default: use syscall name directly
 		switch syscall {
+		case "read", "recvfrom":
+			markerName = "Read"
+		case "write", "sendto":
+			markerName = "Write"
+		case "connect":
+			markerName = "Connect"
 		case "poll", "ppoll", "epoll_wait", "pselect6":
 			markerName = "Poll"
 		case "accept4":

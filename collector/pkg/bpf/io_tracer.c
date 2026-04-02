@@ -190,9 +190,10 @@ static __always_inline void record_exit(void *ctx, long ret) {
     // Suppress short-duration events for poll-family, futex, and getrandom.
     // Zero-timeout polls are readiness checks; uncontended futexes and
     // fast getrandom calls are noise.
+    // clock_gettime is NOT filtered — we want every call's native stack
+    // to identify code paths with frequent CPU clock reads.
     if (((syscall_nr >= SYS_POLL && syscall_nr <= SYS_PSELECT6) ||
-         syscall_nr == SYS_FUTEX || syscall_nr == SYS_GETRANDOM ||
-         syscall_nr == SYS_CLOCK_GETTIME) &&
+         syscall_nr == SYS_FUTEX || syscall_nr == SYS_GETRANDOM) &&
         latency < MIN_LATENCY_FILTER_NS) {
         bpf_map_delete_elem(&inflight, &tid);
         return;
