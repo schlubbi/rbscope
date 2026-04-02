@@ -8,16 +8,17 @@
 //   1. rb_add_event_hook2(RUBY_INTERNAL_EVENT_NEWOBJ, callback, ...)
 //   2. On every Nth allocation: capture stack via rb_profile_frames()
 //   3. Get object type from RBasic flags (builtin_type)
-//   4. Resolve frame labels via rb_profile_frame_full_label()
+//   4. Serialize raw frame VALUE pointers + line numbers (format v3)
 //   5. Fire __rbscope_probe_ruby_alloc USDT probe
 //
-// The collector receives these as typed RubyAllocEvent and builds
-// AllocationSample entries in the Capture proto.
+// Frame labels are NOT resolved in the gem — the collector resolves
+// them via /proc/pid/mem using the same FrameResolver as BPF mode.
+// This follows the pattern used by Vernier and StackProf: store raw
+// VALUE pointers during NEWOBJ, resolve labels elsewhere.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
 
 use crate::probes;
-use crate::stack::{InlineStack, InlineFrame};
 
 // ---------------------------------------------------------------------------
 // FFI declarations
@@ -49,17 +50,12 @@ extern "C" {
 
     fn rb_tracearg_object(arg: *const std::ffi::c_void) -> rb_sys::VALUE;
 
-    fn rb_class2name(klass: rb_sys::VALUE) -> *const std::os::raw::c_char;
-
     fn rb_profile_frames(
         start: std::os::raw::c_int,
         limit: std::os::raw::c_int,
         buff: *mut rb_sys::VALUE,
         lines: *mut std::os::raw::c_int,
     ) -> std::os::raw::c_int;
-
-    fn rb_profile_frame_full_label(frame: rb_sys::VALUE) -> rb_sys::VALUE;
-    fn rb_profile_frame_path(frame: rb_sys::VALUE) -> rb_sys::VALUE;
 }
 
 
@@ -80,56 +76,6 @@ const RUBY_T_MASK: usize = 0x1f;
 unsafe fn builtin_type(val: rb_sys::VALUE) -> i32 {
     let flags = *(val as *const usize);
     (flags & RUBY_T_MASK) as i32
-}
-
-/// Get the class name of a Ruby object during NEWOBJ.
-///
-/// Uses rb_class_of() + rb_class2name() which return a C string without
-/// allocating Ruby objects. Filters by type to avoid crashes on internal
-/// types (T_NODE, T_ZOMBIE, etc.) following dd-trace-rb's approach.
-/// Falls back to the VM type name when klass is 0 (internal objects).
-unsafe fn get_class_name(val: rb_sys::VALUE, obj_type: i32) -> String {
-    // Only attempt class lookup for types that have a valid klass during NEWOBJ.
-    const T_OBJECT: i32 = 0x01;
-    const T_CLASS: i32 = 0x02;
-    const T_MODULE: i32 = 0x03;
-    const T_FLOAT: i32 = 0x04;
-    const T_STRING: i32 = 0x05;
-    const T_REGEXP: i32 = 0x06;
-    const T_ARRAY: i32 = 0x07;
-    const T_HASH: i32 = 0x08;
-    const T_STRUCT: i32 = 0x09;
-    const T_BIGNUM: i32 = 0x0a;
-    const T_FILE: i32 = 0x0b;
-    const T_DATA: i32 = 0x0c;
-    const T_MATCH: i32 = 0x0d;
-    const T_COMPLEX: i32 = 0x0e;
-    const T_RATIONAL: i32 = 0x0f;
-    const T_SYMBOL: i32 = 0x1a;
-
-    match obj_type {
-        T_OBJECT | T_CLASS | T_MODULE | T_FLOAT | T_STRING | T_REGEXP |
-        T_ARRAY | T_HASH | T_STRUCT | T_BIGNUM | T_FILE | T_DATA |
-        T_MATCH | T_COMPLEX | T_RATIONAL | T_SYMBOL => {
-            // Read klass directly from RBasic (offset +8 on 64-bit).
-            // rb_class_of() is an inline function, not an exported symbol.
-            let klass = *((val as *const rb_sys::VALUE).add(1));
-            // klass=0 means internal object (e.g. rb_str_tmp_frozen_acquire)
-            if klass == 0 || klass == rb_sys::Qnil as rb_sys::VALUE {
-                return ruby_type_name(obj_type);
-            }
-            let name_ptr = rb_class2name(klass);
-            if name_ptr.is_null() {
-                return ruby_type_name(obj_type);
-            }
-            let cstr = std::ffi::CStr::from_ptr(name_ptr);
-            match cstr.to_str() {
-                Ok(s) if !s.is_empty() => s.to_string(),
-                _ => ruby_type_name(obj_type),
-            }
-        }
-        _ => ruby_type_name(obj_type),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +130,13 @@ unsafe extern "C" fn on_newobj_event(
     // Get the newly allocated object from the trace arg
     let val = rb_tracearg_object(arg);
 
+    // Guard: rb_tracearg_object can return 0 (NULL) for internal allocations
+    // in Ruby 4.0 where the object isn't fully registered yet.
+    if val == 0 || val == rb_sys::Qfalse as rb_sys::VALUE {
+        IN_ALLOC_CALLBACK.store(false, Ordering::Release);
+        return;
+    }
+
     let _ = std::panic::catch_unwind(|| {
         on_newobj_event_inner(val);
     });
@@ -191,31 +144,32 @@ unsafe extern "C" fn on_newobj_event(
     IN_ALLOC_CALLBACK.store(false, Ordering::Release);
 }
 
+/// Stack format version byte for raw frame addresses (format v3).
+/// Layout: [u8: version=3][u16: num_frames][per frame: u64 value + i32 line]
+const RAW_FORMAT_VERSION: u8 = 3;
+
 unsafe fn on_newobj_event_inner(val: rb_sys::VALUE) {
+    // Validate that val looks like a heap pointer before dereferencing.
+    // Immediate VALUEs (Fixnum, Symbol, true/false/nil) have low bits set
+    // and should never appear here, but guard anyway.
+    if val & 0x07 != 0 || val < 0x1000 {
+        return;
+    }
+
     let obj_type = builtin_type(val);
+    let object_type = ruby_type_name(obj_type);
 
-    // Get the class name of the newly allocated object.
-    // rb_class_of() + rb_class2name() return a C string (no Ruby String
-    // allocation) and are safe to call during NEWOBJ for most types.
-    // Falls back to the VM type name (T_STRING etc.) for internal types
-    // or when klass is 0 (internal objects).
-    let object_type = get_class_name(val, obj_type);
-
-    // Estimate object size. We can't call rb_obj_memsize_of() during NEWOBJ
-    // (it may trigger allocations). Use the RVALUE slot size (40 bytes on
-    // 64-bit) as the baseline — every Ruby object occupies at least one slot.
-    // For types that commonly have extra heap data, add a conservative estimate.
+    // Estimate object size based on type.
     let size: u64 = match obj_type {
-        0x05 => 80,  // T_STRING — slot + typical small string heap buffer
-        0x07 => 72,  // T_ARRAY — slot + embedded capacity (usually 3 elements)
-        0x08 => 96,  // T_HASH — slot + st_table overhead
-        _    => 40,  // RVALUE slot size (minimum for any object)
+        0x05 => 80,  // T_STRING
+        0x07 => 72,  // T_ARRAY
+        0x08 => 96,  // T_HASH
+        _    => 40,  // RVALUE slot size
     };
 
-    // Capture Ruby call stack — just the raw frame VALUEs + lines.
-    // We CANNOT call rb_profile_frame_full_label here because it
-    // allocates Ruby Strings which trigger re-entrant NEWOBJ events.
-    // Instead, serialize frame IPs for the BPF collector to resolve.
+    // Capture Ruby call stack — raw frame VALUEs + line numbers.
+    // rb_profile_frames is cheap (~µs) — it just walks the CFP chain
+    // without allocating any Ruby objects.
     let mut frame_buf: [rb_sys::VALUE; MAX_FRAMES] = [0; MAX_FRAMES];
     let mut line_buf: [std::os::raw::c_int; MAX_FRAMES] = [0; MAX_FRAMES];
 
@@ -232,29 +186,24 @@ unsafe fn on_newobj_event_inner(val: rb_sys::VALUE) {
 
     let nf = num_frames as usize;
 
-    // Resolve frame labels ONE AT A TIME, checking the reentrancy guard
-    // is still ours after each call (rb_profile_frame_full_label allocates).
-    let mut stack = InlineStack::new();
+    // Serialize raw frame addresses in format v3.
+    // The collector resolves these via /proc/pid/mem using FrameResolver,
+    // the same path BPF mode uses for iseq addresses.
+    // Layout: [version:u8][num_frames:u16][frame_value:u64 + line:i32] × N
+    let buf_size = 3 + nf * 12;
+    if buf_size > MAX_STACK_BYTES {
+        return;
+    }
+    let mut buf = Vec::with_capacity(buf_size);
+    buf.push(RAW_FORMAT_VERSION);
+    buf.extend_from_slice(&(nf as u16).to_le_bytes());
     for i in 0..nf {
-        // rb_profile_frame_full_label allocates a Ruby String, which fires
-        // NEWOBJ → our callback → reentrancy guard blocks it → returns.
-        // The returned VALUE is safe to read because it's fully initialized.
-        let label_val = rb_profile_frame_full_label(frame_buf[i]);
-        let label = ruby_value_to_string(label_val);
-
-        let path_val = rb_profile_frame_path(frame_buf[i]);
-        let path = ruby_value_to_string(path_val);
-
-        let line = if line_buf[i] > 0 { line_buf[i] as u32 } else { 0 };
-        stack.frames.push(InlineFrame { label, path, line });
+        buf.extend_from_slice(&frame_buf[i].to_le_bytes());
+        buf.extend_from_slice(&line_buf[i].to_le_bytes());
     }
 
-    // Serialize and fire the USDT probe
-    let mut buf = Vec::with_capacity(stack.serialized_size().min(MAX_STACK_BYTES));
-    if stack.serialize(&mut buf).is_ok() && buf.len() <= MAX_STACK_BYTES {
-        probes::fire_ruby_alloc(&object_type, size, &buf);
-        ALLOC_SAMPLED.fetch_add(1, Ordering::Relaxed);
-    }
+    probes::fire_ruby_alloc(&object_type, size, &buf);
+    ALLOC_SAMPLED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Map Ruby T_xxx type constants to human-readable names.
@@ -282,57 +231,6 @@ fn ruby_type_name(t: i32) -> String {
         _ => "(unknown)",
     }
     .to_string()
-}
-
-/// Convert a Ruby VALUE string to a Rust String.
-/// Reads the RString struct directly to avoid calling any Ruby C API
-/// functions that might trigger allocations during NEWOBJ events.
-///
-/// RString layout (64-bit): { RBasic(16), union { heap{len(8), ptr(8), ...}, embed{ary[]} } }
-/// STR_NOEMBED flag (bit 13) indicates heap vs embedded string.
-unsafe fn ruby_value_to_string(value: rb_sys::VALUE) -> String {
-    if value == rb_sys::Qnil as rb_sys::VALUE
-        || value == rb_sys::Qfalse as rb_sys::VALUE
-        || value == 0
-    {
-        return "(unknown)".to_string();
-    }
-
-    if value & 0x07 != 0 {
-        return "(unknown)".to_string();
-    }
-
-    let flags = *(value as *const usize);
-    // Check T_STRING (type bits [4:0] == 0x05)
-    if flags & 0x1f != 0x05 {
-        return "(unknown)".to_string();
-    }
-
-    // RBasic is 16 bytes (flags + klass). RString union starts at offset 16.
-    let base = value as *const u8;
-
-    // STR_NOEMBED = FL_USER1 = (1 << 13). If set, string is on heap.
-    const STR_NOEMBED: usize = 1 << 13;
-
-    let (ptr, len): (*const u8, usize) = if flags & STR_NOEMBED != 0 {
-        // Heap string: offset 16 = len (long), offset 24 = ptr (*char)
-        let len = *(base.add(16) as *const isize) as usize;
-        let ptr = *(base.add(24) as *const *const u8);
-        (ptr, len)
-    } else {
-        // Embedded string: length is in flags bits [19:15] (Ruby 3.3+/4.0).
-        // EMBED_LEN_SHIFT = 15, EMBED_LEN_MASK = 0x1F (5 bits)
-        let len = (flags >> 15) & 0x1f;
-        let ptr = base.add(16); // data starts right after RBasic
-        (ptr, len)
-    };
-
-    if ptr.is_null() || len > 10_000 {
-        return "(unknown)".to_string();
-    }
-
-    let bytes = std::slice::from_raw_parts(ptr, len);
-    String::from_utf8_lossy(bytes).into_owned()
 }
 
 // ---------------------------------------------------------------------------

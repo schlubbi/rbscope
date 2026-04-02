@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 )
 
 // FrameInfo holds the resolved method name, file path, and line number
@@ -26,6 +27,15 @@ type FrameResolver struct {
 	cfuncMu    sync.RWMutex
 	cfuncCache map[cfuncKey]string
 	offsets    *RubyOffsets
+
+	// memFiles caches open /proc/pid/mem file handles.
+	// Keeping fds open prevents the kernel from releasing the process's
+	// mm_struct — even after the process exits, the address space remains
+	// readable. This is critical for Pitchfork workers that die mid-capture.
+	memMu    sync.Mutex
+	memFiles map[uint32]*os.File // pid → open /proc/pid/mem fd
+
+	resolveLogCount int32 // throttle diagnostic messages
 }
 
 type frameKey struct {
@@ -49,7 +59,53 @@ func NewFrameResolver(off *RubyOffsets) *FrameResolver {
 		cache:      make(map[frameKey]FrameInfo),
 		classCache: make(map[classKey]string),
 		cfuncCache: make(map[cfuncKey]string),
+		memFiles:   make(map[uint32]*os.File),
 		offsets:    off,
+	}
+}
+
+// Close releases all cached /proc/pid/mem file handles.
+func (r *FrameResolver) Close() {
+	r.memMu.Lock()
+	defer r.memMu.Unlock()
+	for pid, f := range r.memFiles {
+		_ = f.Close()
+		delete(r.memFiles, pid)
+	}
+}
+
+// openMem returns a cached /proc/pid/mem file handle, opening it on first access.
+// The cached fd keeps the mm_struct alive even after the process exits.
+func (r *FrameResolver) openMem(pid uint32) (*os.File, error) {
+	r.memMu.Lock()
+	defer r.memMu.Unlock()
+
+	if f, ok := r.memFiles[pid]; ok {
+		return f, nil
+	}
+
+	memPath := fmt.Sprintf("/proc/%d/mem", pid)
+	f, err := os.Open(memPath) // #nosec G304
+	if err != nil {
+		return nil, err
+	}
+	r.memFiles[pid] = f
+	return f, nil
+}
+
+// EagerOpenMem opens /proc/pid/mem proactively for a PID we expect to see
+// events from. Call this when discovering new worker PIDs to ensure the fd
+// is cached before the worker might die.
+func (r *FrameResolver) EagerOpenMem(pid uint32) {
+	_, _ = r.openMem(pid)
+}
+
+// logResolveFailure logs diagnostic info for frame resolution failures,
+// throttled to the first 10 messages.
+func (r *FrameResolver) logResolveFailure(format string, args ...any) {
+	count := atomic.AddInt32(&r.resolveLogCount, 1)
+	if count <= 10 {
+		fmt.Fprintf(os.Stderr, "rbscope: resolve: "+format+"\n", args...)
 	}
 }
 
@@ -82,12 +138,11 @@ func (r *FrameResolver) Resolve(pid uint32, iseqAddr uint64) (FrameInfo, error) 
 // Chain: iseq → body → location → {label, pathobj}
 // Each VALUE string is either embedded or heap-allocated.
 func (r *FrameResolver) resolveFromMem(pid uint32, iseqAddr uint64) (FrameInfo, error) {
-	memPath := fmt.Sprintf("/proc/%d/mem", pid)
-	f, err := os.Open(memPath) // #nosec G304
+	f, err := r.openMem(pid)
 	if err != nil {
-		return FrameInfo{}, fmt.Errorf("open %s: %w", memPath, err)
+		return FrameInfo{}, fmt.Errorf("open /proc/%d/mem: %w", pid, err)
 	}
-	defer func() { _ = f.Close() }()
+	// Do NOT close f — it's cached in memFiles
 
 	off := r.offsets
 	info := FrameInfo{}
@@ -129,7 +184,12 @@ func (r *FrameResolver) resolveFromMem(pid uint32, iseqAddr uint64) (FrameInfo, 
 	if err == nil && lineVal != 0 {
 		// Ruby fixnum: value is (n << 1) | 1
 		if lineVal&1 == 1 {
-			info.Line = uint32(lineVal >> 1) //nolint:gosec // line numbers fit in uint32
+			decoded := uint32(lineVal >> 1) //nolint:gosec // clamped to <1M below
+			// Sanity check: line numbers above 1M are almost certainly
+			// misinterpreted pointer values, not real line numbers.
+			if decoded > 0 && decoded < 1_000_000 {
+				info.Line = decoded
+			}
 		}
 	}
 
@@ -270,12 +330,10 @@ func (r *FrameResolver) ResolveClassName(pid uint32, selfVal uint64) string {
 	}
 
 	// Read klass from self (RBasic.klass at offset 8)
-	memPath := fmt.Sprintf("/proc/%d/mem", pid)
-	f, err := os.Open(memPath) // #nosec G304
+	f, err := r.openMem(pid)
 	if err != nil {
 		return ""
 	}
-	defer func() { _ = f.Close() }()
 
 	var klassVal uint64
 	if err := readUint64(f, selfVal+8, &klassVal); err != nil {
@@ -316,10 +374,131 @@ func (r *FrameResolver) ResolveClassName(pid uint32, selfVal uint64) string {
 const (
 	tIMEMO    = 0x1a // T_IMEMO
 	imemoMent = 6    // imemo_ment subtype
+	imemoIseq = 7    // imemo_iseq subtype
 	flUShift  = 12   // FL_USHIFT
 
 	idEntryUnit = 512 // Ruby's ID_ENTRY_UNIT for paged symbol table
 )
+
+// ResolveProfileFrame resolves a VALUE returned by rb_profile_frames.
+// These VALUEs are T_IMEMO objects — either imemo_iseq (Ruby methods) or
+// imemo_ment (C function method entries). The imemo subtype in bits 12-15
+// of the flags word determines which resolution path to use.
+//
+// For iseq frames: reuses Resolve() → iseq.body.location.{label, pathobj}
+// For cfunc frames: reads called_id from the method entry → symbol table
+func (r *FrameResolver) ResolveProfileFrame(pid uint32, frameVal uint64, line int32) FrameInfo {
+	if frameVal == 0 || frameVal&0x7 != 0 || frameVal < 0x1000 {
+		r.logResolveFailure("bad value 0x%x", frameVal)
+		return FrameInfo{}
+	}
+
+	// Check cache first — profile frame VALUEs are stable per method
+	key := frameKey{pid, frameVal}
+	r.mu.RLock()
+	if info, ok := r.cache[key]; ok {
+		r.mu.RUnlock()
+		// Override line with the actual call-site line from rb_profile_frames
+		if line > 0 && line < 1_000_000 {
+			info.Line = uint32(line)
+		}
+		return info
+	}
+	r.mu.RUnlock()
+
+	f, err := r.openMem(pid)
+	if err != nil {
+		r.logResolveFailure("open /proc/%d/mem: %v", pid, err)
+		return FrameInfo{}
+	}
+	// Do NOT close f — it's cached in memFiles
+	// Do NOT close f — it's cached in memFiles
+
+	// Read RBasic flags to determine imemo subtype
+	var flags uint64
+	if err := readUint64(f, frameVal, &flags); err != nil {
+		r.logResolveFailure("read flags at 0x%x: %v", frameVal, err)
+		return FrameInfo{}
+	}
+
+	// Must be T_IMEMO
+	if flags&0x1f != tIMEMO {
+		r.logResolveFailure("not T_IMEMO: flags=0x%x type=0x%x at 0x%x", flags, flags&0x1f, frameVal)
+		return FrameInfo{}
+	}
+
+	imemoType := (flags >> flUShift) & 0xf
+	var info FrameInfo
+
+	switch imemoType {
+	case imemoIseq:
+		// Raw iseq object — resolve via iseq.body.location
+		resolved, err := r.resolveFromMem(pid, frameVal)
+		if err != nil {
+			return FrameInfo{}
+		}
+		info = resolved
+		if line > 0 {
+			info.Line = uint32(line)
+		}
+
+	case imemoMent:
+		// Callable method entry (CME). In Ruby 4.0, rb_profile_frames returns
+		// CMEs for BOTH Ruby methods and C methods. We must check def->type
+		// to distinguish them:
+		//   VM_METHOD_TYPE_ISEQ (0) → Ruby method: follow def->body.iseq.iseqptr
+		//   VM_METHOD_TYPE_CFUNC (1) → C method: resolve via called_id
+		off := r.offsets
+
+		// Read def pointer from CME
+		var defPtr uint64
+		if err := readUint64(f, frameVal+uint64(off.MEDef), &defPtr); err != nil || defPtr == 0 {
+			return FrameInfo{}
+		}
+
+		// Read def->type (first byte, bitfield)
+		typeBuf := make([]byte, 1)
+		if _, err := f.ReadAt(typeBuf, int64(defPtr+uint64(off.DefType))); err != nil { //nolint:gosec // defPtr is a userspace address, always positive
+			return FrameInfo{}
+		}
+		defType := typeBuf[0] & 0x0f // lower nibble holds the method type
+
+		if defType == 0 { // VM_METHOD_TYPE_ISEQ
+			// Ruby method — read iseq pointer from def->body.iseq.iseqptr
+			var iseqPtr uint64
+			if err := readUint64(f, defPtr+uint64(off.DefBodyIseq), &iseqPtr); err != nil || iseqPtr == 0 {
+				return FrameInfo{}
+			}
+			// Resolve the iseq
+			resolved, err := r.resolveFromMem(pid, iseqPtr)
+			if err != nil {
+				return FrameInfo{}
+			}
+			info = resolved
+			if line > 0 {
+				info.Line = uint32(line)
+			}
+		} else {
+			// CFUNC or other method type — resolve via called_id
+			name := r.resolveCfuncFromME(pid, f, frameVal)
+			if name == "" {
+				name = "[cfunc]"
+			} else {
+				name = name + " [cfunc]"
+			}
+			info = FrameInfo{Label: name}
+		}
+
+	default:
+		return FrameInfo{}
+	}
+
+	r.mu.Lock()
+	r.cache[key] = info
+	r.mu.Unlock()
+
+	return info
+}
 
 // ResolveCfuncName reads the method name for a cfunc frame via ep[-2] → method entry → called_id.
 // The ep value comes from the BPF walker (carried in the pc field for cfunc frames).
@@ -336,14 +515,10 @@ func (r *FrameResolver) ResolveCfuncName(pid uint32, ep uint64) string {
 	}
 	r.cfuncMu.RUnlock()
 
-	memPath := fmt.Sprintf("/proc/%d/mem", pid)
-	f, err := os.Open(memPath) // #nosec G304
+	f, err := r.openMem(pid)
 	if err != nil {
 		return ""
 	}
-	defer func() { _ = f.Close() }()
-
-	off := r.offsets
 
 	// Read ep[-2] → method entry (or cref)
 	var meVal uint64
@@ -366,19 +541,27 @@ func (r *FrameResolver) ResolveCfuncName(pid uint32, ep uint64) string {
 		return ""
 	}
 
-	// Read called_id from method entry
-	var calledID uint64
-	if err := readUint64(f, meVal+uint64(off.MECalledID), &calledID); err != nil {
-		return ""
-	}
-
-	name := r.resolveID(pid, calledID)
+	name := r.resolveCfuncFromME(pid, f, meVal)
 
 	r.cfuncMu.Lock()
 	r.cfuncCache[key] = name
 	r.cfuncMu.Unlock()
 
 	return name
+}
+
+// resolveCfuncFromME reads the method name from a validated method entry (imemo_ment).
+// meVal must point to a T_IMEMO with imemo_ment subtype (caller validates).
+func (r *FrameResolver) resolveCfuncFromME(pid uint32, f *os.File, meVal uint64) string {
+	off := r.offsets
+
+	// Read called_id from method entry
+	var calledID uint64
+	if err := readUint64(f, meVal+uint64(off.MECalledID), &calledID); err != nil {
+		return ""
+	}
+
+	return r.resolveID(pid, calledID)
 }
 
 // resolveID converts a Ruby ID to a method name string using the global symbol table.
@@ -389,12 +572,10 @@ func (r *FrameResolver) resolveID(pid uint32, id uint64) string {
 		return ""
 	}
 
-	memPath := fmt.Sprintf("/proc/%d/mem", pid)
-	f, err := os.Open(memPath) // #nosec G304
+	f, err := r.openMem(pid)
 	if err != nil {
 		return ""
 	}
-	defer func() { _ = f.Close() }()
 
 	serial := id >> 3
 	pageIdx := serial / idEntryUnit

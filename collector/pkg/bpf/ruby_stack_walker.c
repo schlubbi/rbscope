@@ -2,7 +2,7 @@
 
 // rbscope BPF program: Ruby stack walker (zero-instrumentation mode)
 //
-// Walks the Ruby VM stack by reading process memory via bpf_probe_read_user.
+// Walks the Ruby VM stack by reading process memory via bpf_probe_read.
 // Triggered by perf_event (timer-based sampling). Does NOT require the
 // rbscope gem — works with any Ruby process that has DWARF debug info.
 //
@@ -16,7 +16,7 @@
 #include <bpf/bpf_core_read.h>
 
 // Maximum Ruby frames we'll walk per sample.
-#define MAX_RUBY_FRAMES 128
+#define MAX_RUBY_FRAMES 768
 
 // Event types
 #define EVENT_RUBY_SAMPLE 1
@@ -136,14 +136,14 @@ static __always_inline int walk_ruby_stack(
 
     // Read cfp from EC
     u64 cfp_ptr = 0;
-    if (bpf_probe_read_user(&cfp_ptr, sizeof(cfp_ptr), (void *)(ec + off->ec_cfp)) < 0)
+    if (bpf_probe_read(&cfp_ptr, sizeof(cfp_ptr), (void *)(ec + off->ec_cfp)) < 0)
         return 0;
 
     // Read vm_stack and vm_stack_size to compute end_cfp (stack boundary)
     u64 vm_stack = 0;
     u64 vm_stack_size = 0;
-    bpf_probe_read_user(&vm_stack, sizeof(vm_stack), (void *)(ec + off->ec_vm_stack));
-    bpf_probe_read_user(&vm_stack_size, sizeof(vm_stack_size), (void *)(ec + off->ec_vm_stack_size));
+    bpf_probe_read(&vm_stack, sizeof(vm_stack), (void *)(ec + off->ec_vm_stack));
+    bpf_probe_read(&vm_stack_size, sizeof(vm_stack_size), (void *)(ec + off->ec_vm_stack_size));
 
     // end_cfp is the sentinel CFP at the very bottom of the stack.
     // vm_stack_size is in VALUEs (8 bytes each). The CFPs grow downward
@@ -153,14 +153,14 @@ static __always_inline int walk_ruby_stack(
     // Walk frames: cfp starts at EC.cfp (top of stack, most recent frame)
     // and grows upward (toward end_cfp) to reach older frames.
     // We skip the first CFP (it's the dummy FINISH frame).
-    #pragma unroll
+    // Bounded loop — no #pragma unroll needed on kernel 5.3+ (verifier handles it).
     for (int i = 0; i < MAX_RUBY_FRAMES; i++) {
         if (cfp_ptr == 0 || cfp_ptr >= end_cfp)
             break;
 
         // Read iseq pointer from this CFP
         u64 iseq = 0;
-        if (bpf_probe_read_user(&iseq, sizeof(iseq),
+        if (bpf_probe_read(&iseq, sizeof(iseq),
                 (void *)(cfp_ptr + off->cfp_iseq)) < 0)
             break;
 
@@ -170,21 +170,21 @@ static __always_inline int walk_ruby_stack(
 
         // Read self (receiver) for class name resolution
         u64 self_val = 0;
-        bpf_probe_read_user(&self_val, sizeof(self_val),
+        bpf_probe_read(&self_val, sizeof(self_val),
             (void *)(cfp_ptr + off->cfp_self));
         event->frames[i].self_val = self_val;
 
         // Read PC for line number resolution (only meaningful for iseq frames)
         if (iseq != 0) {
             u64 pc = 0;
-            bpf_probe_read_user(&pc, sizeof(pc),
+            bpf_probe_read(&pc, sizeof(pc),
                 (void *)(cfp_ptr + off->cfp_pc));
             event->frames[i].pc = pc;
         } else {
             // For cfunc frames, carry EP in the pc field so Go can
             // resolve ep[-2] → method entry → called_id → method name
             u64 ep = 0;
-            bpf_probe_read_user(&ep, sizeof(ep),
+            bpf_probe_read(&ep, sizeof(ep),
                 (void *)(cfp_ptr + off->cfp_ep));
             event->frames[i].pc = ep;
         }

@@ -55,12 +55,18 @@ func computeGVLIntervals(changes []*pb.GVLStateChange, captureEndNs uint64) []*p
 		currentStart = change.TimestampNs
 	}
 
-	// Close the final interval
+	// Close the final interval. Cap its duration to avoid a misleading
+	// multi-second marker when the thread goes idle. Without a cap, the
+	// last interval stretches to captureEndNs — e.g., a STALLED that
+	// happens once at T=1s produces a 14s marker until T=15s, even though
+	// the thread is just idle waiting for a new request.
 	endNs := captureEndNs
 	if endNs == 0 || endNs < currentStart {
-		// No capture end or it's before our last event — use last event timestamp
-		// (produces a zero-width interval, which exporters can filter)
 		endNs = currentStart
+	}
+	const maxFinalIntervalNs = 500_000_000 // 500ms — any longer is likely idle, not real GVL contention
+	if endNs > currentStart+maxFinalIntervalNs {
+		endNs = currentStart + maxFinalIntervalNs
 	}
 	if endNs > currentStart {
 		intervals = append(intervals, &pb.GVLStateInterval{

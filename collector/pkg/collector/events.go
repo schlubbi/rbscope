@@ -71,6 +71,14 @@ type InlineFrame struct {
 	Line  uint32
 }
 
+// RawFrame represents a single frame from format v3 stack data.
+// Contains the raw VALUE pointer from rb_profile_frames (iseq or cme address)
+// and the line number. The collector resolves these via /proc/pid/mem.
+type RawFrame struct {
+	Value uint64
+	Line  int32
+}
+
 // RubySpanEvent marks a span transition (enter/exit) observed in the Ruby VM.
 type RubySpanEvent struct {
 	EventHeader
@@ -308,6 +316,26 @@ func ParseInlineStack(data []byte) []InlineFrame {
 		off += 4
 
 		frames = append(frames, InlineFrame{Label: label, Path: path, Line: line})
+	}
+	return frames
+}
+
+// ParseRawFrameStack parses format v3 raw frame stack data.
+// Format: [u8: version=3][u16: num_frames][per frame: u64 value + i32 line]
+// Returns nil if data is not format v3.
+func ParseRawFrameStack(data []byte) []RawFrame {
+	if len(data) < 3 || data[0] != 3 {
+		return nil
+	}
+	numFrames := int(binary.LittleEndian.Uint16(data[1:3]))
+	off := 3
+
+	frames := make([]RawFrame, 0, numFrames)
+	for i := 0; i < numFrames && off+12 <= len(data); i++ {
+		val := binary.LittleEndian.Uint64(data[off:])
+		line := int32(binary.LittleEndian.Uint32(data[off+8:])) //nolint:gosec // line numbers fit in int32
+		off += 12
+		frames = append(frames, RawFrame{Value: val, Line: line})
 	}
 	return frames
 }
@@ -643,10 +671,32 @@ func parseStackWalkEvent(data []byte) (*StackWalkEvent, error) {
 		ev.Frames = append(ev.Frames, frame)
 	}
 
+	// Trim trailing garbage frames past the valid stack bottom.
+	// The BPF walker can overshoot end_cfp by a few slots, producing
+	// frames with bogus iseq pointers (small values, instruction bytes).
+	// Walk backward from the end and drop frames whose iseq address
+	// is clearly not a valid heap pointer (< 0x1000 or not 8-byte aligned).
+	for len(ev.Frames) > 0 {
+		last := ev.Frames[len(ev.Frames)-1]
+		if last.IsCfunc {
+			// cfunc with iseq==0 is valid; but check if PC (ep) is sane
+			if last.PC < 0x1000 {
+				ev.Frames = ev.Frames[:len(ev.Frames)-1]
+				continue
+			}
+			break
+		}
+		if last.IseqAddr < 0x10000 || last.IseqAddr&0x7 != 0 {
+			ev.Frames = ev.Frames[:len(ev.Frames)-1]
+			continue
+		}
+		break
+	}
+
 	// Parse native stack IPs
 	// Native stack is at a fixed offset in the struct: after all MAX_RUBY_FRAMES frames
-	// MAX_RUBY_FRAMES = 128, each 24 bytes = 3072 bytes of frame data
-	nativeStart := stackWalkHeaderSize + 128*stackWalkFrameSize
+	// MAX_RUBY_FRAMES = 768, each 32 bytes = 24576 bytes of frame data
+	nativeStart := stackWalkHeaderSize + 768*stackWalkFrameSize
 	nativeBytes := int(ev.NativeStackLen)
 	if nativeStart+nativeBytes <= len(data) && nativeBytes > 0 {
 		numIPs := nativeBytes / 8

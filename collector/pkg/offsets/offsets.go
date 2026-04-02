@@ -50,9 +50,10 @@ type RubyOffsets struct {
 	ClassClasspath uint32 // absolute offset from class VALUE to classext.classpath
 
 	// Method entry (rb_callable_method_entry_t)
-	MECalledID uint32 // offset of called_id in method entry struct
-	MEDef      uint32 // offset of def pointer in method entry struct
-	DefType    uint32 // offset of type in rb_method_definition_struct
+	MECalledID  uint32 // offset of called_id in method entry struct
+	MEDef       uint32 // offset of def pointer in method entry struct
+	DefType     uint32 // offset of type in rb_method_definition_struct
+	DefBodyIseq uint32 // offset of body.iseq.iseqptr in rb_method_definition_struct
 
 	// Symbol table
 	GlobalSymbolsAddr uint64 // address of ruby_global_symbols in libruby

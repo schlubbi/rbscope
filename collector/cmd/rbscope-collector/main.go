@@ -44,13 +44,14 @@ var (
 
 // capture flags
 var (
-	flagCapturePID      uint32
-	flagCaptureDuration time.Duration
-	flagCaptureOutput   string
-	flagCaptureBPFObj   string
-	flagCaptureFormat   string
-	flagCaptureMode     string
-	flagCaptureRubyPath string
+	flagCapturePID          uint32
+	flagCaptureDuration     time.Duration
+	flagCaptureOutput       string
+	flagCaptureBPFObj       string
+	flagCaptureFormat       string
+	flagCaptureMode         string
+	flagCaptureRubyPath     string
+	flagCapturePyroscopeURL string
 )
 
 func main() {
@@ -98,10 +99,11 @@ func captureCmd() *cobra.Command {
 	f.Uint32Var(&flagCapturePID, "pid", 0, "Target PID (required)")
 	f.DurationVar(&flagCaptureDuration, "duration", 10*time.Second, "Capture duration")
 	f.StringVar(&flagCaptureOutput, "output", "capture.pb", "Output file path")
-	f.StringVar(&flagCaptureFormat, "format", "pb", "Output format: pb (protobuf), gecko (Firefox Profiler JSON), or csv (DuckDB-ready)")
+	f.StringVar(&flagCaptureFormat, "format", "pb", "Output format: pb, gecko, csv, or pyroscope")
 	f.StringVar(&flagCaptureBPFObj, "bpf-obj", "", "Path to compiled BPF ELF object")
 	f.StringVar(&flagCaptureMode, "mode", "gem", "Profiling mode: gem (USDT probes) or bpf (zero-instrumentation)")
 	f.StringVar(&flagCaptureRubyPath, "ruby-path", "", "Path to libruby.so with DWARF (required for --mode=bpf)")
+	f.StringVar(&flagCapturePyroscopeURL, "pyroscope-url", "http://localhost:4040", "Pyroscope server URL (for --format=pyroscope)")
 	_ = cmd.MarkFlagRequired("pid")
 
 	return cmd
@@ -192,8 +194,8 @@ func runCapture(_ *cobra.Command, _ []string) error {
 	var tb *timeline.Builder
 
 	switch flagCaptureFormat {
-	case "gecko", "csv":
-		// Both formats: accumulate into timeline builder, export at end.
+	case "gecko", "csv", "pyroscope":
+		// Timeline-based formats: accumulate into timeline builder, export at end.
 		hostname, _ := os.Hostname()
 		tb = timeline.NewBuilder("capture", hostname, flagCapturePID, 99)
 		// Set up symbol resolver for native stack resolution
@@ -212,7 +214,7 @@ func runCapture(_ *cobra.Command, _ []string) error {
 		defer func() { _ = fe.Close() }()
 		exporters = append(exporters, fe)
 	default:
-		return fmt.Errorf("unknown format: %q (use pb, gecko, or csv)", flagCaptureFormat)
+		return fmt.Errorf("unknown format: %q (use pb, gecko, csv, or pyroscope)", flagCaptureFormat)
 	}
 
 	cfg := collector.Config{
@@ -222,6 +224,7 @@ func runCapture(_ *cobra.Command, _ []string) error {
 	}
 
 	var bpfProg collector.BPFProgram
+	var sw *bpf.StackWalkerBPF // hoisted for post-AttachPID PID mapping
 	switch flagCaptureMode {
 	case "gem":
 		realBPF, err := bpf.NewRealBPF(flagCaptureBPFObj)
@@ -229,6 +232,34 @@ func runCapture(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("create BPF program: %w", err)
 		}
 		bpfProg = realBPF
+
+		// Set up frame resolver for v3 alloc stack data (raw frame VALUEs).
+		// Discover libruby and extract DWARF offsets, same as BPF mode.
+		if tb != nil {
+			rubyPath := flagCaptureRubyPath
+			if rubyPath == "" {
+				info, err := offsets.FindLibruby(flagCapturePID)
+				if err == nil {
+					rubyPath = info.HostPath
+				}
+			}
+			if rubyPath != "" {
+				rubyOffsets, err := offsets.ExtractFromDWARF(rubyPath)
+				if err == nil {
+					// Adjust symbol addresses to runtime addresses
+					info, err := offsets.FindLibruby(flagCapturePID)
+					if err == nil {
+						rubyOffsets.VMPtrSymAddr += info.BaseAddr
+						rubyOffsets.GlobalSymbolsAddr += info.BaseAddr
+					}
+					tb.SetFrameResolver(offsets.NewFrameResolver(rubyOffsets))
+					logger.Info("frame resolver ready for gem mode alloc tracking", "ruby", rubyPath)
+				} else {
+					logger.Warn("could not extract Ruby offsets for alloc frame resolution", "err", err)
+				}
+			}
+		}
+
 	case "bpf":
 		rubyPath := flagCaptureRubyPath
 		if rubyPath == "" {
@@ -240,7 +271,8 @@ func runCapture(_ *cobra.Command, _ []string) error {
 			rubyPath = info.HostPath
 			logger.Info("auto-discovered libruby", "path", rubyPath)
 		}
-		sw, err := bpf.NewStackWalkerBPF(rubyPath, 99)
+		var err error
+		sw, err = bpf.NewStackWalkerBPF(rubyPath, 99)
 		if err != nil {
 			return fmt.Errorf("create stack walker: %w", err)
 		}
@@ -249,8 +281,30 @@ func runCapture(_ *cobra.Command, _ []string) error {
 		if tb != nil {
 			tb.SetFrameResolver(offsets.NewFrameResolver(sw.Offsets()))
 		}
+
+	case "combined":
+		rubyPath := flagCaptureRubyPath
+		if rubyPath == "" {
+			info, err := offsets.FindLibruby(flagCapturePID)
+			if err != nil {
+				return fmt.Errorf("auto-discover libruby for pid %d: %w (use --ruby-path)", flagCapturePID, err)
+			}
+			rubyPath = info.HostPath
+			logger.Info("auto-discovered libruby", "path", rubyPath)
+		}
+		combined, err := bpf.NewCombinedBPF(flagCaptureBPFObj, rubyPath, 99)
+		if err != nil {
+			return fmt.Errorf("create combined BPF: %w", err)
+		}
+		bpfProg = combined
+		sw = combined.Walker()
+		if tb != nil {
+			tb.SetFrameResolver(offsets.NewFrameResolver(sw.Offsets()))
+		}
+		logger.Info("combined mode: BPF CPU sampling + gem alloc/GVL tracking")
+
 	default:
-		return fmt.Errorf("unknown mode: %q (use gem or bpf)", flagCaptureMode)
+		return fmt.Errorf("unknown mode: %q (use gem, bpf, or combined)", flagCaptureMode)
 	}
 
 	c := collector.New(cfg, bpfProg)
@@ -258,21 +312,65 @@ func runCapture(_ *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), flagCaptureDuration)
 	defer cancel()
 
+	// Handle SIGTERM/SIGINT gracefully — cancel context so we reach the
+	// export phase below. Without this, `timeout` or Ctrl-C kills the
+	// process before the profile is written.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		cancel()
+	}()
+
 	if err := c.Start(ctx); err != nil {
 		return err
 	}
-	defer func() { _ = c.Stop() }()
+
+	// Register PID namespace mappings BEFORE attaching (events flow immediately
+	// after AttachPID, so mappings must be ready first).
+	// BPF/combined mode: stack walker discovers mappings during its own AttachPID.
+	// We register them after AttachPID below.
+	if tb != nil && sw == nil {
+		// Gem mode: discover host PID for the target process and all siblings
+		// before events start flowing.
+		hostPID, err := bpf.DiscoverHostPID(flagCapturePID)
+		if err == nil && hostPID != flagCapturePID {
+			tb.SetHostToContainerPID(hostPID, flagCapturePID)
+			logger.Info("PID namespace detected (gem mode)", "container", flagCapturePID, "host", hostPID)
+		}
+	}
+	// Set up lazy PID discoverer for dynamically forked workers.
+	// Needed in both gem and combined modes (any mode with alloc tracking).
+	if tb != nil {
+		ppid := readPPID(flagCapturePID)
+		tb.SetPIDDiscoverer(func(hostPID uint32) (uint32, bool) {
+			return findContainerPIDForHost(hostPID, ppid)
+		})
+	}
 
 	if err := c.AttachPID(flagCapturePID); err != nil {
 		return err
 	}
 
+	// BPF mode: register mappings after stack walker's AttachPID discovers them.
+	if tb != nil && sw != nil {
+		for containerPID, hostPID := range sw.PIDMapping() {
+			tb.SetHostToContainerPID(hostPID, containerPID)
+		}
+	}
+
 	// Also add sibling processes to the I/O tracer's target_pids map.
 	// Pitchfork forks worker processes that inherit the uprobe but have
 	// different PIDs. The I/O tracepoints need all PIDs in the filter.
-	attachSiblingPIDs(c, flagCapturePID, logger)
+	attachSiblingPIDs(c, flagCapturePID, logger, tb)
 
 	<-ctx.Done()
+
+	// Stop the collector event loop before accessing the builder.
+	// The event loop goroutine ingests into the builder's maps — we must
+	// ensure it has exited before reading those maps to avoid concurrent
+	// map read/write panics.
+	_ = c.Stop()
 
 	// For timeline-based formats, build the capture and export.
 	if tb != nil {
@@ -288,6 +386,7 @@ func runCapture(_ *cobra.Command, _ []string) error {
 		}
 
 		capture := tb.Build()
+		tb.CloseFrameResolver() // release cached /proc/pid/mem fds
 		switch flagCaptureFormat {
 		case "gecko":
 			if err := gecko.Export(capture, flagCaptureOutput); err != nil {
@@ -299,6 +398,29 @@ func runCapture(_ *cobra.Command, _ []string) error {
 				return fmt.Errorf("export csv: %w", err)
 			}
 			logger.Info("csv export complete", "output", flagCaptureOutput)
+		case "pyroscope":
+			pyro := export.NewPyroscopeExporter(export.PyroscopeConfig{
+				ServerURL: flagCapturePyroscopeURL,
+				AppName:   "rbscope.cpu",
+			})
+			cpuProf := export.CaptureToProfile(capture)
+			cpuProf.DurationNanos = flagCaptureDuration.Nanoseconds()
+			cpuProf.TimeNanos = time.Now().UnixNano()
+			if err := pyro.Push(context.Background(), cpuProf); err != nil {
+				return fmt.Errorf("push cpu profile to pyroscope: %w", err)
+			}
+			logger.Info("pushed cpu profile to pyroscope", "url", flagCapturePyroscopeURL)
+
+			allocProf := export.CaptureToAllocProfile(capture)
+			if allocProf != nil {
+				allocProf.DurationNanos = flagCaptureDuration.Nanoseconds()
+				allocProf.TimeNanos = time.Now().UnixNano()
+				if err := pyro.PushWithName(context.Background(), allocProf, "rbscope.alloc"); err != nil {
+					logger.Warn("push alloc profile to pyroscope failed", "err", err)
+				} else {
+					logger.Info("pushed alloc profile to pyroscope", "url", flagCapturePyroscopeURL)
+				}
+			}
 		}
 	}
 
@@ -323,7 +445,7 @@ func (e *timelineExporter) Close() error                  { return nil }
 // target PID and have rbscope.so loaded, then adds them to the I/O tracer's
 // target_pids map. This is needed because Pitchfork forks workers that
 // inherit the uprobe but the I/O tracepoints need explicit PID filtering.
-func attachSiblingPIDs(c *collector.Collector, targetPID uint32, logger *slog.Logger) {
+func attachSiblingPIDs(c *collector.Collector, targetPID uint32, logger *slog.Logger, tb *timeline.Builder) {
 	// Read target's PPID
 	ppid := readPPID(targetPID)
 	if ppid == 0 {
@@ -350,6 +472,13 @@ func attachSiblingPIDs(c *collector.Collector, targetPID uint32, logger *slog.Lo
 			} else {
 				logger.Info("attached sibling worker", "pid", pid)
 			}
+			// Register PID namespace mapping for frame resolution
+			if tb != nil {
+				hostPID, err := bpf.DiscoverHostPID(uint32(pid))
+				if err == nil && hostPID != uint32(pid) {
+					tb.SetHostToContainerPID(hostPID, uint32(pid))
+				}
+			}
 		}
 	}
 }
@@ -369,6 +498,32 @@ func readPPID(pid uint32) uint32 {
 		}
 	}
 	return 0
+}
+
+// findContainerPIDForHost scans /proc for a sibling process whose host PID
+// (discovered via BPF) matches the given hostPID. Returns the container PID.
+// This handles dynamically forked workers in PID namespace environments.
+func findContainerPIDForHost(hostPID, ppid uint32) (uint32, bool) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0, false
+	}
+	for _, e := range entries {
+		pid, err := strconv.ParseUint(e.Name(), 10, 32)
+		if err != nil {
+			continue
+		}
+		containerPID := uint32(pid)
+		// Only check siblings (same parent) to limit BPF calls
+		if ppid != 0 && readPPID(containerPID) != ppid {
+			continue
+		}
+		discovered, err := bpf.DiscoverHostPID(containerPID)
+		if err == nil && discovered == hostPID {
+			return containerPID, true
+		}
+	}
+	return 0, false
 }
 
 func hasRbscopeLoaded(pid uint32) bool {
@@ -400,6 +555,24 @@ func buildExporters(logger *slog.Logger) ([]collector.Exporter, error) {
 				if resolver, err := symbols.NewResolver(flagPID); err == nil {
 					tb.SetResolver(resolver)
 					logger.Info("native stack resolution enabled", "pid", flagPID)
+				}
+				// Set up frame resolver for v3 alloc stack resolution.
+				// The gem sends raw VALUE pointers that need iseq chain
+				// reads from /proc/pid/mem to resolve method names.
+				info, findErr := offsets.FindLibruby(flagPID)
+				if findErr == nil {
+					rubyOffsets, dwarfErr := offsets.ExtractFromDWARF(info.HostPath)
+					if dwarfErr == nil {
+						rubyOffsets.VMPtrSymAddr += info.BaseAddr
+						rubyOffsets.GlobalSymbolsAddr += info.BaseAddr
+						tb.SetFrameResolver(offsets.NewFrameResolver(rubyOffsets))
+						logger.Info("frame resolver enabled for pyroscope", "ruby", info.HostPath)
+					}
+				}
+				// PID namespace discovery for /proc/pid/mem access
+				if hostPID, err := bpf.DiscoverHostPID(flagPID); err == nil && hostPID != flagPID {
+					tb.SetHostToContainerPID(hostPID, flagPID)
+					logger.Info("PID namespace detected (pyroscope)", "container", flagPID, "host", hostPID)
 				}
 			}
 			exporters = append(exporters, export.NewBuilderPyroscopeExporter(export.BuilderPyroscopeConfig{

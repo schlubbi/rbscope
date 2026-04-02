@@ -36,6 +36,19 @@ type Builder struct {
 	idleClassifier *IdleClassifier
 	resolver       *symbols.Resolver      // for native stack symbol resolution
 	frameResolver  *offsets.FrameResolver // for BPF stack walker iseq resolution
+
+	// hostToContainerPID maps host PIDs (from BPF events) back to container
+	// PIDs (visible in /proc) for PID-namespace environments.
+	hostToContainerPID map[uint32]uint32
+
+	// pidDiscoverer, when set, maps a host PID (from BPF events) to its
+	// container PID (visible in /proc). Used to discover PID namespace
+	// mappings for dynamically forked workers. The function is provided
+	// by the caller (e.g., bpf.DiscoverHostPID reversed).
+	pidDiscoverer func(hostPID uint32) (containerPID uint32, ok bool)
+
+	allocResolveLogCount int                 // throttle diagnostic log messages
+	seenPIDs             map[uint32]struct{} // PIDs we've eagerly opened mem for
 }
 
 // NewBuilder creates a Builder for a new capture window.
@@ -53,6 +66,7 @@ func NewBuilder(service, hostname string, pid, frequencyHz uint32) *Builder {
 		hostname:        hostname,
 		frequency:       frequencyHz,
 		idleClassifier:  NewIdleClassifier(),
+		seenPIDs:        make(map[uint32]struct{}),
 	}
 }
 
@@ -68,6 +82,49 @@ func (b *Builder) SetFrameResolver(r *offsets.FrameResolver) {
 	b.frameResolver = r
 }
 
+// CloseFrameResolver releases cached /proc/pid/mem file handles.
+func (b *Builder) CloseFrameResolver() {
+	if b.frameResolver != nil {
+		b.frameResolver.Close()
+	}
+}
+
+// SetPIDDiscoverer registers a function that resolves host PIDs to container
+// PIDs for dynamically forked workers. Called lazily when a new PID is seen.
+func (b *Builder) SetPIDDiscoverer(fn func(hostPID uint32) (containerPID uint32, ok bool)) {
+	b.pidDiscoverer = fn
+}
+
+// discoverPIDMapping checks if the given PID needs host→container mapping.
+// If /proc/<pid> doesn't exist and a pidDiscoverer is set, it tries to
+// find the container PID by scanning /proc for sibling processes.
+func (b *Builder) discoverPIDMapping(hostPID uint32) {
+	if _, ok := b.hostToContainerPID[hostPID]; ok {
+		return // already mapped
+	}
+	// Check if /proc/<hostPID> exists — if so, no mapping needed
+	if _, err := os.Stat(fmt.Sprintf("/proc/%d", hostPID)); err == nil {
+		return
+	}
+	// PID doesn't exist in our namespace — try the discoverer
+	if b.pidDiscoverer != nil {
+		if containerPID, ok := b.pidDiscoverer(hostPID); ok {
+			b.SetHostToContainerPID(hostPID, containerPID)
+			fmt.Fprintf(os.Stderr, "rbscope: discovered PID mapping: host %d → container %d\n", hostPID, containerPID)
+		}
+	}
+}
+
+// SetHostToContainerPID registers a host→container PID mapping so the
+// frame resolver reads /proc/<containerPID>/mem instead of the host PID
+// that BPF events carry. Required when running inside a PID namespace.
+func (b *Builder) SetHostToContainerPID(hostPID, containerPID uint32) {
+	if b.hostToContainerPID == nil {
+		b.hostToContainerPID = make(map[uint32]uint32)
+	}
+	b.hostToContainerPID[hostPID] = containerPID
+}
+
 // Ingest processes a decoded BPF event, routing it to the correct thread.
 // Events from PIDs other than the target are silently dropped (handles
 // Ingest processes a decoded BPF event, routing it to the correct thread.
@@ -77,11 +134,60 @@ func (b *Builder) Ingest(event any) {
 	case *collector.RubyAllocEvent:
 		b.ensureThreadName(ev.TID, ev.PID)
 		tb := b.thread(ev.TID)
-		frames := collector.ParseInlineStack(ev.StackData)
-		frameIDs := make([]uint32, 0, len(frames))
 
-		for _, f := range frames {
-			frameIDs = append(frameIDs, b.frames.Intern(f.Label, f.Path, f.Line))
+		// Eagerly open /proc/pid/mem on first sight of a new PID.
+		// The cached fd keeps the address space alive even after worker death.
+		if _, seen := b.seenPIDs[ev.PID]; !seen && b.frameResolver != nil {
+			b.seenPIDs[ev.PID] = struct{}{}
+			// For PID namespace environments: discover the container PID
+			// for this host PID so /proc access works.
+			b.discoverPIDMapping(ev.PID)
+			// Open mem with the (possibly mapped) PID
+			pid := ev.PID
+			if mapped, ok := b.hostToContainerPID[ev.PID]; ok {
+				pid = mapped
+			}
+			b.frameResolver.EagerOpenMem(pid)
+		}
+
+		var frameIDs []uint32
+
+		// Try format v3 (raw frame addresses) first, fall back to v2 (inline strings).
+		rawFrames := collector.ParseRawFrameStack(ev.StackData)
+		if rawFrames != nil && b.frameResolver != nil {
+			// Format v3: resolve raw VALUE pointers via /proc/pid/mem.
+			// This is the low-overhead path — the gem sent raw rb_profile_frames
+			// VALUEs instead of resolved strings.
+			procPID := ev.PID
+			if mapped, ok := b.hostToContainerPID[ev.PID]; ok {
+				procPID = mapped
+			}
+			frameIDs = make([]uint32, 0, len(rawFrames))
+			for i, rf := range rawFrames {
+				info := b.frameResolver.ResolveProfileFrame(procPID, rf.Value, rf.Line)
+				if info.Label == "" {
+					if b.allocResolveLogCount < 5 {
+						b.allocResolveLogCount++
+						fmt.Fprintf(os.Stderr, "rbscope: alloc frame resolve failed: pid=%d frame[%d] value=0x%x line=%d (total frames=%d)\n",
+							procPID, i, rf.Value, rf.Line, len(rawFrames))
+					}
+					continue // skip unresolvable frames
+				}
+				path := shortenRubyPath(info.Path)
+				frameIDs = append(frameIDs, b.frames.Intern(info.Label, path, info.Line))
+			}
+		} else if rawFrames == nil && len(ev.StackData) > 0 {
+			if b.allocResolveLogCount < 3 {
+				b.allocResolveLogCount++
+				fmt.Fprintf(os.Stderr, "rbscope: alloc stack not v3: first byte=%d len=%d resolver=%v\n",
+					ev.StackData[0], len(ev.StackData), b.frameResolver != nil)
+			}
+			// Format v2 fallback: inline strings already resolved by the gem.
+			frames := collector.ParseInlineStack(ev.StackData)
+			frameIDs = make([]uint32, 0, len(frames))
+			for _, f := range frames {
+				frameIDs = append(frameIDs, b.frames.Intern(f.Label, f.Path, f.Line))
+			}
 		}
 
 		alloc := &pb.AllocationSample{
@@ -94,6 +200,15 @@ func (b *Builder) Ingest(event any) {
 
 	case *collector.RubySampleEvent:
 		b.ensureThreadName(ev.TID, ev.PID)
+		if _, seen := b.seenPIDs[ev.PID]; !seen && b.frameResolver != nil {
+			b.seenPIDs[ev.PID] = struct{}{}
+			b.discoverPIDMapping(ev.PID)
+			pid := ev.PID
+			if mapped, ok := b.hostToContainerPID[ev.PID]; ok {
+				pid = mapped
+			}
+			b.frameResolver.EagerOpenMem(pid)
+		}
 		tb := b.thread(ev.TID)
 		frames := collector.ParseInlineStack(ev.StackData)
 		frameIDs := make([]uint32, 0, len(frames)+len(ev.NativeStackIPs))
@@ -184,6 +299,7 @@ func (b *Builder) Ingest(event any) {
 		tb.gvlEvents = append(tb.gvlEvents, gvlEvent)
 
 	case *collector.GVLStateChangeEvent:
+		b.ensureThreadName(ev.TID, ev.PID)
 		tb := b.thread(ev.TID)
 		tb.gvlStateChanges = append(tb.gvlStateChanges, &pb.GVLStateChange{
 			TimestampNs: ev.TimestampNs,
@@ -191,19 +307,40 @@ func (b *Builder) Ingest(event any) {
 		})
 
 	case *collector.GVLStackEvent:
+		b.ensureThreadName(ev.TID, ev.PID)
 		// Store all Ruby stacks captured at GVL SUSPENDED for this TID.
 		// They're correlated with I/O events by timestamp during Build().
 		b.suspendedStacks[ev.TID] = append(b.suspendedStacks[ev.TID], ev)
 
 	case *collector.StackWalkEvent:
+		b.ensureThreadName(ev.TID, ev.PID)
+		if _, seen := b.seenPIDs[ev.PID]; !seen && b.frameResolver != nil {
+			b.seenPIDs[ev.PID] = struct{}{}
+			b.discoverPIDMapping(ev.PID)
+			pid := ev.PID
+			if mapped, ok := b.hostToContainerPID[ev.PID]; ok {
+				pid = mapped
+			}
+			b.frameResolver.EagerOpenMem(pid)
+		}
 		// BPF stack walker event — resolve iseq addresses to method/path/line.
 		if b.frameResolver == nil {
 			break
 		}
+		// In PID namespaces, BPF events carry host PIDs but /proc uses
+		// container PIDs. Translate for all /proc/pid/mem reads.
+		procPID := ev.PID
+		if mapped, ok := b.hostToContainerPID[ev.PID]; ok {
+			procPID = mapped
+		}
 		b.ensureThreadName(ev.TID, ev.PID)
 		tb := b.thread(ev.TID)
 
-		frameIDs := make([]uint32, 0, len(ev.Frames))
+		type resolvedFrame struct {
+			id       uint32
+			resolved bool // true if we got a real label (not [unknown]/[cfunc]-only)
+		}
+		resolved := make([]resolvedFrame, 0, len(ev.Frames))
 		for _, frame := range ev.Frames {
 			if frame.IsCfunc || frame.IseqAddr == 0 {
 				// For cfunc frames, PC carries EP (set by BPF walker).
@@ -211,23 +348,27 @@ func (b *Builder) Ingest(event any) {
 				cfuncName := ""
 				className := ""
 				if b.frameResolver != nil {
-					cfuncName = b.frameResolver.ResolveCfuncName(ev.PID, frame.PC)
-					className = b.frameResolver.ResolveClassName(ev.PID, frame.SelfVal)
+					cfuncName = b.frameResolver.ResolveCfuncName(procPID, frame.PC)
+					className = b.frameResolver.ResolveClassName(procPID, frame.SelfVal)
 				}
 				label := "[cfunc]"
+				ok := false
 				if className != "" && cfuncName != "" {
 					label = className + "#" + cfuncName
+					ok = true
 				} else if className != "" {
 					label = className + " [cfunc]"
+					ok = true
 				} else if cfuncName != "" {
 					label = cfuncName + " [cfunc]"
+					ok = true
 				}
-				frameIDs = append(frameIDs, b.frames.Intern(label, "", 0))
+				resolved = append(resolved, resolvedFrame{b.frames.Intern(label, "", 0), ok})
 				continue
 			}
-			info, err := b.frameResolver.Resolve(ev.PID, frame.IseqAddr)
+			info, err := b.frameResolver.Resolve(procPID, frame.IseqAddr)
 			if err != nil {
-				frameIDs = append(frameIDs, b.frames.Intern("[unknown]", "", 0))
+				resolved = append(resolved, resolvedFrame{b.frames.Intern("[unknown]", "", 0), false})
 				continue
 			}
 			label := info.Label
@@ -238,7 +379,7 @@ func (b *Builder) Ingest(event any) {
 
 			// Resolve class name from cfp->self for qualified method names.
 			// e.g. "call" → "Rack::Logger#call"
-			className := b.frameResolver.ResolveClassName(ev.PID, frame.SelfVal)
+			className := b.frameResolver.ResolveClassName(procPID, frame.SelfVal)
 			if className != "" {
 				label = className + "#" + label
 			} else if ambiguousNames[label] && path != "" {
@@ -246,7 +387,18 @@ func (b *Builder) Ingest(event any) {
 				label = label + " [" + pathStem(path) + "]"
 			}
 
-			frameIDs = append(frameIDs, b.frames.Intern(label, path, info.Line))
+			resolved = append(resolved, resolvedFrame{b.frames.Intern(label, path, info.Line), true})
+		}
+
+		// Trim trailing unresolved frames — the BPF walker can overshoot
+		// end_cfp by a few slots, producing garbage frames at the stack bottom.
+		for len(resolved) > 0 && !resolved[len(resolved)-1].resolved {
+			resolved = resolved[:len(resolved)-1]
+		}
+
+		frameIDs := make([]uint32, len(resolved))
+		for i, rf := range resolved {
+			frameIDs[i] = rf.id
 		}
 
 		// Resolve native stack IPs
@@ -489,8 +641,25 @@ func shouldFilterNativeFrame(funcName, libPath string, isRubyVM bool) bool {
 	if funcName == "" {
 		return true
 	}
-	// rbscope's own USDT probe functions
+	// Unresolved raw addresses (no mapping found) — these appear as "0x..."
+	// and create noise at the stack root.
+	if strings.HasPrefix(funcName, "0x") {
+		return true
+	}
+	// Library+offset unresolved frames — partially resolved (library name known
+	// but symbol unknown). Appear as "libname+0xNNNN" or "/path/to/lib.so+0xNNNN".
+	if strings.Contains(funcName, "+0x") {
+		return true
+	}
+	// rbscope's own USDT probe functions and Rust internals
 	if strings.HasPrefix(funcName, "__rbscope_probe_") {
+		return true
+	}
+	if strings.Contains(libPath, "rbscope.so") {
+		return true
+	}
+	// uprobe trampolines — BPF infrastructure, not application code
+	if strings.HasPrefix(funcName, "[uprobes]") || strings.Contains(libPath, "[uprobes]") {
 		return true
 	}
 	// JIT-compiled Ruby code — anonymous memory regions from the JIT compiler.
@@ -502,6 +671,13 @@ func shouldFilterNativeFrame(funcName, libPath string, isRubyVM bool) bool {
 	}
 	// Process startup frames (ld-linux, _start) — noise at bottom of stack
 	if funcName == "_start" || strings.HasPrefix(funcName, "_dl_") {
+		return true
+	}
+	// C runtime and allocator internals below the Ruby entry point
+	if funcName == "free" || funcName == "malloc" || funcName == "calloc" || funcName == "realloc" {
+		return true
+	}
+	if funcName == "clock_gettime" || funcName == "__clock_gettime" {
 		return true
 	}
 	return false

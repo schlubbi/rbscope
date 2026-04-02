@@ -56,7 +56,7 @@ type stackwalkerStackWalkerEvent struct {
 	ThreadId       uint64
 	NativeStackLen uint32
 	Pad            uint32
-	Frames         [128]struct {
+	Frames         [768]struct {
 		_        structs.HostLayout
 		IseqAddr uint64
 		Pc       uint64

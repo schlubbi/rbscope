@@ -362,7 +362,11 @@ func (tb *threadBuilder) internFrame(rbFrameIdx uint32) int {
 	// line number means each callsite gets its own Call Tree node.
 	label := funcName
 	if fileName != "" {
-		label = fmt.Sprintf("%s (%s:%d)", funcName, fileName, frame.LineNumber)
+		if frame.LineNumber > 0 {
+			label = fmt.Sprintf("%s (%s:%d)", funcName, fileName, frame.LineNumber)
+		} else {
+			label = fmt.Sprintf("%s (%s)", funcName, fileName)
+		}
 	}
 
 	// Frame dedup key — with real line numbers in the location string,
@@ -919,6 +923,8 @@ func threadStateLabel(s pb.ThreadState) string {
 // --- Default categories and marker schemas ---
 
 func defaultCategories() []Category {
+	// Color names must match Firefox Profiler's palette:
+	// transparent, blue, green, grey, lightblue, magenta, orange, purple, red, yellow
 	return []Category{
 		{Name: "Other", Color: "grey", Subcategories: []string{"Other"}},
 		{Name: "App", Color: "green", Subcategories: []string{"Controller", "Model", "Job", "Mailer", "View"}},
@@ -929,10 +935,10 @@ func defaultCategories() []Category {
 		{Name: "Native", Color: "blue", Subcategories: []string{"C Extension", "System Library"}},
 		{Name: "I/O", Color: "orange", Subcategories: []string{"Network", "File"}},
 		{Name: "GVL", Color: "magenta", Subcategories: []string{"Wait"}},
-		{Name: "GC", Color: "brown", Subcategories: []string{"GC"}},
-		{Name: "OTel", Color: "lightgreen", Subcategories: []string{"Span"}},
+		{Name: "GC", Color: "red", Subcategories: []string{"GC"}},
+		{Name: "OTel", Color: "lightblue", Subcategories: []string{"Span"}},
 		{Name: "Idle", Color: "grey", Subcategories: []string{"Idle"}},
-		{Name: "Alloc", Color: "darkgreen", Subcategories: []string{"Allocation"}},
+		{Name: "Alloc", Color: "green", Subcategories: []string{"Allocation"}},
 	}
 }
 

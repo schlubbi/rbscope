@@ -140,6 +140,23 @@ func TestComputeGVLIntervals_NoCaptureEnd(t *testing.T) {
 	assertInterval(t, intervals[0], 1000, 5000, pb.GVLState_GVL_STATE_RUNNING)
 }
 
+func TestComputeGVLIntervals_FinalIntervalCapped(t *testing.T) {
+	// When the last GVL state persists until capture end (e.g., thread goes idle),
+	// the final interval should be capped to 500ms to avoid a misleading multi-second marker.
+	changes := []*pb.GVLStateChange{
+		{TimestampNs: 1_000_000_000, State: pb.GVLState_GVL_STATE_STALLED},
+	}
+
+	// Capture end is 15s after start — without the cap, the interval would be 14s.
+	intervals := computeGVLIntervals(changes, 15_000_000_000)
+
+	if len(intervals) != 1 {
+		t.Fatalf("expected 1 interval, got %d", len(intervals))
+	}
+	// Should be capped at 500ms (500_000_000 ns) from the start
+	assertInterval(t, intervals[0], 1_000_000_000, 1_500_000_000, pb.GVLState_GVL_STATE_STALLED)
+}
+
 func assertInterval(t *testing.T, iv *pb.GVLStateInterval, startNs, endNs uint64, state pb.GVLState) {
 	t.Helper()
 	if iv.StartNs != startNs {

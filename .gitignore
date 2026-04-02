@@ -33,3 +33,9 @@ test-rails-app/Gemfile.lock
 test-rails-app/db/schema.rb
 collector/rbscope-collector
 /profiles/
+
+# Profile output files (prevent accidental commits)
+# Blanket-ignore all JSON except known config files
+*.json
+!.devcontainer/devcontainer.json
+*.pb

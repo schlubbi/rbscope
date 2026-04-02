@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/schlubbi/rbscope/collector/pkg/collector"
@@ -36,6 +37,8 @@ type StackWalkerBPF struct {
 	schedReader *ringbuf.Reader
 	schedLinks  []link.Link
 	readToggle  int
+	// pidMapping tracks container PID → host PID for namespace support
+	pidMapping map[uint32]uint32
 }
 
 var _ collector.BPFProgram = (*StackWalkerBPF)(nil)
@@ -153,20 +156,36 @@ func (s *StackWalkerBPF) AttachPID(pid uint32) error {
 	}
 	fmt.Fprintf(os.Stderr, "rbscope: pid %d EC=0x%x\n", pid, ec)
 
-	// Write to BPF map
+	// Write to BPF map.
+	// In containerized environments, bpf_get_current_pid_tgid() returns the
+	// host-namespace PID, not the container PID. Discover the host PID so the
+	// BPF map lookup matches correctly.
+	mapKey, err := DiscoverHostPID(pid)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rbscope: host PID discovery failed, using container PID: %v\n", err)
+		mapKey = pid
+	}
+
+	// Cache the mapping for DetachPID
+	if s.pidMapping == nil {
+		s.pidMapping = make(map[uint32]uint32)
+	}
+	s.pidMapping[pid] = mapKey
+
 	// pid_config struct: ec_addr(8) + libruby_base(8) = 16 bytes
 	var cfg [16]byte
 	binary.LittleEndian.PutUint64(cfg[0:8], ec)
 	binary.LittleEndian.PutUint64(cfg[8:16], info.BaseAddr)
-	if err := s.objs.PidConfigs.Put(pid, cfg); err != nil {
-		return fmt.Errorf("write pid config for %d: %w", pid, err)
+	if err := s.objs.PidConfigs.Put(mapKey, cfg); err != nil {
+		return fmt.Errorf("write pid config for %d: %w", mapKey, err)
 	}
 
-	// Register with io_tracer
+	// Register with io_tracer — must use host PID because io_tracer.c
+	// checks bpf_get_current_pid_tgid() which returns host-namespace PIDs.
 	if s.ioObjs != nil {
 		val := uint8(1)
-		if err := s.ioObjs.TargetPids.Put(pid, val); err != nil {
-			fmt.Fprintf(os.Stderr, "rbscope: add pid %d to io target_pids: %v\n", pid, err)
+		if err := s.ioObjs.TargetPids.Put(mapKey, val); err != nil {
+			fmt.Fprintf(os.Stderr, "rbscope: add pid %d to io target_pids: %v\n", mapKey, err)
 		}
 	}
 
@@ -175,11 +194,11 @@ func (s *StackWalkerBPF) AttachPID(pid uint32) error {
 		s.rubyOffsets.GlobalSymbolsAddr += info.BaseAddr
 	}
 
-	// Register with sched_tracer
+	// Register with sched_tracer — same host PID requirement.
 	if s.schedObjs != nil {
 		val := uint8(1)
-		if err := s.schedObjs.TargetPids.Put(pid, val); err != nil {
-			fmt.Fprintf(os.Stderr, "rbscope: add pid %d to sched target_pids: %v\n", pid, err)
+		if err := s.schedObjs.TargetPids.Put(mapKey, val); err != nil {
+			fmt.Fprintf(os.Stderr, "rbscope: add pid %d to sched target_pids: %v\n", mapKey, err)
 		}
 	}
 
@@ -188,14 +207,22 @@ func (s *StackWalkerBPF) AttachPID(pid uint32) error {
 
 // DetachPID removes a PID from the stack walker.
 func (s *StackWalkerBPF) DetachPID(pid uint32) error {
+	// Use the host PID (which may differ from container PID in namespaced environments)
+	mapKey := pid
+	if s.pidMapping != nil {
+		if hostPid, ok := s.pidMapping[pid]; ok {
+			mapKey = hostPid
+			delete(s.pidMapping, pid)
+		}
+	}
 	if s.objs != nil {
-		_ = s.objs.PidConfigs.Delete(pid)
+		_ = s.objs.PidConfigs.Delete(mapKey)
 	}
 	if s.ioObjs != nil {
-		_ = s.ioObjs.TargetPids.Delete(pid)
+		_ = s.ioObjs.TargetPids.Delete(mapKey)
 	}
 	if s.schedObjs != nil {
-		_ = s.schedObjs.TargetPids.Delete(pid)
+		_ = s.schedObjs.TargetPids.Delete(mapKey)
 	}
 	return nil
 }
@@ -359,4 +386,129 @@ func (s *StackWalkerBPF) loadSchedTracer() error {
 // Offsets returns the DWARF-extracted Ruby offsets for frame resolution.
 func (s *StackWalkerBPF) Offsets() *offsets.RubyOffsets {
 	return s.rubyOffsets
+}
+
+// PIDMapping returns the container→host PID mappings discovered during
+// AttachPID. Callers can invert this to translate host PIDs in BPF events
+// back to container PIDs for /proc access.
+func (s *StackWalkerBPF) PIDMapping() map[uint32]uint32 {
+	return s.pidMapping
+}
+
+// DiscoverHostPID returns the init-namespace (host) PID for a given container PID.
+//
+// In containerized environments (Docker, Codespaces, etc.), bpf_get_current_pid_tgid()
+// returns the host-namespace PID, which may differ from the PID seen inside the
+// container. This function discovers the mapping by attaching a minimal BPF program
+// (via inline assembly) to a PID-targeted perf event and reading what
+// bpf_get_current_pid_tgid() returns.
+//
+// perf_event_open() with a specific pid handles namespace translation internally,
+// so the event fires for the correct task. The BPF helper then returns the
+// init-namespace PID which is what the main stack walker BPF will see.
+func DiscoverHostPID(containerPid uint32) (uint32, error) {
+	// Create a small array map to receive the result from BPF
+	resultMap, err := ebpf.NewMap(&ebpf.MapSpec{
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  8,
+		MaxEntries: 1,
+	})
+	if err != nil {
+		return containerPid, fmt.Errorf("create discovery map: %w", err)
+	}
+	defer resultMap.Close() //nolint:errcheck // cleanup in defer
+
+	// Minimal BPF program: call bpf_get_current_pid_tgid(), store to map
+	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
+		Type: ebpf.PerfEvent,
+		Instructions: asm.Instructions{
+			asm.FnGetCurrentPidTgid.Call(),
+			asm.Mov.Reg(asm.R6, asm.R0),
+			asm.Mov.Imm(asm.R0, 0),
+			asm.StoreMem(asm.RFP, -4, asm.R0, asm.Word),
+			asm.StoreMem(asm.RFP, -16, asm.R6, asm.DWord),
+			asm.LoadMapPtr(asm.R1, resultMap.FD()),
+			asm.Mov.Reg(asm.R2, asm.RFP),
+			asm.Add.Imm(asm.R2, -4),
+			asm.Mov.Reg(asm.R3, asm.RFP),
+			asm.Add.Imm(asm.R3, -16),
+			asm.Mov.Imm(asm.R4, 0),
+			asm.FnMapUpdateElem.Call(),
+			asm.Mov.Imm(asm.R0, 0),
+			asm.Return(),
+		},
+		License: "GPL",
+	})
+	if err != nil {
+		return containerPid, fmt.Errorf("load discovery prog: %w", err)
+	}
+	defer prog.Close() //nolint:errcheck // cleanup in defer
+
+	// Attach perf events targeted at containerPid on all CPUs.
+	nCPU := runtime.NumCPU()
+	var discoveryLinks []link.Link
+	var discoveryFDs []int
+	for cpu := 0; cpu < nCPU; cpu++ {
+		attr := unix.PerfEventAttr{
+			Type:   unix.PERF_TYPE_SOFTWARE,
+			Config: unix.PERF_COUNT_SW_CPU_CLOCK,
+			Size:   uint32(unsafe.Sizeof(unix.PerfEventAttr{})),
+			Sample: 999,
+			Bits:   unix.PerfBitFreq,
+		}
+		fd, err := unix.PerfEventOpen(&attr, int(containerPid), cpu, -1, unix.PERF_FLAG_FD_CLOEXEC)
+		if err != nil {
+			continue
+		}
+		discoveryFDs = append(discoveryFDs, fd)
+		l, err := link.AttachRawLink(link.RawLinkOptions{
+			Target:  fd,
+			Program: prog,
+			Attach:  ebpf.AttachPerfEvent,
+		})
+		if err != nil {
+			_ = unix.Close(fd)
+			continue
+		}
+		discoveryLinks = append(discoveryLinks, l)
+	}
+	defer func() {
+		for _, l := range discoveryLinks {
+			_ = l.Close()
+		}
+		for _, fd := range discoveryFDs {
+			_ = unix.Close(fd)
+		}
+	}()
+
+	if len(discoveryLinks) == 0 {
+		return containerPid, nil
+	}
+
+	// Poll until the target gets scheduled and sampled.
+	// Workers may be idle between requests, so retry a few times.
+	var hostPid uint32
+	for attempt := 0; attempt < 10; attempt++ {
+		time.Sleep(200 * time.Millisecond)
+
+		var key uint32
+		var val uint64
+		if err := resultMap.Lookup(key, &val); err != nil {
+			continue
+		}
+
+		hostPid = uint32(val >> 32)
+		if hostPid != 0 {
+			break
+		}
+	}
+
+	if hostPid != 0 && hostPid != containerPid {
+		fmt.Fprintf(os.Stderr, "rbscope: PID namespace detected: container PID %d -> host PID %d\n",
+			containerPid, hostPid)
+		return hostPid, nil
+	}
+
+	return containerPid, nil
 }
