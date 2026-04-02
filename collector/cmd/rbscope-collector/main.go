@@ -312,7 +312,9 @@ func runCapture(_ *cobra.Command, _ []string) error {
 
 	c := collector.New(cfg, bpfProg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), flagCaptureDuration)
+	// Create a cancellable context for signal handling during setup.
+	// The capture duration timer starts AFTER setup completes (below).
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Handle SIGTERM/SIGINT gracefully — cancel context so we reach the
@@ -381,7 +383,18 @@ func runCapture(_ *cobra.Command, _ []string) error {
 		logger.Info("pprof CPU profiling enabled", "output", flagCapturePprof)
 	}
 
-	<-ctx.Done()
+	// NOW start the capture duration timer — after all setup is complete.
+	// This ensures the full --duration is spent capturing, not loading BPF
+	// programs and attaching PIDs.
+	logger.Info("capture started", "duration", flagCaptureDuration)
+	captureTimer := time.NewTimer(flagCaptureDuration)
+	select {
+	case <-captureTimer.C:
+		logger.Info("capture duration elapsed")
+	case <-ctx.Done():
+		// Signal handler cancelled the context
+	}
+	captureTimer.Stop()
 
 	// Stop the collector event loop before accessing the builder.
 	// The event loop goroutine ingests into the builder's maps — we must
