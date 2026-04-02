@@ -575,7 +575,17 @@ func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) MarkersTable {
 		syscall := lookupString(tb.capture.StringTable, io.SyscallIdx)
 		fdInfo := lookupString(tb.capture.StringTable, io.FdInfoIdx)
 
-		nameIdx := tb.internString("I/O")
+		// Use the syscall name as the marker name for poll-family and accept4,
+		// keep "I/O" for read/write/sendto/recvfrom/connect.
+		markerName := "I/O"
+		switch syscall {
+		case "poll", "ppoll", "epoll_wait", "pselect6":
+			markerName = "Poll"
+		case "accept4":
+			markerName = "Accept"
+		}
+		nameIdx := tb.internString(markerName)
+
 		payload := map[string]any{
 			"type":      "rbscope-io",
 			"syscall":   syscall,
@@ -583,6 +593,11 @@ func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) MarkersTable {
 			"fdInfo":    fdInfo,
 			"bytes":     io.Bytes,
 			"latencyMs": float64(io.LatencyNs) / 1e6,
+		}
+
+		// Add service label based on remote port (e.g., "MySQL", "Redis").
+		if svc := serviceLabel(io.RemotePort); svc != "" {
+			payload["service"] = svc
 		}
 
 		// Add native call stack from bpf_get_stack (e.g. read ← trilogy_sock_read ← trilogy_query)
@@ -955,6 +970,7 @@ func defaultMarkerSchemas() []MarkerSchema {
 				{Key: "syscall", Label: "Syscall", Format: "string", Searchable: &searchable},
 				{Key: "fd", Label: "FD", Format: "integer"},
 				{Key: "fdInfo", Label: "Target", Format: "string", Searchable: &searchable},
+				{Key: "service", Label: "Service", Format: "string", Searchable: &searchable},
 				{Key: "bytes", Label: "Bytes", Format: "bytes"},
 				{Key: "latencyMs", Label: "Latency", Format: "duration"},
 				{Key: "nativeStack", Label: "C Stack", Format: "string", Searchable: &searchable},
@@ -1037,5 +1053,31 @@ func defaultMarkerSchemas() []MarkerSchema {
 				{Key: "durationMs", Label: "Duration", Format: "duration"},
 			},
 		},
+	}
+}
+
+// serviceLabel maps well-known remote ports to human-readable service names.
+func serviceLabel(port uint32) string {
+	switch port {
+	case 3306:
+		return "MySQL"
+	case 6379:
+		return "Redis"
+	case 11211:
+		return "Memcached"
+	case 443:
+		return "HTTPS"
+	case 80:
+		return "HTTP"
+	case 53:
+		return "DNS"
+	case 9093:
+		return "Kafka"
+	case 5432:
+		return "PostgreSQL"
+	case 27017:
+		return "MongoDB"
+	default:
+		return ""
 	}
 }

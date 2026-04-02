@@ -124,11 +124,16 @@ type IOTCPStats struct {
 
 // IoOp constants matching the BPF-side IO_OP_* enum.
 const (
-	IoOpRead     = 1
-	IoOpWrite    = 2
-	IoOpSendto   = 3
-	IoOpRecvfrom = 4
-	IoOpConnect  = 5
+	IoOpRead      = 1
+	IoOpWrite     = 2
+	IoOpSendto    = 3
+	IoOpRecvfrom  = 4
+	IoOpConnect   = 5
+	IoOpPoll      = 6
+	IoOpPpoll     = 7
+	IoOpEpollWait = 8
+	IoOpPselect6  = 9
+	IoOpAccept4   = 10
 )
 
 // SchedEvent captures a context-switch or scheduling event.
@@ -507,6 +512,16 @@ func IoOpName(op uint32) string {
 		return "recvfrom"
 	case IoOpConnect:
 		return "connect"
+	case IoOpPoll:
+		return "poll"
+	case IoOpPpoll:
+		return "ppoll"
+	case IoOpEpollWait:
+		return "epoll_wait"
+	case IoOpPselect6:
+		return "pselect6"
+	case IoOpAccept4:
+		return "accept4"
 	default:
 		return fmt.Sprintf("syscall_%d", op)
 	}

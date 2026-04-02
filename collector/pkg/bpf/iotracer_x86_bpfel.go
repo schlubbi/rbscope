@@ -62,16 +62,26 @@ type iotracerSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type iotracerProgramSpecs struct {
-	TpSysEnterConnect  *ebpf.ProgramSpec `ebpf:"tp_sys_enter_connect"`
-	TpSysEnterRead     *ebpf.ProgramSpec `ebpf:"tp_sys_enter_read"`
-	TpSysEnterRecvfrom *ebpf.ProgramSpec `ebpf:"tp_sys_enter_recvfrom"`
-	TpSysEnterSendto   *ebpf.ProgramSpec `ebpf:"tp_sys_enter_sendto"`
-	TpSysEnterWrite    *ebpf.ProgramSpec `ebpf:"tp_sys_enter_write"`
-	TpSysExitConnect   *ebpf.ProgramSpec `ebpf:"tp_sys_exit_connect"`
-	TpSysExitRead      *ebpf.ProgramSpec `ebpf:"tp_sys_exit_read"`
-	TpSysExitRecvfrom  *ebpf.ProgramSpec `ebpf:"tp_sys_exit_recvfrom"`
-	TpSysExitSendto    *ebpf.ProgramSpec `ebpf:"tp_sys_exit_sendto"`
-	TpSysExitWrite     *ebpf.ProgramSpec `ebpf:"tp_sys_exit_write"`
+	TpSysEnterAccept4   *ebpf.ProgramSpec `ebpf:"tp_sys_enter_accept4"`
+	TpSysEnterConnect   *ebpf.ProgramSpec `ebpf:"tp_sys_enter_connect"`
+	TpSysEnterEpollWait *ebpf.ProgramSpec `ebpf:"tp_sys_enter_epoll_wait"`
+	TpSysEnterPoll      *ebpf.ProgramSpec `ebpf:"tp_sys_enter_poll"`
+	TpSysEnterPpoll     *ebpf.ProgramSpec `ebpf:"tp_sys_enter_ppoll"`
+	TpSysEnterPselect6  *ebpf.ProgramSpec `ebpf:"tp_sys_enter_pselect6"`
+	TpSysEnterRead      *ebpf.ProgramSpec `ebpf:"tp_sys_enter_read"`
+	TpSysEnterRecvfrom  *ebpf.ProgramSpec `ebpf:"tp_sys_enter_recvfrom"`
+	TpSysEnterSendto    *ebpf.ProgramSpec `ebpf:"tp_sys_enter_sendto"`
+	TpSysEnterWrite     *ebpf.ProgramSpec `ebpf:"tp_sys_enter_write"`
+	TpSysExitAccept4    *ebpf.ProgramSpec `ebpf:"tp_sys_exit_accept4"`
+	TpSysExitConnect    *ebpf.ProgramSpec `ebpf:"tp_sys_exit_connect"`
+	TpSysExitEpollWait  *ebpf.ProgramSpec `ebpf:"tp_sys_exit_epoll_wait"`
+	TpSysExitPoll       *ebpf.ProgramSpec `ebpf:"tp_sys_exit_poll"`
+	TpSysExitPpoll      *ebpf.ProgramSpec `ebpf:"tp_sys_exit_ppoll"`
+	TpSysExitPselect6   *ebpf.ProgramSpec `ebpf:"tp_sys_exit_pselect6"`
+	TpSysExitRead       *ebpf.ProgramSpec `ebpf:"tp_sys_exit_read"`
+	TpSysExitRecvfrom   *ebpf.ProgramSpec `ebpf:"tp_sys_exit_recvfrom"`
+	TpSysExitSendto     *ebpf.ProgramSpec `ebpf:"tp_sys_exit_sendto"`
+	TpSysExitWrite      *ebpf.ProgramSpec `ebpf:"tp_sys_exit_write"`
 }
 
 // iotracerMapSpecs contains maps before they are loaded into the kernel.
@@ -132,26 +142,46 @@ type iotracerVariables struct {
 //
 // It can be passed to loadIotracerObjects or ebpf.CollectionSpec.LoadAndAssign.
 type iotracerPrograms struct {
-	TpSysEnterConnect  *ebpf.Program `ebpf:"tp_sys_enter_connect"`
-	TpSysEnterRead     *ebpf.Program `ebpf:"tp_sys_enter_read"`
-	TpSysEnterRecvfrom *ebpf.Program `ebpf:"tp_sys_enter_recvfrom"`
-	TpSysEnterSendto   *ebpf.Program `ebpf:"tp_sys_enter_sendto"`
-	TpSysEnterWrite    *ebpf.Program `ebpf:"tp_sys_enter_write"`
-	TpSysExitConnect   *ebpf.Program `ebpf:"tp_sys_exit_connect"`
-	TpSysExitRead      *ebpf.Program `ebpf:"tp_sys_exit_read"`
-	TpSysExitRecvfrom  *ebpf.Program `ebpf:"tp_sys_exit_recvfrom"`
-	TpSysExitSendto    *ebpf.Program `ebpf:"tp_sys_exit_sendto"`
-	TpSysExitWrite     *ebpf.Program `ebpf:"tp_sys_exit_write"`
+	TpSysEnterAccept4   *ebpf.Program `ebpf:"tp_sys_enter_accept4"`
+	TpSysEnterConnect   *ebpf.Program `ebpf:"tp_sys_enter_connect"`
+	TpSysEnterEpollWait *ebpf.Program `ebpf:"tp_sys_enter_epoll_wait"`
+	TpSysEnterPoll      *ebpf.Program `ebpf:"tp_sys_enter_poll"`
+	TpSysEnterPpoll     *ebpf.Program `ebpf:"tp_sys_enter_ppoll"`
+	TpSysEnterPselect6  *ebpf.Program `ebpf:"tp_sys_enter_pselect6"`
+	TpSysEnterRead      *ebpf.Program `ebpf:"tp_sys_enter_read"`
+	TpSysEnterRecvfrom  *ebpf.Program `ebpf:"tp_sys_enter_recvfrom"`
+	TpSysEnterSendto    *ebpf.Program `ebpf:"tp_sys_enter_sendto"`
+	TpSysEnterWrite     *ebpf.Program `ebpf:"tp_sys_enter_write"`
+	TpSysExitAccept4    *ebpf.Program `ebpf:"tp_sys_exit_accept4"`
+	TpSysExitConnect    *ebpf.Program `ebpf:"tp_sys_exit_connect"`
+	TpSysExitEpollWait  *ebpf.Program `ebpf:"tp_sys_exit_epoll_wait"`
+	TpSysExitPoll       *ebpf.Program `ebpf:"tp_sys_exit_poll"`
+	TpSysExitPpoll      *ebpf.Program `ebpf:"tp_sys_exit_ppoll"`
+	TpSysExitPselect6   *ebpf.Program `ebpf:"tp_sys_exit_pselect6"`
+	TpSysExitRead       *ebpf.Program `ebpf:"tp_sys_exit_read"`
+	TpSysExitRecvfrom   *ebpf.Program `ebpf:"tp_sys_exit_recvfrom"`
+	TpSysExitSendto     *ebpf.Program `ebpf:"tp_sys_exit_sendto"`
+	TpSysExitWrite      *ebpf.Program `ebpf:"tp_sys_exit_write"`
 }
 
 func (p *iotracerPrograms) Close() error {
 	return _IotracerClose(
+		p.TpSysEnterAccept4,
 		p.TpSysEnterConnect,
+		p.TpSysEnterEpollWait,
+		p.TpSysEnterPoll,
+		p.TpSysEnterPpoll,
+		p.TpSysEnterPselect6,
 		p.TpSysEnterRead,
 		p.TpSysEnterRecvfrom,
 		p.TpSysEnterSendto,
 		p.TpSysEnterWrite,
+		p.TpSysExitAccept4,
 		p.TpSysExitConnect,
+		p.TpSysExitEpollWait,
+		p.TpSysExitPoll,
+		p.TpSysExitPpoll,
+		p.TpSysExitPselect6,
 		p.TpSysExitRead,
 		p.TpSysExitRecvfrom,
 		p.TpSysExitSendto,
