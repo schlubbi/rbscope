@@ -134,6 +134,9 @@ const (
 	IoOpEpollWait = 8
 	IoOpPselect6  = 9
 	IoOpAccept4   = 10
+	IoOpFutex     = 11
+	IoOpClone     = 12
+	IoOpGetrandom = 13
 )
 
 // SchedEvent captures a context-switch or scheduling event.
@@ -522,6 +525,12 @@ func IoOpName(op uint32) string {
 		return "pselect6"
 	case IoOpAccept4:
 		return "accept4"
+	case IoOpFutex:
+		return "futex"
+	case IoOpClone:
+		return "clone"
+	case IoOpGetrandom:
+		return "getrandom"
 	default:
 		return fmt.Sprintf("syscall_%d", op)
 	}

@@ -165,6 +165,12 @@ func (r *RealBPF) loadIOTracer() error {
 		{"syscalls/sys_exit_pselect6", ioObjs.TpSysExitPselect6},
 		{"syscalls/sys_enter_accept4", ioObjs.TpSysEnterAccept4},
 		{"syscalls/sys_exit_accept4", ioObjs.TpSysExitAccept4},
+		{"syscalls/sys_enter_futex", ioObjs.TpSysEnterFutex},
+		{"syscalls/sys_exit_futex", ioObjs.TpSysExitFutex},
+		{"syscalls/sys_enter_clone", ioObjs.TpSysEnterClone},
+		{"syscalls/sys_exit_clone", ioObjs.TpSysExitClone},
+		{"syscalls/sys_enter_getrandom", ioObjs.TpSysEnterGetrandom},
+		{"syscalls/sys_exit_getrandom", ioObjs.TpSysExitGetrandom},
 	}
 
 	for _, tp := range tracepoints {

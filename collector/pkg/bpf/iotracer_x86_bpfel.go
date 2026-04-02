@@ -63,8 +63,11 @@ type iotracerSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type iotracerProgramSpecs struct {
 	TpSysEnterAccept4   *ebpf.ProgramSpec `ebpf:"tp_sys_enter_accept4"`
+	TpSysEnterClone     *ebpf.ProgramSpec `ebpf:"tp_sys_enter_clone"`
 	TpSysEnterConnect   *ebpf.ProgramSpec `ebpf:"tp_sys_enter_connect"`
 	TpSysEnterEpollWait *ebpf.ProgramSpec `ebpf:"tp_sys_enter_epoll_wait"`
+	TpSysEnterFutex     *ebpf.ProgramSpec `ebpf:"tp_sys_enter_futex"`
+	TpSysEnterGetrandom *ebpf.ProgramSpec `ebpf:"tp_sys_enter_getrandom"`
 	TpSysEnterPoll      *ebpf.ProgramSpec `ebpf:"tp_sys_enter_poll"`
 	TpSysEnterPpoll     *ebpf.ProgramSpec `ebpf:"tp_sys_enter_ppoll"`
 	TpSysEnterPselect6  *ebpf.ProgramSpec `ebpf:"tp_sys_enter_pselect6"`
@@ -73,8 +76,11 @@ type iotracerProgramSpecs struct {
 	TpSysEnterSendto    *ebpf.ProgramSpec `ebpf:"tp_sys_enter_sendto"`
 	TpSysEnterWrite     *ebpf.ProgramSpec `ebpf:"tp_sys_enter_write"`
 	TpSysExitAccept4    *ebpf.ProgramSpec `ebpf:"tp_sys_exit_accept4"`
+	TpSysExitClone      *ebpf.ProgramSpec `ebpf:"tp_sys_exit_clone"`
 	TpSysExitConnect    *ebpf.ProgramSpec `ebpf:"tp_sys_exit_connect"`
 	TpSysExitEpollWait  *ebpf.ProgramSpec `ebpf:"tp_sys_exit_epoll_wait"`
+	TpSysExitFutex      *ebpf.ProgramSpec `ebpf:"tp_sys_exit_futex"`
+	TpSysExitGetrandom  *ebpf.ProgramSpec `ebpf:"tp_sys_exit_getrandom"`
 	TpSysExitPoll       *ebpf.ProgramSpec `ebpf:"tp_sys_exit_poll"`
 	TpSysExitPpoll      *ebpf.ProgramSpec `ebpf:"tp_sys_exit_ppoll"`
 	TpSysExitPselect6   *ebpf.ProgramSpec `ebpf:"tp_sys_exit_pselect6"`
@@ -143,8 +149,11 @@ type iotracerVariables struct {
 // It can be passed to loadIotracerObjects or ebpf.CollectionSpec.LoadAndAssign.
 type iotracerPrograms struct {
 	TpSysEnterAccept4   *ebpf.Program `ebpf:"tp_sys_enter_accept4"`
+	TpSysEnterClone     *ebpf.Program `ebpf:"tp_sys_enter_clone"`
 	TpSysEnterConnect   *ebpf.Program `ebpf:"tp_sys_enter_connect"`
 	TpSysEnterEpollWait *ebpf.Program `ebpf:"tp_sys_enter_epoll_wait"`
+	TpSysEnterFutex     *ebpf.Program `ebpf:"tp_sys_enter_futex"`
+	TpSysEnterGetrandom *ebpf.Program `ebpf:"tp_sys_enter_getrandom"`
 	TpSysEnterPoll      *ebpf.Program `ebpf:"tp_sys_enter_poll"`
 	TpSysEnterPpoll     *ebpf.Program `ebpf:"tp_sys_enter_ppoll"`
 	TpSysEnterPselect6  *ebpf.Program `ebpf:"tp_sys_enter_pselect6"`
@@ -153,8 +162,11 @@ type iotracerPrograms struct {
 	TpSysEnterSendto    *ebpf.Program `ebpf:"tp_sys_enter_sendto"`
 	TpSysEnterWrite     *ebpf.Program `ebpf:"tp_sys_enter_write"`
 	TpSysExitAccept4    *ebpf.Program `ebpf:"tp_sys_exit_accept4"`
+	TpSysExitClone      *ebpf.Program `ebpf:"tp_sys_exit_clone"`
 	TpSysExitConnect    *ebpf.Program `ebpf:"tp_sys_exit_connect"`
 	TpSysExitEpollWait  *ebpf.Program `ebpf:"tp_sys_exit_epoll_wait"`
+	TpSysExitFutex      *ebpf.Program `ebpf:"tp_sys_exit_futex"`
+	TpSysExitGetrandom  *ebpf.Program `ebpf:"tp_sys_exit_getrandom"`
 	TpSysExitPoll       *ebpf.Program `ebpf:"tp_sys_exit_poll"`
 	TpSysExitPpoll      *ebpf.Program `ebpf:"tp_sys_exit_ppoll"`
 	TpSysExitPselect6   *ebpf.Program `ebpf:"tp_sys_exit_pselect6"`
@@ -167,8 +179,11 @@ type iotracerPrograms struct {
 func (p *iotracerPrograms) Close() error {
 	return _IotracerClose(
 		p.TpSysEnterAccept4,
+		p.TpSysEnterClone,
 		p.TpSysEnterConnect,
 		p.TpSysEnterEpollWait,
+		p.TpSysEnterFutex,
+		p.TpSysEnterGetrandom,
 		p.TpSysEnterPoll,
 		p.TpSysEnterPpoll,
 		p.TpSysEnterPselect6,
@@ -177,8 +192,11 @@ func (p *iotracerPrograms) Close() error {
 		p.TpSysEnterSendto,
 		p.TpSysEnterWrite,
 		p.TpSysExitAccept4,
+		p.TpSysExitClone,
 		p.TpSysExitConnect,
 		p.TpSysExitEpollWait,
+		p.TpSysExitFutex,
+		p.TpSysExitGetrandom,
 		p.TpSysExitPoll,
 		p.TpSysExitPpoll,
 		p.TpSysExitPselect6,
