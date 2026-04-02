@@ -33,6 +33,9 @@
 #define IO_OP_EPOLL_WAIT 8
 #define IO_OP_PSELECT6   9
 #define IO_OP_ACCEPT4    10
+#define IO_OP_FUTEX      11
+#define IO_OP_CLONE      12
+#define IO_OP_GETRANDOM  13
 
 // Syscall tags — arbitrary identifiers used to distinguish syscalls
 // in the inflight map. Not actual NR values.
@@ -46,10 +49,21 @@
 #define SYS_EPOLL_WAIT 102
 #define SYS_PSELECT6   103
 #define SYS_ACCEPT4    104
+#define SYS_FUTEX      105
+#define SYS_CLONE      106
+#define SYS_GETRANDOM  107
 
-// Minimum latency (in ns) to emit poll-family events.
-// Polls shorter than this are readiness checks, not blocking waits.
-#define POLL_MIN_LATENCY_NS 1000000  // 1ms
+// Minimum latency (in ns) to emit poll-family and filtered events.
+// Polls/futex/getrandom shorter than this are suppressed.
+#define MIN_LATENCY_FILTER_NS 1000000  // 1ms
+
+// Futex op masks — only trace WAIT operations, not WAKE.
+#define FUTEX_CMD_MASK   0x7f
+#define FUTEX_WAIT       0
+#define FUTEX_WAIT_PRIVATE 128
+
+// Clone flag — only trace thread creation, not fork.
+#define CLONE_THREAD 0x00010000
 
 // ---- maps ----------------------------------------------------------------
 
@@ -142,6 +156,9 @@ static __always_inline u32 syscall_to_op(u32 nr) {
     case SYS_EPOLL_WAIT: return IO_OP_EPOLL_WAIT;
     case SYS_PSELECT6:   return IO_OP_PSELECT6;
     case SYS_ACCEPT4:    return IO_OP_ACCEPT4;
+    case SYS_FUTEX:      return IO_OP_FUTEX;
+    case SYS_CLONE:      return IO_OP_CLONE;
+    case SYS_GETRANDOM:  return IO_OP_GETRANDOM;
     default:             return 0;
     }
 }
@@ -167,10 +184,12 @@ static __always_inline void record_exit(void *ctx, long ret) {
     u32 syscall_nr = entry->syscall_nr;
     u32 fd = entry->fd;
 
-    // For poll-family syscalls, suppress events shorter than 1ms.
-    // Zero-timeout polls are readiness checks, not blocking waits.
-    if (syscall_nr >= SYS_POLL && syscall_nr <= SYS_PSELECT6 &&
-        latency < POLL_MIN_LATENCY_NS) {
+    // Suppress short-duration events for poll-family, futex, and getrandom.
+    // Zero-timeout polls are readiness checks; uncontended futexes and
+    // fast getrandom calls are noise.
+    if (((syscall_nr >= SYS_POLL && syscall_nr <= SYS_PSELECT6) ||
+         syscall_nr == SYS_FUTEX || syscall_nr == SYS_GETRANDOM) &&
+        latency < MIN_LATENCY_FILTER_NS) {
         bpf_map_delete_elem(&inflight, &tid);
         return;
     }
@@ -407,6 +426,65 @@ int tp_sys_enter_accept4(struct trace_event_raw_sys_enter *ctx) {
 
 SEC("tp/syscalls/sys_exit_accept4")
 int tp_sys_exit_accept4(struct trace_event_raw_sys_exit *ctx) {
+    if (!pid_allowed()) return 0;
+    record_exit(ctx, ctx->ret);
+    return 0;
+}
+
+// ---- tracepoints: futex --------------------------------------------------
+// futex(int *uaddr, int op, int val, ...)
+// Only trace FUTEX_WAIT and FUTEX_WAIT_PRIVATE — skip WAKE (90% of calls).
+
+SEC("tp/syscalls/sys_enter_futex")
+int tp_sys_enter_futex(struct trace_event_raw_sys_enter *ctx) {
+    if (!pid_allowed()) return 0;
+    u32 op = (u32)ctx->args[1] & FUTEX_CMD_MASK;
+    if (op != FUTEX_WAIT && op != (FUTEX_WAIT_PRIVATE & FUTEX_CMD_MASK))
+        return 0;
+    record_enter(SYS_FUTEX, 0);
+    return 0;
+}
+
+SEC("tp/syscalls/sys_exit_futex")
+int tp_sys_exit_futex(struct trace_event_raw_sys_exit *ctx) {
+    if (!pid_allowed()) return 0;
+    record_exit(ctx, ctx->ret);
+    return 0;
+}
+
+// ---- tracepoints: clone --------------------------------------------------
+// clone(unsigned long flags, ...)
+// Only trace CLONE_THREAD — thread creation, not process fork.
+
+SEC("tp/syscalls/sys_enter_clone")
+int tp_sys_enter_clone(struct trace_event_raw_sys_enter *ctx) {
+    if (!pid_allowed()) return 0;
+    u64 flags = ctx->args[0];
+    if (!(flags & CLONE_THREAD))
+        return 0;
+    record_enter(SYS_CLONE, 0);
+    return 0;
+}
+
+SEC("tp/syscalls/sys_exit_clone")
+int tp_sys_exit_clone(struct trace_event_raw_sys_exit *ctx) {
+    if (!pid_allowed()) return 0;
+    record_exit(ctx, ctx->ret);
+    return 0;
+}
+
+// ---- tracepoints: getrandom ----------------------------------------------
+// getrandom(void *buf, size_t buflen, unsigned int flags)
+
+SEC("tp/syscalls/sys_enter_getrandom")
+int tp_sys_enter_getrandom(struct trace_event_raw_sys_enter *ctx) {
+    if (!pid_allowed()) return 0;
+    record_enter(SYS_GETRANDOM, 0);
+    return 0;
+}
+
+SEC("tp/syscalls/sys_exit_getrandom")
+int tp_sys_exit_getrandom(struct trace_event_raw_sys_exit *ctx) {
     if (!pid_allowed()) return 0;
     record_exit(ctx, ctx->ret);
     return 0;
