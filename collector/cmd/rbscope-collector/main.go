@@ -523,6 +523,24 @@ func buildExporters(logger *slog.Logger) ([]collector.Exporter, error) {
 					tb.SetResolver(resolver)
 					logger.Info("native stack resolution enabled", "pid", flagPID)
 				}
+				// Set up frame resolver for v3 alloc stack resolution.
+				// The gem sends raw VALUE pointers that need iseq chain
+				// reads from /proc/pid/mem to resolve method names.
+				info, findErr := offsets.FindLibruby(flagPID)
+				if findErr == nil {
+					rubyOffsets, dwarfErr := offsets.ExtractFromDWARF(info.HostPath)
+					if dwarfErr == nil {
+						rubyOffsets.VMPtrSymAddr += info.BaseAddr
+						rubyOffsets.GlobalSymbolsAddr += info.BaseAddr
+						tb.SetFrameResolver(offsets.NewFrameResolver(rubyOffsets))
+						logger.Info("frame resolver enabled for pyroscope", "ruby", info.HostPath)
+					}
+				}
+				// PID namespace discovery for /proc/pid/mem access
+				if hostPID, err := bpf.DiscoverHostPID(flagPID); err == nil && hostPID != flagPID {
+					tb.SetHostToContainerPID(hostPID, flagPID)
+					logger.Info("PID namespace detected (pyroscope)", "container", flagPID, "host", hostPID)
+				}
 			}
 			exporters = append(exporters, export.NewBuilderPyroscopeExporter(export.BuilderPyroscopeConfig{
 				Builder:    tb,
