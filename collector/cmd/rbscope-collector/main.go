@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"syscall"
@@ -52,6 +53,7 @@ var (
 	flagCaptureMode         string
 	flagCaptureRubyPath     string
 	flagCapturePyroscopeURL string
+	flagCapturePprof        string
 )
 
 func main() {
@@ -104,6 +106,7 @@ func captureCmd() *cobra.Command {
 	f.StringVar(&flagCaptureMode, "mode", "gem", "Profiling mode: gem (USDT probes) or bpf (zero-instrumentation)")
 	f.StringVar(&flagCaptureRubyPath, "ruby-path", "", "Path to libruby.so with DWARF (required for --mode=bpf)")
 	f.StringVar(&flagCapturePyroscopeURL, "pyroscope-url", "http://localhost:4040", "Pyroscope server URL (for --format=pyroscope)")
+	f.StringVar(&flagCapturePprof, "pprof", "", "Write Go CPU profile to this file during capture")
 	_ = cmd.MarkFlagRequired("pid")
 
 	return cmd
@@ -363,6 +366,20 @@ func runCapture(_ *cobra.Command, _ []string) error {
 	// Pitchfork forks worker processes that inherit the uprobe but have
 	// different PIDs. The I/O tracepoints need all PIDs in the filter.
 	attachSiblingPIDs(c, flagCapturePID, logger, tb)
+
+	// Start Go CPU profiling if requested.
+	if flagCapturePprof != "" {
+		pprofFile, err := os.Create(flagCapturePprof)
+		if err != nil {
+			return fmt.Errorf("create pprof file: %w", err)
+		}
+		defer pprofFile.Close()
+		if err := pprof.StartCPUProfile(pprofFile); err != nil {
+			return fmt.Errorf("start pprof: %w", err)
+		}
+		defer pprof.StopCPUProfile()
+		logger.Info("pprof CPU profiling enabled", "output", flagCapturePprof)
+	}
 
 	<-ctx.Done()
 
