@@ -310,6 +310,16 @@ func runCapture(_ *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), flagCaptureDuration)
 	defer cancel()
 
+	// Handle SIGTERM/SIGINT gracefully — cancel context so we reach the
+	// export phase below. Without this, `timeout` or Ctrl-C kills the
+	// process before the profile is written.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		cancel()
+	}()
+
 	if err := c.Start(ctx); err != nil {
 		return err
 	}
