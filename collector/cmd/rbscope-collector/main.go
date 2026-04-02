@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"syscall"
@@ -52,6 +53,7 @@ var (
 	flagCaptureMode         string
 	flagCaptureRubyPath     string
 	flagCapturePyroscopeURL string
+	flagCapturePprof        string
 )
 
 func main() {
@@ -104,6 +106,7 @@ func captureCmd() *cobra.Command {
 	f.StringVar(&flagCaptureMode, "mode", "gem", "Profiling mode: gem (USDT probes) or bpf (zero-instrumentation)")
 	f.StringVar(&flagCaptureRubyPath, "ruby-path", "", "Path to libruby.so with DWARF (required for --mode=bpf)")
 	f.StringVar(&flagCapturePyroscopeURL, "pyroscope-url", "http://localhost:4040", "Pyroscope server URL (for --format=pyroscope)")
+	f.StringVar(&flagCapturePprof, "pprof", "", "Write Go CPU profile to this file during capture")
 	_ = cmd.MarkFlagRequired("pid")
 
 	return cmd
@@ -309,7 +312,9 @@ func runCapture(_ *cobra.Command, _ []string) error {
 
 	c := collector.New(cfg, bpfProg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), flagCaptureDuration)
+	// Create a cancellable context for signal handling during setup.
+	// The capture duration timer starts AFTER setup completes (below).
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Handle SIGTERM/SIGINT gracefully — cancel context so we reach the
@@ -364,7 +369,32 @@ func runCapture(_ *cobra.Command, _ []string) error {
 	// different PIDs. The I/O tracepoints need all PIDs in the filter.
 	attachSiblingPIDs(c, flagCapturePID, logger, tb)
 
-	<-ctx.Done()
+	// Start Go CPU profiling if requested.
+	if flagCapturePprof != "" {
+		pprofFile, err := os.Create(flagCapturePprof)
+		if err != nil {
+			return fmt.Errorf("create pprof file: %w", err)
+		}
+		defer pprofFile.Close()
+		if err := pprof.StartCPUProfile(pprofFile); err != nil {
+			return fmt.Errorf("start pprof: %w", err)
+		}
+		defer pprof.StopCPUProfile()
+		logger.Info("pprof CPU profiling enabled", "output", flagCapturePprof)
+	}
+
+	// NOW start the capture duration timer — after all setup is complete.
+	// This ensures the full --duration is spent capturing, not loading BPF
+	// programs and attaching PIDs.
+	logger.Info("capture started", "duration", flagCaptureDuration)
+	captureTimer := time.NewTimer(flagCaptureDuration)
+	select {
+	case <-captureTimer.C:
+		logger.Info("capture duration elapsed")
+	case <-ctx.Done():
+		// Signal handler cancelled the context
+	}
+	captureTimer.Stop()
 
 	// Stop the collector event loop before accessing the builder.
 	// The event loop goroutine ingests into the builder's maps — we must

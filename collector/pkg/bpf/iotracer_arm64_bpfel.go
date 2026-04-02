@@ -62,32 +62,34 @@ type iotracerSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type iotracerProgramSpecs struct {
-	TpSysEnterAccept4   *ebpf.ProgramSpec `ebpf:"tp_sys_enter_accept4"`
-	TpSysEnterClone     *ebpf.ProgramSpec `ebpf:"tp_sys_enter_clone"`
-	TpSysEnterConnect   *ebpf.ProgramSpec `ebpf:"tp_sys_enter_connect"`
-	TpSysEnterEpollWait *ebpf.ProgramSpec `ebpf:"tp_sys_enter_epoll_wait"`
-	TpSysEnterFutex     *ebpf.ProgramSpec `ebpf:"tp_sys_enter_futex"`
-	TpSysEnterGetrandom *ebpf.ProgramSpec `ebpf:"tp_sys_enter_getrandom"`
-	TpSysEnterPoll      *ebpf.ProgramSpec `ebpf:"tp_sys_enter_poll"`
-	TpSysEnterPpoll     *ebpf.ProgramSpec `ebpf:"tp_sys_enter_ppoll"`
-	TpSysEnterPselect6  *ebpf.ProgramSpec `ebpf:"tp_sys_enter_pselect6"`
-	TpSysEnterRead      *ebpf.ProgramSpec `ebpf:"tp_sys_enter_read"`
-	TpSysEnterRecvfrom  *ebpf.ProgramSpec `ebpf:"tp_sys_enter_recvfrom"`
-	TpSysEnterSendto    *ebpf.ProgramSpec `ebpf:"tp_sys_enter_sendto"`
-	TpSysEnterWrite     *ebpf.ProgramSpec `ebpf:"tp_sys_enter_write"`
-	TpSysExitAccept4    *ebpf.ProgramSpec `ebpf:"tp_sys_exit_accept4"`
-	TpSysExitClone      *ebpf.ProgramSpec `ebpf:"tp_sys_exit_clone"`
-	TpSysExitConnect    *ebpf.ProgramSpec `ebpf:"tp_sys_exit_connect"`
-	TpSysExitEpollWait  *ebpf.ProgramSpec `ebpf:"tp_sys_exit_epoll_wait"`
-	TpSysExitFutex      *ebpf.ProgramSpec `ebpf:"tp_sys_exit_futex"`
-	TpSysExitGetrandom  *ebpf.ProgramSpec `ebpf:"tp_sys_exit_getrandom"`
-	TpSysExitPoll       *ebpf.ProgramSpec `ebpf:"tp_sys_exit_poll"`
-	TpSysExitPpoll      *ebpf.ProgramSpec `ebpf:"tp_sys_exit_ppoll"`
-	TpSysExitPselect6   *ebpf.ProgramSpec `ebpf:"tp_sys_exit_pselect6"`
-	TpSysExitRead       *ebpf.ProgramSpec `ebpf:"tp_sys_exit_read"`
-	TpSysExitRecvfrom   *ebpf.ProgramSpec `ebpf:"tp_sys_exit_recvfrom"`
-	TpSysExitSendto     *ebpf.ProgramSpec `ebpf:"tp_sys_exit_sendto"`
-	TpSysExitWrite      *ebpf.ProgramSpec `ebpf:"tp_sys_exit_write"`
+	TpSysEnterAccept4      *ebpf.ProgramSpec `ebpf:"tp_sys_enter_accept4"`
+	TpSysEnterClockGettime *ebpf.ProgramSpec `ebpf:"tp_sys_enter_clock_gettime"`
+	TpSysEnterClone        *ebpf.ProgramSpec `ebpf:"tp_sys_enter_clone"`
+	TpSysEnterConnect      *ebpf.ProgramSpec `ebpf:"tp_sys_enter_connect"`
+	TpSysEnterEpollWait    *ebpf.ProgramSpec `ebpf:"tp_sys_enter_epoll_wait"`
+	TpSysEnterFutex        *ebpf.ProgramSpec `ebpf:"tp_sys_enter_futex"`
+	TpSysEnterGetrandom    *ebpf.ProgramSpec `ebpf:"tp_sys_enter_getrandom"`
+	TpSysEnterPoll         *ebpf.ProgramSpec `ebpf:"tp_sys_enter_poll"`
+	TpSysEnterPpoll        *ebpf.ProgramSpec `ebpf:"tp_sys_enter_ppoll"`
+	TpSysEnterPselect6     *ebpf.ProgramSpec `ebpf:"tp_sys_enter_pselect6"`
+	TpSysEnterRead         *ebpf.ProgramSpec `ebpf:"tp_sys_enter_read"`
+	TpSysEnterRecvfrom     *ebpf.ProgramSpec `ebpf:"tp_sys_enter_recvfrom"`
+	TpSysEnterSendto       *ebpf.ProgramSpec `ebpf:"tp_sys_enter_sendto"`
+	TpSysEnterWrite        *ebpf.ProgramSpec `ebpf:"tp_sys_enter_write"`
+	TpSysExitAccept4       *ebpf.ProgramSpec `ebpf:"tp_sys_exit_accept4"`
+	TpSysExitClockGettime  *ebpf.ProgramSpec `ebpf:"tp_sys_exit_clock_gettime"`
+	TpSysExitClone         *ebpf.ProgramSpec `ebpf:"tp_sys_exit_clone"`
+	TpSysExitConnect       *ebpf.ProgramSpec `ebpf:"tp_sys_exit_connect"`
+	TpSysExitEpollWait     *ebpf.ProgramSpec `ebpf:"tp_sys_exit_epoll_wait"`
+	TpSysExitFutex         *ebpf.ProgramSpec `ebpf:"tp_sys_exit_futex"`
+	TpSysExitGetrandom     *ebpf.ProgramSpec `ebpf:"tp_sys_exit_getrandom"`
+	TpSysExitPoll          *ebpf.ProgramSpec `ebpf:"tp_sys_exit_poll"`
+	TpSysExitPpoll         *ebpf.ProgramSpec `ebpf:"tp_sys_exit_ppoll"`
+	TpSysExitPselect6      *ebpf.ProgramSpec `ebpf:"tp_sys_exit_pselect6"`
+	TpSysExitRead          *ebpf.ProgramSpec `ebpf:"tp_sys_exit_read"`
+	TpSysExitRecvfrom      *ebpf.ProgramSpec `ebpf:"tp_sys_exit_recvfrom"`
+	TpSysExitSendto        *ebpf.ProgramSpec `ebpf:"tp_sys_exit_sendto"`
+	TpSysExitWrite         *ebpf.ProgramSpec `ebpf:"tp_sys_exit_write"`
 }
 
 // iotracerMapSpecs contains maps before they are loaded into the kernel.
@@ -148,37 +150,40 @@ type iotracerVariables struct {
 //
 // It can be passed to loadIotracerObjects or ebpf.CollectionSpec.LoadAndAssign.
 type iotracerPrograms struct {
-	TpSysEnterAccept4   *ebpf.Program `ebpf:"tp_sys_enter_accept4"`
-	TpSysEnterClone     *ebpf.Program `ebpf:"tp_sys_enter_clone"`
-	TpSysEnterConnect   *ebpf.Program `ebpf:"tp_sys_enter_connect"`
-	TpSysEnterEpollWait *ebpf.Program `ebpf:"tp_sys_enter_epoll_wait"`
-	TpSysEnterFutex     *ebpf.Program `ebpf:"tp_sys_enter_futex"`
-	TpSysEnterGetrandom *ebpf.Program `ebpf:"tp_sys_enter_getrandom"`
-	TpSysEnterPoll      *ebpf.Program `ebpf:"tp_sys_enter_poll"`
-	TpSysEnterPpoll     *ebpf.Program `ebpf:"tp_sys_enter_ppoll"`
-	TpSysEnterPselect6  *ebpf.Program `ebpf:"tp_sys_enter_pselect6"`
-	TpSysEnterRead      *ebpf.Program `ebpf:"tp_sys_enter_read"`
-	TpSysEnterRecvfrom  *ebpf.Program `ebpf:"tp_sys_enter_recvfrom"`
-	TpSysEnterSendto    *ebpf.Program `ebpf:"tp_sys_enter_sendto"`
-	TpSysEnterWrite     *ebpf.Program `ebpf:"tp_sys_enter_write"`
-	TpSysExitAccept4    *ebpf.Program `ebpf:"tp_sys_exit_accept4"`
-	TpSysExitClone      *ebpf.Program `ebpf:"tp_sys_exit_clone"`
-	TpSysExitConnect    *ebpf.Program `ebpf:"tp_sys_exit_connect"`
-	TpSysExitEpollWait  *ebpf.Program `ebpf:"tp_sys_exit_epoll_wait"`
-	TpSysExitFutex      *ebpf.Program `ebpf:"tp_sys_exit_futex"`
-	TpSysExitGetrandom  *ebpf.Program `ebpf:"tp_sys_exit_getrandom"`
-	TpSysExitPoll       *ebpf.Program `ebpf:"tp_sys_exit_poll"`
-	TpSysExitPpoll      *ebpf.Program `ebpf:"tp_sys_exit_ppoll"`
-	TpSysExitPselect6   *ebpf.Program `ebpf:"tp_sys_exit_pselect6"`
-	TpSysExitRead       *ebpf.Program `ebpf:"tp_sys_exit_read"`
-	TpSysExitRecvfrom   *ebpf.Program `ebpf:"tp_sys_exit_recvfrom"`
-	TpSysExitSendto     *ebpf.Program `ebpf:"tp_sys_exit_sendto"`
-	TpSysExitWrite      *ebpf.Program `ebpf:"tp_sys_exit_write"`
+	TpSysEnterAccept4      *ebpf.Program `ebpf:"tp_sys_enter_accept4"`
+	TpSysEnterClockGettime *ebpf.Program `ebpf:"tp_sys_enter_clock_gettime"`
+	TpSysEnterClone        *ebpf.Program `ebpf:"tp_sys_enter_clone"`
+	TpSysEnterConnect      *ebpf.Program `ebpf:"tp_sys_enter_connect"`
+	TpSysEnterEpollWait    *ebpf.Program `ebpf:"tp_sys_enter_epoll_wait"`
+	TpSysEnterFutex        *ebpf.Program `ebpf:"tp_sys_enter_futex"`
+	TpSysEnterGetrandom    *ebpf.Program `ebpf:"tp_sys_enter_getrandom"`
+	TpSysEnterPoll         *ebpf.Program `ebpf:"tp_sys_enter_poll"`
+	TpSysEnterPpoll        *ebpf.Program `ebpf:"tp_sys_enter_ppoll"`
+	TpSysEnterPselect6     *ebpf.Program `ebpf:"tp_sys_enter_pselect6"`
+	TpSysEnterRead         *ebpf.Program `ebpf:"tp_sys_enter_read"`
+	TpSysEnterRecvfrom     *ebpf.Program `ebpf:"tp_sys_enter_recvfrom"`
+	TpSysEnterSendto       *ebpf.Program `ebpf:"tp_sys_enter_sendto"`
+	TpSysEnterWrite        *ebpf.Program `ebpf:"tp_sys_enter_write"`
+	TpSysExitAccept4       *ebpf.Program `ebpf:"tp_sys_exit_accept4"`
+	TpSysExitClockGettime  *ebpf.Program `ebpf:"tp_sys_exit_clock_gettime"`
+	TpSysExitClone         *ebpf.Program `ebpf:"tp_sys_exit_clone"`
+	TpSysExitConnect       *ebpf.Program `ebpf:"tp_sys_exit_connect"`
+	TpSysExitEpollWait     *ebpf.Program `ebpf:"tp_sys_exit_epoll_wait"`
+	TpSysExitFutex         *ebpf.Program `ebpf:"tp_sys_exit_futex"`
+	TpSysExitGetrandom     *ebpf.Program `ebpf:"tp_sys_exit_getrandom"`
+	TpSysExitPoll          *ebpf.Program `ebpf:"tp_sys_exit_poll"`
+	TpSysExitPpoll         *ebpf.Program `ebpf:"tp_sys_exit_ppoll"`
+	TpSysExitPselect6      *ebpf.Program `ebpf:"tp_sys_exit_pselect6"`
+	TpSysExitRead          *ebpf.Program `ebpf:"tp_sys_exit_read"`
+	TpSysExitRecvfrom      *ebpf.Program `ebpf:"tp_sys_exit_recvfrom"`
+	TpSysExitSendto        *ebpf.Program `ebpf:"tp_sys_exit_sendto"`
+	TpSysExitWrite         *ebpf.Program `ebpf:"tp_sys_exit_write"`
 }
 
 func (p *iotracerPrograms) Close() error {
 	return _IotracerClose(
 		p.TpSysEnterAccept4,
+		p.TpSysEnterClockGettime,
 		p.TpSysEnterClone,
 		p.TpSysEnterConnect,
 		p.TpSysEnterEpollWait,
@@ -192,6 +197,7 @@ func (p *iotracerPrograms) Close() error {
 		p.TpSysEnterSendto,
 		p.TpSysEnterWrite,
 		p.TpSysExitAccept4,
+		p.TpSysExitClockGettime,
 		p.TpSysExitClone,
 		p.TpSysExitConnect,
 		p.TpSysExitEpollWait,
