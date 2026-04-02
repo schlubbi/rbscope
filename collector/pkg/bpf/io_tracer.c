@@ -35,7 +35,8 @@
 #define IO_OP_ACCEPT4    10
 #define IO_OP_FUTEX      11
 #define IO_OP_CLONE      12
-#define IO_OP_GETRANDOM  13
+#define IO_OP_GETRANDOM       13
+#define IO_OP_CLOCK_GETTIME   14
 
 // Syscall tags — arbitrary identifiers used to distinguish syscalls
 // in the inflight map. Not actual NR values.
@@ -52,6 +53,7 @@
 #define SYS_FUTEX      105
 #define SYS_CLONE      106
 #define SYS_GETRANDOM  107
+#define SYS_CLOCK_GETTIME 108
 
 // Minimum latency (in ns) to emit poll-family and filtered events.
 // Polls/futex/getrandom shorter than this are suppressed.
@@ -158,7 +160,8 @@ static __always_inline u32 syscall_to_op(u32 nr) {
     case SYS_ACCEPT4:    return IO_OP_ACCEPT4;
     case SYS_FUTEX:      return IO_OP_FUTEX;
     case SYS_CLONE:      return IO_OP_CLONE;
-    case SYS_GETRANDOM:  return IO_OP_GETRANDOM;
+    case SYS_GETRANDOM:       return IO_OP_GETRANDOM;
+    case SYS_CLOCK_GETTIME:   return IO_OP_CLOCK_GETTIME;
     default:             return 0;
     }
 }
@@ -188,7 +191,8 @@ static __always_inline void record_exit(void *ctx, long ret) {
     // Zero-timeout polls are readiness checks; uncontended futexes and
     // fast getrandom calls are noise.
     if (((syscall_nr >= SYS_POLL && syscall_nr <= SYS_PSELECT6) ||
-         syscall_nr == SYS_FUTEX || syscall_nr == SYS_GETRANDOM) &&
+         syscall_nr == SYS_FUTEX || syscall_nr == SYS_GETRANDOM ||
+         syscall_nr == SYS_CLOCK_GETTIME) &&
         latency < MIN_LATENCY_FILTER_NS) {
         bpf_map_delete_elem(&inflight, &tid);
         return;
@@ -485,6 +489,26 @@ int tp_sys_enter_getrandom(struct trace_event_raw_sys_enter *ctx) {
 
 SEC("tp/syscalls/sys_exit_getrandom")
 int tp_sys_exit_getrandom(struct trace_event_raw_sys_exit *ctx) {
+    if (!pid_allowed()) return 0;
+    record_exit(ctx, ctx->ret);
+    return 0;
+}
+
+// ---- tracepoints: clock_gettime ------------------------------------------
+// clock_gettime(clockid_t clock_id, struct timespec *tp)
+// CLOCK_THREAD_CPUTIME_ID and CLOCK_PROCESS_CPUTIME_ID hit the real syscall
+// (not vDSO). ~1K/sec per worker. 1ms filter keeps only slow calls.
+// The clock_id is stored in the fd field for marker context.
+
+SEC("tp/syscalls/sys_enter_clock_gettime")
+int tp_sys_enter_clock_gettime(struct trace_event_raw_sys_enter *ctx) {
+    if (!pid_allowed()) return 0;
+    record_enter(SYS_CLOCK_GETTIME, (u32)ctx->args[0]);
+    return 0;
+}
+
+SEC("tp/syscalls/sys_exit_clock_gettime")
+int tp_sys_exit_clock_gettime(struct trace_event_raw_sys_exit *ctx) {
     if (!pid_allowed()) return 0;
     record_exit(ctx, ctx->ret);
     return 0;

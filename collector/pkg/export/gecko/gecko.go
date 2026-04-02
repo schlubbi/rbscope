@@ -589,6 +589,8 @@ func buildMarkers(tb *threadBuilder, tl *pb.ThreadTimeline) MarkersTable {
 			markerName = "Thread Create"
 		case "getrandom":
 			markerName = "Entropy"
+		case "clock_gettime":
+			markerName = "Timing"
 		}
 		nameIdx := tb.internString(markerName)
 
