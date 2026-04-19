@@ -374,11 +374,11 @@ func runCapture(_ *cobra.Command, _ []string) error {
 
 	// Start Go CPU profiling if requested.
 	if flagCapturePprof != "" {
-		pprofFile, err := os.Create(flagCapturePprof)
+		pprofFile, err := os.Create(flagCapturePprof) //nolint:gosec // G304: user-provided output path is intentional
 		if err != nil {
 			return fmt.Errorf("create pprof file: %w", err)
 		}
-		defer pprofFile.Close()
+		defer func() { _ = pprofFile.Close() }()
 		if err := pprof.StartCPUProfile(pprofFile); err != nil {
 			return fmt.Errorf("start pprof: %w", err)
 		}
