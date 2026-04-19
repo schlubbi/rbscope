@@ -226,10 +226,15 @@ func (b *Builder) Ingest(event any) {
 			frameIDs = append(frameIDs, b.frames.Intern(f.Label, f.Path, f.Line))
 		}
 
-		// Resolve and append native C frames from bpf_get_stack
+		// Resolve and prepend native C frames from bpf_get_stack.
+		// Native frames are the innermost (deepest) part of the stack —
+		// they sit below the Ruby frames in the call chain:
+		//   Ruby: main → Rails → Trilogy#query  (outermost / root)
+		//   Native: rb_funcallv → write          (innermost / leaf)
+		// frameIDs is leaf-first, so native goes at the front.
 		if len(ev.NativeStackIPs) > 0 && b.resolver != nil {
 			nativeFrames := b.resolveNativeStack(ev.NativeStackIPs)
-			frameIDs = append(frameIDs, nativeFrames...)
+			frameIDs = append(nativeFrames, frameIDs...)
 		}
 
 		sample := &pb.Sample{
@@ -409,10 +414,10 @@ func (b *Builder) Ingest(event any) {
 			frameIDs[i] = rf.id
 		}
 
-		// Resolve native stack IPs
+		// Resolve native stack IPs — prepend as innermost (leaf) frames
 		if len(ev.NativeStackIPs) > 0 && b.resolver != nil {
 			nativeFrames := b.resolveNativeStack(ev.NativeStackIPs)
-			frameIDs = append(frameIDs, nativeFrames...)
+			frameIDs = append(nativeFrames, frameIDs...)
 		}
 
 		sample := &pb.Sample{
