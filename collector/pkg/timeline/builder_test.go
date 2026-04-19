@@ -659,9 +659,9 @@ func TestShouldFilterNativeFrame(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := shouldFilterNativeFrame(tt.funcName, tt.libPath, tt.isRubyVM)
+		got := shouldFilterNativeFrame(tt.funcName, tt.libPath, tt.isRubyVM, false)
 		if got != tt.want {
-			t.Errorf("shouldFilterNativeFrame(%q, %q, %v) = %v, want %v (%s)",
+			t.Errorf("shouldFilterNativeFrame(%q, %q, %v, false) = %v, want %v (%s)",
 				tt.funcName, tt.libPath, tt.isRubyVM, got, tt.want, tt.reason)
 		}
 	}

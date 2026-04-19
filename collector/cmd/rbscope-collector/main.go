@@ -54,6 +54,7 @@ var (
 	flagCaptureRubyPath     string
 	flagCapturePyroscopeURL string
 	flagCapturePprof        string
+	flagCaptureNativeAll    bool
 )
 
 func main() {
@@ -107,6 +108,7 @@ func captureCmd() *cobra.Command {
 	f.StringVar(&flagCaptureRubyPath, "ruby-path", "", "Path to libruby.so with DWARF (required for --mode=bpf)")
 	f.StringVar(&flagCapturePyroscopeURL, "pyroscope-url", "http://localhost:4040", "Pyroscope server URL (for --format=pyroscope)")
 	f.StringVar(&flagCapturePprof, "pprof", "", "Write Go CPU profile to this file during capture")
+	f.BoolVar(&flagCaptureNativeAll, "native-all", false, "Include Ruby VM native frames (libruby internals) in profile")
 	_ = cmd.MarkFlagRequired("pid")
 
 	return cmd
@@ -201,6 +203,7 @@ func runCapture(_ *cobra.Command, _ []string) error {
 		// Timeline-based formats: accumulate into timeline builder, export at end.
 		hostname, _ := os.Hostname()
 		tb = timeline.NewBuilder("capture", hostname, flagCapturePID, 99)
+		tb.SetNativeAll(flagCaptureNativeAll)
 		// Set up symbol resolver for native stack resolution
 		if resolver, err := symbols.NewResolver(flagCapturePID); err == nil {
 			tb.SetResolver(resolver)
