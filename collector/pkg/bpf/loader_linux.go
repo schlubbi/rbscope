@@ -171,6 +171,8 @@ func (r *RealBPF) loadIOTracer() error {
 		{"syscalls/sys_exit_clone", ioObjs.TpSysExitClone},
 		{"syscalls/sys_enter_getrandom", ioObjs.TpSysEnterGetrandom},
 		{"syscalls/sys_exit_getrandom", ioObjs.TpSysExitGetrandom},
+		{"syscalls/sys_enter_clock_gettime", ioObjs.TpSysEnterClockGettime},
+		{"syscalls/sys_exit_clock_gettime", ioObjs.TpSysExitClockGettime},
 	}
 
 	for _, tp := range tracepoints {

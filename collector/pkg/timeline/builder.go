@@ -49,6 +49,7 @@ type Builder struct {
 
 	allocResolveLogCount int                 // throttle diagnostic log messages
 	seenPIDs             map[uint32]struct{} // PIDs we've eagerly opened mem for
+	nativeAll            bool                // include Ruby VM native frames
 }
 
 // NewBuilder creates a Builder for a new capture window.
@@ -93,6 +94,13 @@ func (b *Builder) CloseFrameResolver() {
 // PIDs for dynamically forked workers. Called lazily when a new PID is seen.
 func (b *Builder) SetPIDDiscoverer(fn func(hostPID uint32) (containerPID uint32, ok bool)) {
 	b.pidDiscoverer = fn
+}
+
+// SetNativeAll controls whether Ruby VM native frames (libruby internals)
+// are included in the profile. When true, frames from libruby.so and the
+// ruby binary are shown alongside C extension frames.
+func (b *Builder) SetNativeAll(v bool) {
+	b.nativeAll = v
 }
 
 // discoverPIDMapping checks if the given PID needs host→container mapping.
@@ -218,10 +226,15 @@ func (b *Builder) Ingest(event any) {
 			frameIDs = append(frameIDs, b.frames.Intern(f.Label, f.Path, f.Line))
 		}
 
-		// Resolve and append native C frames from bpf_get_stack
+		// Resolve and prepend native C frames from bpf_get_stack.
+		// Native frames are the innermost (deepest) part of the stack —
+		// they sit below the Ruby frames in the call chain:
+		//   Ruby: main → Rails → Trilogy#query  (outermost / root)
+		//   Native: rb_funcallv → write          (innermost / leaf)
+		// frameIDs is leaf-first, so native goes at the front.
 		if len(ev.NativeStackIPs) > 0 && b.resolver != nil {
 			nativeFrames := b.resolveNativeStack(ev.NativeStackIPs)
-			frameIDs = append(frameIDs, nativeFrames...)
+			frameIDs = append(nativeFrames, frameIDs...)
 		}
 
 		sample := &pb.Sample{
@@ -401,10 +414,10 @@ func (b *Builder) Ingest(event any) {
 			frameIDs[i] = rf.id
 		}
 
-		// Resolve native stack IPs
+		// Resolve native stack IPs — prepend as innermost (leaf) frames
 		if len(ev.NativeStackIPs) > 0 && b.resolver != nil {
 			nativeFrames := b.resolveNativeStack(ev.NativeStackIPs)
-			frameIDs = append(frameIDs, nativeFrames...)
+			frameIDs = append(nativeFrames, frameIDs...)
 		}
 
 		sample := &pb.Sample{
@@ -621,7 +634,7 @@ func (b *Builder) resolveNativeStack(ips []uint64) []uint32 {
 	var frameIDs []uint32
 	for _, ip := range ips {
 		funcName, libPath, isRubyVM := b.resolver.ResolveFunc(ip)
-		if shouldFilterNativeFrame(funcName, libPath, isRubyVM) {
+		if shouldFilterNativeFrame(funcName, libPath, isRubyVM, b.nativeAll) {
 			continue
 		}
 		fid := b.frames.Intern(funcName, libPath, 0)
@@ -632,9 +645,9 @@ func (b *Builder) resolveNativeStack(ips []uint64) []uint32 {
 
 // shouldFilterNativeFrame returns true if a resolved native frame should
 // be excluded from the profile output.
-func shouldFilterNativeFrame(funcName, libPath string, isRubyVM bool) bool {
-	// Ruby VM internals — we already have Ruby-level frames from the gem
-	if isRubyVM {
+func shouldFilterNativeFrame(funcName, libPath string, isRubyVM, nativeAll bool) bool {
+	// Ruby VM internals — filtered by default, kept with --native-all
+	if isRubyVM && !nativeAll {
 		return true
 	}
 	// Empty/unresolved frames

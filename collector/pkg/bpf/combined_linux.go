@@ -3,7 +3,9 @@
 package bpf
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -76,33 +78,39 @@ func (c *CombinedBPF) Load() error {
 	type readerEntry struct {
 		rd   *ringbuf.Reader
 		size int
+		name string
 	}
 	var entries []readerEntry
 
 	if c.walker.reader != nil {
-		entries = append(entries, readerEntry{c.walker.reader, 4096})
+		entries = append(entries, readerEntry{c.walker.reader, 4096, "walker-cpu"})
 	}
 	if c.gem.reader != nil {
-		entries = append(entries, readerEntry{c.gem.reader, 8192})
+		entries = append(entries, readerEntry{c.gem.reader, 8192, "gem-alloc"})
 	}
 	if c.walker.ioReader != nil {
-		entries = append(entries, readerEntry{c.walker.ioReader, 4096})
+		entries = append(entries, readerEntry{c.walker.ioReader, 4096, "walker-io"})
 	}
 	if c.walker.schedReader != nil {
-		entries = append(entries, readerEntry{c.walker.schedReader, 2048})
+		entries = append(entries, readerEntry{c.walker.schedReader, 2048, "walker-sched"})
 	}
 	if c.gem.gvlReader != nil {
-		entries = append(entries, readerEntry{c.gem.gvlReader, 1 << 18}) // 256K
+		entries = append(entries, readerEntry{c.gem.gvlReader, 1 << 18, "gem-gvl"}) // 256K
 	}
 	if c.gem.gvlStackReader != nil {
-		entries = append(entries, readerEntry{c.gem.gvlStackReader, 8192})
+		entries = append(entries, readerEntry{c.gem.gvlStackReader, 8192, "gem-gvl-stack"})
+	}
+
+	fmt.Fprintf(os.Stderr, "rbscope: combined mode: %d drain goroutines\n", len(entries))
+	for _, e := range entries {
+		fmt.Fprintf(os.Stderr, "rbscope:   %s (chan=%d)\n", e.name, e.size)
 	}
 
 	c.chans = make([]chan []byte, len(entries))
 	for i, e := range entries {
 		c.chans[i] = make(chan []byte, e.size)
 		c.wg.Add(1)
-		go c.drainReader(e.rd, c.chans[i])
+		go c.drainReader(e.rd, c.chans[i], e.name)
 	}
 
 	return nil
@@ -110,12 +118,15 @@ func (c *CombinedBPF) Load() error {
 
 // drainReader continuously reads from a single kernel ring buffer and pushes
 // raw event copies into its dedicated channel.
-func (c *CombinedBPF) drainReader(rd *ringbuf.Reader, ch chan []byte) {
+func (c *CombinedBPF) drainReader(rd *ringbuf.Reader, ch chan []byte, name string) {
 	defer c.wg.Done()
+	fmt.Fprintf(os.Stderr, "rbscope: drain %s: started\n", name)
+	var count uint64
 
 	for {
 		select {
 		case <-c.stopCh:
+			fmt.Fprintf(os.Stderr, "rbscope: drain %s: stopped (stopCh), %d events drained\n", name, count)
 			return
 		default:
 		}
@@ -123,15 +134,21 @@ func (c *CombinedBPF) drainReader(rd *ringbuf.Reader, ch chan []byte) {
 		rd.SetDeadline(time.Now().Add(50 * time.Millisecond))
 		record, err := rd.Read()
 		if err != nil {
+			// Log non-deadline errors (ErrClosed = ring buffer was closed under us)
+			if !errors.Is(err, os.ErrDeadlineExceeded) {
+				fmt.Fprintf(os.Stderr, "rbscope: drain %s: read error: %v (after %d events)\n", name, err, count)
+			}
 			continue
 		}
 
+		count++
 		data := make([]byte, len(record.RawSample))
 		copy(data, record.RawSample)
 
 		select {
 		case ch <- data:
 		case <-c.stopCh:
+			fmt.Fprintf(os.Stderr, "rbscope: drain %s: stopped (stopCh during send), %d events drained\n", name, count)
 			return
 		}
 	}
