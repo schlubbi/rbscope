@@ -63,7 +63,7 @@ func main() {
 		Short: "eBPF-based Ruby profiling collector",
 	}
 
-	root.AddCommand(runCmd(), captureCmd(), demoCmd(), versionCmd())
+	root.AddCommand(runCmd(), captureCmd(), profileCmd(), demoCmd(), versionCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
